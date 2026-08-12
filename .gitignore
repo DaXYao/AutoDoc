@@ -1,0 +1,21 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+packages/web/dist/
+*.tsbuildinfo
+
+# AutoDoc 运行时数据（批注、快照等用户数据不入库，本地保留）
+.autodoc/
+
+# 日志与环境
+*.log
+.env
+.env.*
+
+# 编辑器与系统文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
