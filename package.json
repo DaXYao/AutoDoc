@@ -1,0 +1,23 @@
+{
+  "name": "autodoc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "build": "pnpm -r run build",
+    "dev": "pnpm --filter @autodoc/core run build && pnpm -r --parallel run dev",
+    "test": "pnpm -r --if-present run test",
+    "lint": "eslint . && pnpm -r run typecheck",
+    "docgen": "node packages/server/dist/cli.js"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.15.0",
+    "eslint": "^9.15.0",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.15.0"
+  }
+}

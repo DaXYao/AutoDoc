@@ -1,0 +1,21 @@
+{
+  "include": ["src/**/*.ts"],
+  "classification": {
+    "rules": [
+      {
+        "category": "business",
+        "match": { "pathPatterns": ["**/controllers/**"], "namePatterns": ["^handle"] }
+      },
+      {
+        "category": "utility",
+        "match": { "pathPatterns": ["**/utils/**"] }
+      },
+      {
+        "category": "implementation",
+        "match": { "pathPatterns": ["**/services/**"] }
+      }
+    ],
+    "fallback": "pending"
+  },
+  "storage": { "type": "json", "path": ".autodoc/autodoc.json" }
+}

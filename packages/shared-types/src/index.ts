@@ -1,0 +1,216 @@
+/**
+ * AutoDoc 前后端共享领域类型。
+ * 约束（见 AGENTS.md）：前后端禁止各自重复定义这些类型。
+ */
+
+/** 三类方法角色 */
+export type Category = 'business' | 'implementation' | 'utility'
+
+/** 置信度不足、等待用户确认的分类 */
+export type PendingCategory = 'pending'
+
+export type FunctionCategory = Category | PendingCategory
+
+/** 批注挂载层级 */
+export type AnnotationTargetType = 'function' | 'file' | 'module'
+
+/** 用户批注：手动添加，与自动生成内容严格分离 */
+export interface Annotation {
+  id: string
+  targetType: AnnotationTargetType
+  /** 关联目标：函数为稳定 ID；文件为相对路径 */
+  targetId: string
+  author: string
+  /** Markdown 文本 */
+  content: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** 注释块：方法体内「注释 + 紧随代码块」成对提取 */
+export interface CodeBlock {
+  /** 所属函数稳定 ID */
+  functionId: string
+  commentText: string
+  codeText: string
+  /** 1 基行号（含注释起点与代码终点） */
+  startLine: number
+  endLine: number
+}
+
+export type ChangeType = 'added' | 'modified' | 'deleted' | 'renamed'
+
+/** 函数级变更记录（全量归档，展示层只取最近三条） */
+export interface ChangeRecord {
+  id: string
+  /** 关联函数稳定 ID */
+  targetId: string
+  date: string
+  type: ChangeType
+  description: string
+}
+
+/** 调用边；calleeId 为 null 表示外部/未解析，禁止强行猜测 */
+export interface CallEdge {
+  callerId: string
+  calleeName: string
+  calleeId: string | null
+  calleeCategory: FunctionCategory | 'external'
+}
+
+export type FunctionKind = 'function' | 'method'
+
+export type Visibility = 'public' | 'private' | 'protected' | 'exported' | 'module-local'
+
+/** 解析出的单个函数/方法文档（自动生成部分） */
+export interface FunctionDoc {
+  /** 稳定 ID：相对路径 + 类名 + 方法名 + 参数签名哈希 */
+  id: string
+  name: string
+  className: string | null
+  kind: FunctionKind
+  signature: string
+  params: string[]
+  returnType: string | null
+  visibility: Visibility
+  decorators: string[]
+  exported: boolean
+  category: FunctionCategory
+  /** 用途说明：优先取文档注释，其次模板化描述 */
+  purpose: string
+  docComment: string | null
+  /** 函数体结构指纹，用于变更检测 */
+  fingerprint: string
+  startLine: number
+  endLine: number
+  calls: CallEdge[]
+  codeBlocks: CodeBlock[]
+}
+
+export interface FileDoc {
+  /** 文件 ID：相对路径（POSIX 风格） */
+  fileId: string
+  path: string
+  language: string
+  functions: FunctionDoc[]
+}
+
+/** 服务端聚合后下发给前端的函数视图（批注/变更与文档分离字段） */
+export interface FunctionDocView extends FunctionDoc {
+  annotations: Annotation[]
+  /** 最近三次变更 */
+  recentChanges: ChangeRecord[]
+  /** 已归档（更早）变更条数 */
+  archivedChangeCount: number
+}
+
+export interface FileDocView {
+  file: FileDoc
+  /** 文件级批注 */
+  annotations: Annotation[]
+  functions: FunctionDocView[]
+}
+
+export interface FileSummary {
+  fileId: string
+  path: string
+  language: string
+  total: number
+  counts: Record<FunctionCategory, number>
+}
+
+/** 搜索索引条目（前端 Fuse.js 使用） */
+export interface FunctionIndexEntry {
+  functionId: string
+  name: string
+  className: string | null
+  fileId: string
+  filePath: string
+  category: FunctionCategory
+  purpose: string
+}
+
+/* ------------------------- 配置类型 ------------------------- */
+
+/** 单条可配置分类规则；分类完全由配置驱动，禁止在代码中硬编码 */
+export interface ClassificationRule {
+  category: Category
+  /** 数字越小越优先，缺省按数组顺序 */
+  priority?: number
+  match: {
+    /** 装饰器/注解名（任一命中） */
+    decorators?: string[]
+    /** 文件路径 glob（任一命中） */
+    pathPatterns?: string[]
+    /** 函数名正则（任一命中） */
+    namePatterns?: string[]
+    /** 可见性（任一命中） */
+    visibility?: Visibility[]
+    /** 是否导出 */
+    exported?: boolean
+  }
+}
+
+export interface ClassificationConfig {
+  rules?: ClassificationRule[]
+  /** 无规则命中时的兜底分类，缺省 'pending' */
+  fallback?: FunctionCategory
+}
+
+export interface DefaultExpandConfig {
+  fileHeader?: boolean
+  business?: boolean
+  implementation?: boolean
+  utility?: boolean
+  pending?: boolean
+  /** 方法卡片内二级区块 */
+  callGraph?: boolean
+  codeBlocks?: boolean
+  changes?: boolean
+  annotations?: boolean
+}
+
+export interface StorageConfig {
+  type: 'sqlite' | 'json'
+  /** 缺省 .autodoc/autodoc.db 或 .autodoc/autodoc.json */
+  path?: string
+}
+
+export interface EditorConfig {
+  /** 源码跳转链接模板，占位符 {file}、{line}，如 vscode://file/{file}:{line} */
+  linkTemplate?: string
+}
+
+export interface AutodocConfig {
+  /** 待扫描源码的包含 glob（相对项目根） */
+  include?: string[]
+  /** 排除 glob */
+  exclude?: string[]
+  languages?: string[]
+  classification?: ClassificationConfig
+  ui?: {
+    defaultExpand?: DefaultExpandConfig
+  }
+  storage?: StorageConfig
+  editor?: EditorConfig
+}
+
+/** /api/meta 返回的服务元信息 */
+export interface ServerMeta {
+  generatedAt: string
+  root: string
+  readOnly: boolean
+  ui: { defaultExpand: Required<DefaultExpandConfig> }
+  editor: EditorConfig
+  storage: { type: 'sqlite' | 'json' }
+  fileCount: number
+  functionCount: number
+}
+
+/** export 模式内嵌数据 */
+export interface ExportData {
+  meta: ServerMeta
+  files: FileDocView[]
+  summaries: FileSummary[]
+  functionIndex: FunctionIndexEntry[]
+}
