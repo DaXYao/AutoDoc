@@ -9,6 +9,9 @@ packages/web/dist/
 # AutoDoc 运行时数据（批注、快照等用户数据不入库，本地保留）
 .autodoc/
 
+# docgen export 静态站点输出
+autodoc-site/
+
 # 日志与环境
 *.log
 .env

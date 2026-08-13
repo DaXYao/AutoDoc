@@ -1,0 +1,28 @@
+{
+  "name": "@autodoc/web",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AutoDoc Web 前端：文件文档页、三分类区块、搜索、批注、折叠持久化",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "vue-tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@autodoc/shared-types": "workspace:*",
+    "fuse.js": "^7.0.0",
+    "markdown-it": "^14.1.0",
+    "naive-ui": "^2.40.1",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/markdown-it": "^14.1.2",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3",
+    "vue-tsc": "^2.1.10"
+  }
+}

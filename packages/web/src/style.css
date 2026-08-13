@@ -1,0 +1,31 @@
+@import 'tailwindcss';
+
+/* 批注 Markdown 渲染样式（与 Naive UI 主题协调的最小排版） */
+.annotation-body {
+  line-height: 1.7;
+  word-break: break-word;
+}
+.annotation-body p {
+  margin: 0.35em 0;
+}
+.annotation-body code {
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.06);
+  font-size: 0.9em;
+}
+.annotation-body pre {
+  padding: 0.6em 0.8em;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.05);
+  overflow-x: auto;
+}
+.annotation-body a {
+  color: var(--n-color-target, #2080f0);
+  text-decoration: underline;
+}
+.annotation-body ul,
+.annotation-body ol {
+  padding-left: 1.4em;
+  margin: 0.35em 0;
+}

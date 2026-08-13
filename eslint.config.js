@@ -7,6 +7,7 @@ export default tseslint.config(
     ignores: [
       '**/dist/**',
       '**/node_modules/**',
+      'autodoc-site/**',
       'packages/web/src/**/*.vue',
       'packages/core/test/fixtures/**'
     ]
