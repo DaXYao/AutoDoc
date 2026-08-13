@@ -1,0 +1,45 @@
+{
+  "include": [
+    "packages/core/src/**/*.ts",
+    "packages/server/src/**/*.ts",
+    "packages/shared-types/src/**/*.ts"
+  ],
+  "exclude": ["**/*.test.ts", "**/*.spec.ts"],
+  "classification": {
+    "fallback": "pending",
+    "rules": [
+      {
+        "category": "implementation",
+        "priority": 10,
+        "match": {
+          "pathPatterns": [
+            "packages/core/src/parser/**",
+            "packages/core/src/storage/**",
+            "packages/core/src/classify.ts",
+            "packages/core/src/identity.ts",
+            "packages/core/src/config.ts",
+            "packages/core/src/files.ts",
+            "packages/server/src/**"
+          ]
+        }
+      },
+      {
+        "category": "utility",
+        "priority": 20,
+        "match": {
+          "namePatterns": ["^format", "^is", "^to[A-Z]", "^make", "^normalize"]
+        }
+      }
+    ]
+  },
+  "ui": {
+    "defaultExpand": {
+      "business": true,
+      "implementation": false,
+      "annotations": true
+    }
+  },
+  "storage": {
+    "type": "sqlite"
+  }
+}
