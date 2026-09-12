@@ -1,6 +1,7 @@
 import { extname } from 'node:path'
 import type { LanguageParser } from './types.js'
 import { JsFamilyParser } from './jsFamily.js'
+import { CSharpParser } from './csharp.js'
 import { createParser } from './wasm.js'
 
 /**
@@ -30,7 +31,7 @@ export const parserRegistry = new ParserRegistry()
 
 let defaultsRegistered = false
 
-/** 注册内置语言解析器（TypeScript / TSX / JavaScript），幂等 */
+/** 注册内置语言解析器（TypeScript / TSX / JavaScript / C#），幂等 */
 export async function ensureDefaultParsers(): Promise<void> {
   if (defaultsRegistered) return
   defaultsRegistered = true
@@ -38,9 +39,11 @@ export async function ensureDefaultParsers(): Promise<void> {
   const typescript = await createParser('tree-sitter-typescript')
   const tsx = await createParser('tree-sitter-tsx')
   const javascript = await createParser('tree-sitter-javascript')
+  const csharp = await createParser('tree-sitter-c-sharp')
   parserRegistry.register(new JsFamilyParser('typescript', ['ts'], typescript))
   parserRegistry.register(new JsFamilyParser('tsx', ['tsx'], tsx))
   parserRegistry.register(
     new JsFamilyParser('javascript', ['js', 'jsx', 'mjs', 'cjs'], javascript)
   )
+  parserRegistry.register(new CSharpParser('csharp', ['cs'], csharp))
 }

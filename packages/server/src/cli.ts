@@ -80,44 +80,51 @@ program
   .command('serve')
   .description('启动本地文档服务（REST API + Web 界面）')
   .option('-r, --root <dir>', '目标项目根目录', '.')
+  .option('-c, --config <file>', '显式指定 autodoc 配置文件（跳过 cosmiconfig 搜索）')
   .option('-p, --port <number>', '监听端口', String(DEFAULT_PORT))
   .option('--no-watch', '禁用源码变更自动重生成')
-  .action(async (options: { root: string; port: string; watch: boolean }) => {
-    const rootDir = resolveRoot(options.root)
-    const service = await createDocService(rootDir, warn)
-    console.log(
-      `[autodoc] 生成完成：${service.files.length} 个文件，存储类型 ${service.storage.kind}`
-    )
+  .action(
+    async (options: { root: string; config?: string; port: string; watch: boolean }) => {
+      const rootDir = resolveRoot(options.root)
+      const configPath = options.config ? resolve(process.cwd(), options.config) : undefined
+      const service = await createDocService(rootDir, warn, configPath)
+      console.log(
+        `[autodoc] 生成完成：${service.files.length} 个文件，存储类型 ${service.storage.kind}` +
+          (configPath ? `，配置 ${configPath}` : '')
+      )
 
-    let watcher: FSWatcher | null = null
-    if (options.watch) {
-      watcher = startWatcher(service)
-      console.log('[autodoc] 已启用变更监听（--no-watch 可关闭）')
+      let watcher: FSWatcher | null = null
+      if (options.watch) {
+        watcher = startWatcher(service)
+        console.log('[autodoc] 已启用变更监听（--no-watch 可关闭）')
+      }
+
+      const app = await buildApp({ service, webDist: WEB_DIST })
+      await app.listen({ port: Number(options.port) || DEFAULT_PORT, host: '127.0.0.1' })
+      console.log(`[autodoc] 文档服务已启动：http://127.0.0.1:${options.port}`)
+
+      const shutdown = async (): Promise<void> => {
+        await watcher?.close()
+        await app.close()
+        service.storage.close()
+        process.exit(0)
+      }
+      process.on('SIGINT', () => void shutdown())
+      process.on('SIGTERM', () => void shutdown())
     }
-
-    const app = await buildApp({ service, webDist: WEB_DIST })
-    await app.listen({ port: Number(options.port) || DEFAULT_PORT, host: '127.0.0.1' })
-    console.log(`[autodoc] 文档服务已启动：http://127.0.0.1:${options.port}`)
-
-    const shutdown = async (): Promise<void> => {
-      await watcher?.close()
-      await app.close()
-      service.storage.close()
-      process.exit(0)
-    }
-    process.on('SIGINT', () => void shutdown())
-    process.on('SIGTERM', () => void shutdown())
-  })
+  )
 
 program
   .command('export')
   .description('导出只读静态文档站点（含批注与最近三次变更）')
   .option('-r, --root <dir>', '目标项目根目录', '.')
+  .option('-c, --config <file>', '显式指定 autodoc 配置文件')
   .option('-o, --out <dir>', '输出目录', 'autodoc-site')
-  .action(async (options: { root: string; out: string }) => {
+  .action(async (options: { root: string; config?: string; out: string }) => {
     const rootDir = resolveRoot(options.root)
+    const configPath = options.config ? resolve(process.cwd(), options.config) : undefined
     const outDir = resolve(process.cwd(), options.out)
-    const service = await createDocService(rootDir, warn)
+    const service = await createDocService(rootDir, warn, configPath)
     const data = exportStaticSite(service, outDir, WEB_DIST)
     service.storage.close()
     console.log(
@@ -129,9 +136,11 @@ program
   .command('generate')
   .description('仅执行一次文档生成（不启动服务）')
   .option('-r, --root <dir>', '目标项目根目录', '.')
-  .action(async (options: { root: string }) => {
+  .option('-c, --config <file>', '显式指定 autodoc 配置文件')
+  .action(async (options: { root: string; config?: string }) => {
     const rootDir = resolveRoot(options.root)
-    const service = await createDocService(rootDir, warn)
+    const configPath = options.config ? resolve(process.cwd(), options.config) : undefined
+    const service = await createDocService(rootDir, warn, configPath)
     service.storage.close()
     console.log(`[autodoc] 生成完成：${service.files.length} 个文件`)
   })

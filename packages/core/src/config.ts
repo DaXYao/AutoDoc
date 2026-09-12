@@ -129,10 +129,16 @@ export interface NormalizedConfig {
 /**
  * 发现并校验 autodoc 配置（cosmiconfig：autodoc.config.{json,js,cjs,yaml} 等）。
  * 非法配置抛出带字段说明的错误，避免静默降级。
+ * 传入 explicitPath 时直接加载指定文件（跳过搜索），用于将配置放在仓库外部。
  */
-export async function loadConfig(rootDir: string): Promise<NormalizedConfig> {
+export async function loadConfig(
+  rootDir: string,
+  explicitPath?: string
+): Promise<NormalizedConfig> {
   const explorer = cosmiconfig(MODULE_NAME, { searchPlaces: SEARCH_PLACES })
-  const result = await explorer.search(rootDir)
+  const result = explicitPath
+    ? await explorer.load(explicitPath)
+    : await explorer.search(rootDir)
   const raw = result?.config ?? {}
 
   if (!validate(raw)) {

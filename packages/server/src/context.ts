@@ -13,12 +13,13 @@ export interface DocService {
 
 export type WarnFn = (message: string) => void
 
-/** 加载配置、初始化存储并执行首次全量生成 */
+/** 加载配置、初始化存储并执行首次全量生成；传入 configPath 时直接加载指定配置文件 */
 export async function createDocService(
   rootDir: string,
-  onWarn?: WarnFn
+  onWarn?: WarnFn,
+  configPath?: string
 ): Promise<DocService> {
-  const normalized = await loadConfig(rootDir)
+  const normalized = await loadConfig(rootDir, configPath)
   const storage = createStorage(normalized.config.storage, rootDir)
   storage.init()
   const { files } = await generateDocs({ rootDir, normalized, storage, onWarn })

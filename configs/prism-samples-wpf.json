@@ -1,0 +1,102 @@
+{
+  "include": ["**/*.cs"],
+  "exclude": [
+    "**/bin/**",
+    "**/obj/**",
+    "**/.vs/**",
+    "**/packages/**",
+    "**/*.g.cs",
+    "**/*.g.i.cs",
+    "**/AssemblyInfo.cs",
+    "**/*.Designer.cs"
+  ],
+  "classification": {
+    "fallback": "pending",
+    "rules": [
+      {
+        "category": "utility",
+        "priority": 10,
+        "match": {
+          "pathPatterns": [
+            "**/Converters/**",
+            "**/Helpers/**",
+            "**/Extensions/**",
+            "**/Behaviors/**",
+            "**/Common/**"
+          ]
+        }
+      },
+      {
+        "category": "business",
+        "priority": 15,
+        "match": {
+          "pathPatterns": [
+            "**/Views/**",
+            "**/ViewModels/**",
+            "**/App.xaml.cs"
+          ]
+        }
+      },
+      {
+        "category": "implementation",
+        "priority": 20,
+        "match": {
+          "pathPatterns": [
+            "**/Services/**",
+            "**/Modules/**",
+            "**/Prism/**",
+            "**/*.Core/**",
+            "**/Events/**",
+            "**/Dialogs/**",
+            "**/Regions/**"
+          ]
+        }
+      },
+      {
+        "category": "utility",
+        "priority": 30,
+        "match": {
+          "namePatterns": ["^Convert", "^Try", "^To[A-Z]", "^Format"]
+        }
+      },
+      {
+        "category": "business",
+        "priority": 35,
+        "match": {
+          "namePatterns": ["^On[A-Z]"]
+        }
+      },
+      {
+        "category": "implementation",
+        "priority": 40,
+        "match": {
+          "namePatterns": ["Module$", "Service$", "Repository$", "Region$", "Adapter$"]
+        }
+      },
+      {
+        "category": "implementation",
+        "priority": 45,
+        "match": {
+          "decorators": ["Module", "ModuleCatalog", "RegionAdapter"]
+        }
+      }
+    ]
+  },
+  "ui": {
+    "defaultExpand": {
+      "fileHeader": true,
+      "business": true,
+      "implementation": false,
+      "utility": false,
+      "pending": false,
+      "annotations": true
+    }
+  },
+  "storage": {
+    "type": "sqlite",
+    "path": "E:/AutoDoc/.autodoc/prism-samples-wpf.db"
+  },
+  "editor": {
+    "linkTemplate": "vscode://file/{file}:{line}"
+  }
+}
