@@ -1,6 +1,7 @@
 import type { Parser, Node as SyntaxNode } from 'web-tree-sitter'
 import type { CodeBlock, Visibility } from '@autodoc/shared-types'
-import type { LanguageParser, ParsedFunction } from './types.js'
+import { detectCallRole } from './role.js'
+import type { LanguageParser, ParsedCallSite, ParsedFunction } from './types.js'
 
 /**
  * JavaScript / TypeScript 系解析器（tree-sitter WASM）。
@@ -83,31 +84,34 @@ function extractParams(paramsNode: SyntaxNode | null): string[] {
   return namedKids(paramsNode).map(paramSignature)
 }
 
-/** 收集函数体内全部调用名；无法解析的由主流程归为「外部/未解析」 */
-function collectCalls(root: SyntaxNode | null): string[] {
-  const names: string[] = []
-  if (!root) return names
+/** 收集函数体内全部调用点（名称+行号+角色）；无法解析的由主流程归为「外部/未解析」 */
+function collectCalls(root: SyntaxNode | null): ParsedCallSite[] {
+  const sites: ParsedCallSite[] = []
+  if (!root) return sites
+  const push = (node: SyntaxNode, name: string): void => {
+    sites.push({ name, line: node.startPosition.row + 1, role: detectCallRole(node, name) })
+  }
   const visit = (node: SyntaxNode): void => {
     if (node.type === 'call_expression') {
       const fn = node.childForFieldName('function')
       if (fn) {
         if (fn.type === 'identifier') {
-          names.push(fn.text)
+          push(node, fn.text)
         } else if (fn.type === 'member_expression') {
           const property = fn.childForFieldName('property')
           if (property && property.type === 'property_identifier') {
-            names.push(property.text)
+            push(node, property.text)
           }
         }
       }
     } else if (node.type === 'new_expression') {
       const ctor = node.childForFieldName('constructor')
-      if (ctor && ctor.type === 'identifier') names.push(ctor.text)
+      if (ctor && ctor.type === 'identifier') push(node, ctor.text)
     }
     for (const child of namedKids(node)) visit(child)
   }
   visit(root)
-  return [...new Set(names)]
+  return sites
 }
 
 /**
@@ -209,7 +213,7 @@ export class JsFamilyParser implements LanguageParser {
       exported: opts.exported,
       docComment: findDocComment(opts.anchor),
       bodyText: opts.bodyNode ? opts.bodyNode.text : '',
-      calledNames: collectCalls(opts.bodyNode),
+      callSites: collectCalls(opts.bodyNode),
       codeBlocks: extractCodeBlocks(opts.bodyNode),
       startLine: startRow + 1,
       endLine: (opts.bodyNode ?? opts.node).endPosition.row + 1

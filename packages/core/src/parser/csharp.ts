@@ -1,6 +1,7 @@
 import type { Parser, Node as SyntaxNode } from 'web-tree-sitter'
 import type { CodeBlock, Visibility } from '@autodoc/shared-types'
-import type { LanguageParser, ParsedFunction } from './types.js'
+import { detectCallRole } from './role.js'
+import type { LanguageParser, ParsedCallSite, ParsedFunction } from './types.js'
 
 /**
  * C# 解析器（tree-sitter WASM，grammar = tree-sitter-c-sharp）。
@@ -112,13 +113,13 @@ function extractParams(paramsNode: SyntaxNode | null): string[] {
   return namedKids(paramsNode).map(paramSignature)
 }
 
-/** 收集函数体内所有调用名（含 new / 泛型 / 成员访问）；无法解析的由主流程归为「外部/未解析」 */
-function collectCalls(root: SyntaxNode | null): string[] {
-  const names: string[] = []
-  if (!root) return names
-  const pushName = (raw: string): void => {
+/** 收集函数体内所有调用点（名称+行号+角色，含 new / 泛型 / 成员访问）；无法解析的由主流程归为「外部/未解析」 */
+function collectCalls(root: SyntaxNode | null): ParsedCallSite[] {
+  const sites: ParsedCallSite[] = []
+  if (!root) return sites
+  const push = (node: SyntaxNode, raw: string): void => {
     const n = stripGenerics(raw)
-    if (n) names.push(n)
+    if (n) sites.push({ name: n, line: node.startPosition.row + 1, role: detectCallRole(node, n) })
   }
   const visit = (node: SyntaxNode): void => {
     switch (node.type) {
@@ -126,17 +127,17 @@ function collectCalls(root: SyntaxNode | null): string[] {
         const fn = node.childForFieldName('function')
         if (fn) {
           if (fn.type === 'identifier' || fn.type === 'generic_name') {
-            pushName(fn.text)
+            push(node, fn.text)
           } else if (fn.type === 'member_access_expression') {
             const name = fn.childForFieldName('name')
-            if (name) pushName(name.text)
+            if (name) push(node, name.text)
           }
         }
         break
       }
       case 'object_creation_expression': {
         const type = node.childForFieldName('type')
-        if (type) pushName(type.text)
+        if (type) push(node, type.text)
         break
       }
       default:
@@ -145,7 +146,7 @@ function collectCalls(root: SyntaxNode | null): string[] {
     for (const child of namedKids(node)) visit(child)
   }
   visit(root)
-  return [...new Set(names)]
+  return sites
 }
 
 /**
@@ -318,7 +319,7 @@ export class CSharpParser implements LanguageParser {
       exported: opts.exported,
       docComment: findDocComment(opts.anchor),
       bodyText,
-      calledNames: collectCalls(opts.bodyNode),
+      callSites: collectCalls(opts.bodyNode),
       codeBlocks: extractCSharpCodeBlocks(opts.bodyNode),
       startLine: Math.min(opts.anchor.startPosition.row, opts.node.startPosition.row) + 1,
       endLine: (opts.bodyNode ?? opts.node).endPosition.row + 1
@@ -395,7 +396,7 @@ export class CSharpParser implements LanguageParser {
         exported: visibility === 'public',
         docComment: findDocComment(node),
         bodyText: arrowBody.text,
-        calledNames: collectCalls(arrowBody),
+        callSites: collectCalls(arrowBody),
         codeBlocks: extractCSharpCodeBlocks(arrowBody),
         startLine: node.startPosition.row + 1,
         endLine: node.endPosition.row + 1
@@ -417,14 +418,14 @@ export class CSharpParser implements LanguageParser {
       ...bodies.flatMap((b) => attributesOf(b.node))
     ]
     const combinedBody = bodies.map((b) => b.bodyText).join('\n')
-    const allCalls: string[] = []
+    const allSites: ParsedCallSite[] = []
     const allBlocks: Omit<CodeBlock, 'functionId'>[] = []
     for (const b of bodies) {
       const bodyNode =
         b.node.childForFieldName('body') ??
         namedKids(b.node).find((c) => c.type === 'block' || c.type === 'arrow_expression_clause')
       if (!bodyNode) continue
-      allCalls.push(...collectCalls(bodyNode))
+      allSites.push(...collectCalls(bodyNode))
       allBlocks.push(...extractCSharpCodeBlocks(bodyNode))
     }
 
@@ -440,7 +441,7 @@ export class CSharpParser implements LanguageParser {
       exported: visibility === 'public',
       docComment: findDocComment(node),
       bodyText: combinedBody,
-      calledNames: [...new Set(allCalls)],
+      callSites: allSites,
       codeBlocks: allBlocks,
       startLine: node.startPosition.row + 1,
       endLine: node.endPosition.row + 1

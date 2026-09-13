@@ -137,13 +137,21 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
       const fn = functions[index]
       const edges: CallEdge[] = []
       const seen = new Set<string>()
-      for (const calledName of parsed.calledNames) {
+      // 按调用点行号排序 = 源码执行顺序；同名调用去重，保留首次出现的行号与角色
+      const sites = [...parsed.callSites].sort((a, b) => a.line - b.line)
+      for (const site of sites) {
+        const calledName = site.name
+        if (seen.has(calledName)) continue
+        seen.add(calledName)
         if (calledName === fn.name) {
           edges.push({
             callerId: fn.id,
             calleeName: calledName,
             calleeId: fn.id,
-            calleeCategory: fn.category
+            calleeCategory: fn.category,
+            role: site.role,
+            line: site.line,
+            calleePurpose: fn.purpose
           })
           continue
         }
@@ -151,14 +159,14 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
         const resolved =
           candidates.find((c) => fn.className !== null && c.className === fn.className) ??
           candidates[0]
-        const key = resolved ? resolved.id : `external:${calledName}`
-        if (seen.has(key)) continue
-        seen.add(key)
         edges.push({
           callerId: fn.id,
           calleeName: calledName,
           calleeId: resolved ? resolved.id : null,
-          calleeCategory: resolved ? resolved.category : 'external'
+          calleeCategory: resolved ? resolved.category : 'external',
+          role: site.role,
+          line: site.line,
+          calleePurpose: resolved ? resolved.purpose : null
         })
       }
       fn.calls = edges

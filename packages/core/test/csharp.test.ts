@@ -72,16 +72,26 @@ describe('C# 解析器', () => {
     expect(tryValidate?.docComment).toBeNull()
   })
 
-  it('调用收集：包含成员访问、new、nameof 等', async () => {
+  it('调用收集：包含成员访问、new、nameof 等，并标注角色与行号', async () => {
     const functions = await parseFixture('Services/UserService.cs')
     const listUsers = functions.find((f) => f.name === 'ListUsers')
+    const names = listUsers?.callSites.map((s) => s.name) ?? []
     // _repo.Fetch(page) → Fetch；nameof(page) → nameof；throw new ArgumentOutOfRangeException(...)
-    expect(listUsers?.calledNames).toEqual(
+    expect(names).toEqual(
       expect.arrayContaining(['Fetch', 'nameof', 'ArgumentOutOfRangeException'])
     )
+    // 角色：Fetch 为核心实现；throw new X(...) 与其内部 nameof 为异常处理
+    const roleOf = (n: string): string | undefined =>
+      listUsers?.callSites.find((s) => s.name === n)?.role
+    expect(roleOf('Fetch')).toBe('core')
+    expect(roleOf('ArgumentOutOfRangeException')).toBe('exception')
+    // 行号有效且按源码顺序可用于链路排序
+    for (const site of listUsers?.callSites ?? []) {
+      expect(site.line).toBeGreaterThan(0)
+    }
     const ctor = functions.find((f) => f.name === 'UserService')
     // 构造函数体内仅赋值，无调用
-    expect(ctor?.calledNames).toEqual([])
+    expect(ctor?.callSites).toEqual([])
   })
 
   it('注释块提取：连续注释合并 + 紧随代码成对，保留行号', async () => {
@@ -102,7 +112,7 @@ describe('C# 解析器', () => {
     expect(displayName?.kind).toBe('method')
     expect(displayName?.className).toBe('UserService')
     expect(displayName?.bodyText).toContain('ComputeName')
-    expect(displayName?.calledNames).toContain('ComputeName')
+    expect(displayName?.callSites.map((s) => s.name)).toContain('ComputeName')
   })
 
   it('自动属性（{ get; set; }）不产出条目，避免污染函数列表', async () => {

@@ -34,11 +34,12 @@ describe('TypeScript 解析器', () => {
     expect(fn.docComment).toContain('处理用户列表查询请求')
   })
 
-  it('提取函数体内调用名（含 new 与成员调用）', async () => {
+  it('提取函数体内调用点（含 new 与成员调用）', async () => {
     const [fn] = await parseFixture('src/controllers/userController.ts')
-    expect(fn.calledNames).toContain('UserService')
-    expect(fn.calledNames).toContain('listUsers')
-    expect(fn.calledNames).toContain('formatDate')
+    const names = fn.callSites.map((s) => s.name)
+    expect(names).toContain('UserService')
+    expect(names).toContain('listUsers')
+    expect(names).toContain('formatDate')
   })
 
   it('注释块提取：注释与紧随代码成对，含行号', async () => {
@@ -68,7 +69,7 @@ describe('TypeScript 解析器', () => {
 
     const loadRows = functions.find((f) => f.name === 'loadRows')
     expect(loadRows?.visibility).toBe('private')
-    expect(loadRows?.calledNames).toEqual([])
+    expect(loadRows?.callSites).toEqual([])
   })
 
   it('无文档注释时 docComment 为 null', async () => {

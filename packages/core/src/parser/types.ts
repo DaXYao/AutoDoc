@@ -1,4 +1,12 @@
-import type { CodeBlock, FunctionKind, Visibility } from '@autodoc/shared-types'
+import type { CallRole, CodeBlock, FunctionKind, Visibility } from '@autodoc/shared-types'
+
+/** 单个调用点：名称 + 行号（执行顺序）+ 角色（着色） */
+export interface ParsedCallSite {
+  name: string
+  /** 1 基行号 */
+  line: number
+  role: CallRole
+}
 
 /**
  * 解析器输出的函数/方法中间结构。
@@ -19,8 +27,8 @@ export interface ParsedFunction {
   docComment: string | null
   /** 函数体源码文本，用于指纹计算 */
   bodyText: string
-  /** 函数体内出现的所有调用名（含无法解析的） */
-  calledNames: string[]
+  /** 函数体内出现的所有调用点（含无法解析的），按源码顺序 */
+  callSites: ParsedCallSite[]
   /** 方法体内「注释 + 紧随代码块」提取结果（functionId 在主流程回填） */
   codeBlocks: Omit<CodeBlock, 'functionId'>[]
   /** 1 基行号 */

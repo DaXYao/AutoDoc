@@ -50,12 +50,21 @@ export interface ChangeRecord {
   description: string
 }
 
+/** 调用点角色：用于调用链路的着色（core=绿 / validation=黑灰 / exception=红） */
+export type CallRole = 'core' | 'validation' | 'exception'
+
 /** 调用边；calleeId 为 null 表示外部/未解析，禁止强行猜测 */
 export interface CallEdge {
   callerId: string
   calleeName: string
   calleeId: string | null
   calleeCategory: FunctionCategory | 'external'
+  /** 调用点角色（由语法上下文静态判定） */
+  role: CallRole
+  /** 调用点行号（链路按执行顺序排序） */
+  line: number
+  /** 被调用方用途说明（文件内可解析时填充，否则 null） */
+  calleePurpose: string | null
 }
 
 export type FunctionKind = 'function' | 'method'
