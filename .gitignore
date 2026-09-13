@@ -9,6 +9,9 @@ packages/web/dist/
 # AutoDoc 运行时数据（批注、快照等用户数据不入库，本地保留）
 .autodoc/
 
+# 多项目注册表：本机运行时状态，含个人绝对路径，不入库（本地保留）
+configs/projects.json
+
 # docgen export 静态站点输出
 autodoc-site/
 
