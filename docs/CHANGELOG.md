@@ -12,6 +12,17 @@
 
 ## [未发布] 2026-09-13
 
+### feat: 跨文件调用解析（import 映射，principled）+ API 禁缓存
+- **内容**：
+  - parser/types.ts：`LanguageParser.parse` 改返回 `ParsedFile { functions, imports }`；新增 `ParsedImport`（localName/importedName/source/kind）；
+  - jsFamily 新增 `collectImports`：解析 import_statement 的 named/default/namespace 导入（含 `as` 别名）；csharp 因 using 映射命名空间而非文件，imports 留空（跨文件解析仅 JS/TS 系）；
+  - generate.ts 重构为两阶段：阶段一全量解析（函数+导入），阶段二建全局导出索引（fileId→导出名→FunctionDoc）+ `resolveModule`（相对说明符→项目内文件，尝试 .ts/.tsx/.js/.jsx 与 /index.*）+ `buildCallEdges`（自调用→文件内→跨文件 import→否则外部）；
+  - server/app.ts：/api 响应加 `Cache-Control: no-store`，避免浏览器缓存 GET 导致切换/重新生成后 UI 陈旧。
+- **影响范围**：packages/core（parser/types、jsFamily、csharp、generate、test）、packages/server（app.ts）。
+- **动机**：让跨文件 import 的被调方也能显示用途/可跳转（更接近代码图谱）；用 import 声明建立「标识符→源文件」映射而非裸名字猜测，遵守「不强行猜测」硬规则。
+- **关联**：48 个 Vitest 全绿（新增跨文件断言：formatDate 经 import 解析带用途）；API 与浏览器实测 csharp.ts 的 detectCallRole（import 自 role.ts）已可点击+显示用途；局部闭包/外部方法仍正确归外部。
+- **风险/回滚点**：成员调用（如 obj.method()）与 default/namespace 导入暂不跨文件解析（需类型推断，留待后续）；C# 跨文件仍为文件内解析。
+
 ### feat: 调用关系升级为「执行链路」（角色着色 + 箭头 + 用途说明）
 - **内容**：
   - shared-types：`CallEdge` 新增 `role`（CallRole: core/validation/exception）、`line`（调用点行号）、`calleePurpose`（被调方用途）；
