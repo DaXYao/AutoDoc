@@ -30,6 +30,13 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   const { manager } = options
   const readOnly = options.readOnly ?? false
 
+  // API 响应禁缓存：避免浏览器缓存 /api GET 导致切换/重新生成后 UI 仍显示陈旧数据
+  app.addHook('onSend', async (req, reply) => {
+    if (req.url.startsWith('/api/')) {
+      reply.header('Cache-Control', 'no-store')
+    }
+  })
+
   /* ------------------------- 多项目（hub）路由 ------------------------- */
 
   app.get('/api/projects', async (): Promise<ProjectsResponse> => ({
