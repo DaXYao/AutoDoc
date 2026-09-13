@@ -10,6 +10,23 @@
 
 ---
 
+## [未发布] 2026-09-13
+
+### feat: 多项目中枢（hub 模式）+ 快捷启动器 + 系统文件夹选择
+- **内容**：
+  - 后端：新增 [projects.ts](../packages/server/src/projects.ts) `ProjectManager`（项目注册表 configs/projects.json + 活动项目懒加载/缓存/activate/add/remove）；[app.ts](../packages/server/src/app.ts) 从「闭包单 service」重构为「引用 manager 活动 service」，新增 `/api/projects`、`/api/projects/:id/activate`、`POST /api/projects`、`DELETE /api/projects/:id`、`/api/system/pick-folder` 路由（无活动项目时文档路由返回 409）；
+  - CLI：[cli.ts](../packages/server/src/cli.ts) `serve` 省略 `--root` 进中枢模式（加载注册表不预激活）、新增 `--open`（就绪后自动开浏览器）与 `--projects`（注册表路径）、端口占用容错（重复双击启动器只开浏览器不报错）；`serve --root X` 单项目模式向后兼容；
+  - 前端：新增 [ProjectHub.vue](../packages/web/src/views/ProjectHub.vue) 项目选择页（卡片点选即分析、添加项目表单、移除）；[App.vue](../packages/web/src/App.vue) 顶部项目切换下拉 + 「项目管理」入口 + 启动无活动项目时重定向 /projects；[store/app.ts](../packages/web/src/store/app.ts) 新增 projects/activeProjectId 状态与 switchProject/addProject/removeProject；静态导出模式自动隐藏切换器；
+  - 启动器：根目录 [启动AutoDoc.vbs](../启动AutoDoc.vbs)（隐藏控制台双击启动 + `--open` 自动开浏览器）；
+  - 文件夹选择：新增 [pickFolder.ts](../packages/server/src/pickFolder.ts)，服务端借系统自带 PowerShell + WinForms FolderBrowserDialog 弹原生选择框返回绝对路径（浏览器安全限制拿不到本地路径），前端添加表单加「浏览…」按钮；零新依赖；
+  - 预置 [configs/projects.json](../configs/projects.json)：AutoDoc 与 Prism-Samples-Wpf 两个项目。
+- **影响范围**：packages/shared-types、packages/server（projects/app/cli/context/index/pickFolder）、packages/web（api/store/router/App/ProjectHub/FileList 无改动）、根 configs/ 与启动器脚本。
+- **动机**：用户希望「双击启动 → 选项目 → 分析 → 打开网页 → 网页内可切换项目」，且保留重新生成；原架构 serve 绑定单 root 无法运行时切换。
+- **关联**：48 个 Vitest 用例全绿；浏览器子代理实测 5 步全通过（中枢页/点选/下拉切换/项目管理/添加表单）；API 层验证懒加载与切换（Prism 178 文件 ↔ AutoDoc 24 文件）。
+- **风险/回滚点**：`pick-folder` 依赖 Windows PowerShell + WinForms，非 Windows 或弹窗被拦截时返回 null，前端回退为手动输入路径；中枢模式下 `--watch` 文件监听未启用（依赖网页「重新生成」）。
+
+---
+
 ## [未发布] 2026-09-10
 
 ### feat: core 新增 C# 解析器 + CLI 支持 --config，首次跑通 WPF/Prism 项目

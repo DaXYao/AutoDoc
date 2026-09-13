@@ -14,11 +14,32 @@
 - [ ] 无编译环境下的替代：tree-sitter 用 web-tree-sitter WASM + 预编译 grammar，SQLite 用 node:sqlite，免原生依赖。
 - [ ] **接入新语言**：先写一次性探针脚本 dump tree-sitter AST，用真实节点/字段名驱动解析器实现，禁止凭直觉猜（见 2026-09-10 条）。
 - [ ] **配置文件外置**：`--config <file>` 让配置留在工具仓库内、指向外部目标项目，避免向用户仓库写入（见 2026-09-10 条）。
+- [ ] **本地工具要拿「用户选的本地文件夹绝对路径」**：浏览器安全限制拿不到，改由本地服务端弹原生对话框（PowerShell+WinForms FolderBrowserDialog）返回路径（见 2026-09-13 条）。
 - [ ] （后续不断补充……）
 
 ---
 
 ## 成功经验条目
+
+### 2026-09-13 · 服务端代弹原生文件夹对话框，绕开浏览器路径安全限制
+- **场景**：本地 Web 工具需要让用户「用资源管理器选一个本地文件夹」并拿到其**绝对路径**传给后端分析。
+- **困境**：浏览器 `<input type=file webkitdirectory>` 只给相对路径；File System Access API `showDirectoryPicker()` 出于安全**不暴露绝对路径**。
+- **做法**：本地 Node 服务端新增 `POST /api/system/pick-folder`，内部 `execFile('powershell.exe', ['-NoProfile','-STA','-Command', <WinForms FolderBrowserDialog 脚本>])` 弹系统原生选择框，把 `SelectedPath` 从 stdout 读回返回给前端填入输入框；非 Windows / 超时 / 取消统一返回 null，前端回退为手动输入。
+- **收益**：零新依赖（用系统自带 PowerShell + WinForms）；体验等同桌面软件的「浏览…」按钮。
+- **适用条件**：仅限「本地运行的开发工具」（服务端与浏览器同机）；远程部署不适用。需 `-STA` 保证 WinForms 对话框消息泵正常；`windowsHide:true` 只隐藏 powershell 控制台、不影响 GUI 对话框。
+- **关联**：packages/server/src/pickFolder.ts、packages/server/src/app.ts（/api/system/pick-folder）、packages/web/src/views/ProjectHub.vue（「浏览…」按钮）。
+
+### 2026-09-13 · 多项目运行时切换：注册表 + 活动项目懒加载管理器
+- **场景**：本地文档工具需在同一服务进程内「运行时切换分析目标项目」，而非每次重启绑定一个 root。
+- **做法**：
+  1. `ProjectManager` 持有注册表（configs/projects.json）+ `Map<id, DocService>` 懒加载缓存 + 单一 `activeId`；
+  2. `buildApp` 不再闭包单个 service，改为每个路由调 `manager.getActive()`（null 时返回 409）；
+  3. `activate(id)` 首次才 `createDocService`（全量生成），后续切换走缓存，秒级；
+  4. 单项目模式（`serve --root X`）复用同一管理器：注册一个临时项目并立即激活，保持向后兼容；
+  5. 前端 `initDataSource` 先探 `/api/projects`（有则 hub 模式），再回退 `/api/meta`（单项目），再回退静态 autodoc-data.json。
+- **收益**：一套服务多项目；切换不重启；静态导出/单项目旧用法不受影响。
+- **适用条件**：本地单用户工具；项目体量中等（懒加载避免启动即全量解析所有项目）。
+- **关联**：packages/server/src/projects.ts、app.ts、cli.ts；packages/web/src/store/app.ts。
 
 ### 2026-09-10 · 探针驱动的多语言解析器接入（以 C# 为例）
 - **场景**：为 tree-sitter 家族新增一门语言（C#/Python/Go/Java 等），需要摸清 grammar 的节点类型、field 名、子节点顺序。
