@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { exec } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { relative, resolve, sep } from 'node:path'
 import { watch, type FSWatcher } from 'chokidar'
@@ -7,8 +8,10 @@ import picomatch from 'picomatch'
 import { buildApp } from './app.js'
 import { createDocService, regenerate, type DocService } from './context.js'
 import { exportStaticSite } from './export.js'
+import { ProjectManager } from './projects.js'
 
 const DEFAULT_PORT = 7788
+const DEFAULT_PROJECTS = 'configs/projects.json'
 
 /** 前端构建产物目录（packages/server/dist/cli.js → packages/web/dist） */
 const WEB_DIST = fileURLToPath(new URL('../../web/dist/', import.meta.url))
@@ -19,6 +22,20 @@ function warn(message: string): void {
 
 function resolveRoot(root: string | undefined): string {
   return resolve(process.cwd(), root ?? '.')
+}
+
+/** 跨平台打开默认浏览器（Windows 用 cmd start，macOS 用 open，其余 xdg-open） */
+function openBrowser(url: string): void {
+  const platform = process.platform
+  const command =
+    platform === 'win32'
+      ? `start "" "${url}"`
+      : platform === 'darwin'
+        ? `open "${url}"`
+        : `xdg-open "${url}"`
+  exec(command, { shell: platform === 'win32' ? 'cmd.exe' : '/bin/sh' }, (error) => {
+    if (error) warn(`无法自动打开浏览器，请手动访问 ${url}`)
+  })
 }
 
 /**
@@ -79,34 +96,78 @@ program.name('docgen').description('AutoDoc 本地文档服务与静态导出 CL
 program
   .command('serve')
   .description('启动本地文档服务（REST API + Web 界面）')
-  .option('-r, --root <dir>', '目标项目根目录', '.')
+  .option('-r, --root <dir>', '目标项目根目录（省略则进入多项目中枢模式）')
   .option('-c, --config <file>', '显式指定 autodoc 配置文件（跳过 cosmiconfig 搜索）')
+  .option('--projects <file>', '多项目注册表路径', DEFAULT_PROJECTS)
   .option('-p, --port <number>', '监听端口', String(DEFAULT_PORT))
-  .option('--no-watch', '禁用源码变更自动重生成')
+  .option('--open', '服务就绪后自动打开浏览器')
+  .option('--no-watch', '禁用源码变更自动重生成（仅单项目模式生效）')
   .action(
-    async (options: { root: string; config?: string; port: string; watch: boolean }) => {
-      const rootDir = resolveRoot(options.root)
-      const configPath = options.config ? resolve(process.cwd(), options.config) : undefined
-      const service = await createDocService(rootDir, warn, configPath)
-      console.log(
-        `[autodoc] 生成完成：${service.files.length} 个文件，存储类型 ${service.storage.kind}` +
-          (configPath ? `，配置 ${configPath}` : '')
-      )
+    async (options: {
+      root?: string
+      config?: string
+      projects: string
+      port: string
+      open?: boolean
+      watch: boolean
+    }) => {
+      const baseDir = process.cwd()
+      const manager = new ProjectManager({
+        registryPath: options.root ? null : options.projects,
+        baseDir,
+        onWarn: warn
+      })
 
       let watcher: FSWatcher | null = null
-      if (options.watch) {
-        watcher = startWatcher(service)
-        console.log('[autodoc] 已启用变更监听（--no-watch 可关闭）')
+
+      if (options.root) {
+        // 单项目模式（向后兼容）：注册临时项目并立即激活
+        const rootDir = resolveRoot(options.root)
+        const configPath = options.config ? resolve(baseDir, options.config) : undefined
+        manager.register({ id: 'default', name: rootDir.split(/[\\/]/).pop() ?? 'project', root: rootDir, config: configPath })
+        const service = await manager.activate('default')
+        console.log(
+          `[autodoc] 生成完成：${service.files.length} 个文件，存储类型 ${service.storage.kind}` +
+            (configPath ? `，配置 ${configPath}` : '')
+        )
+        if (options.watch) {
+          watcher = startWatcher(service)
+          console.log('[autodoc] 已启用变更监听（--no-watch 可关闭）')
+        }
+      } else {
+        // 多项目中枢模式：加载注册表，不预激活；由前端选择项目后懒加载
+        await manager.loadRegistry()
+        const projects = manager.list()
+        console.log(
+          `[autodoc] 中枢模式：已加载 ${projects.length} 个项目注册表（${resolve(baseDir, options.projects)}）`
+        )
+        if (options.watch) {
+          console.log('[autodoc] 中枢模式下文件监听未启用，请在网页中切换项目或点击「重新生成」')
+        }
       }
 
-      const app = await buildApp({ service, webDist: WEB_DIST })
-      await app.listen({ port: Number(options.port) || DEFAULT_PORT, host: '127.0.0.1' })
-      console.log(`[autodoc] 文档服务已启动：http://127.0.0.1:${options.port}`)
+      const app = await buildApp({ manager, webDist: WEB_DIST })
+      const port = Number(options.port) || DEFAULT_PORT
+      const url = `http://127.0.0.1:${port}`
+      try {
+        await app.listen({ port, host: '127.0.0.1' })
+      } catch (error) {
+        // 端口被占：大概率是服务已在运行（重复双击启动器），直接开浏览器后退出
+        if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+          console.log(`[autodoc] 端口 ${port} 已被占用，服务可能已在运行：${url}`)
+          if (options.open) openBrowser(url)
+          manager.closeAll()
+          process.exit(0)
+        }
+        throw error
+      }
+      console.log(`[autodoc] 文档服务已启动：${url}`)
+      if (options.open) openBrowser(url)
 
       const shutdown = async (): Promise<void> => {
         await watcher?.close()
         await app.close()
-        service.storage.close()
+        manager.closeAll()
         process.exit(0)
       }
       process.on('SIGINT', () => void shutdown())

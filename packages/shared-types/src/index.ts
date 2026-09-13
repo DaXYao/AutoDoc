@@ -214,3 +214,44 @@ export interface ExportData {
   summaries: FileSummary[]
   functionIndex: FunctionIndexEntry[]
 }
+
+/* ------------------------- 多项目（hub 模式） ------------------------- */
+
+/** 注册表中的单个项目条目（持久化到 configs/projects.json） */
+export interface ProjectEntry {
+  /** 稳定 slug，作为切换与缓存的键 */
+  id: string
+  name: string
+  /** 目标项目根目录（绝对路径） */
+  root: string
+  /** 可选：显式配置文件路径（相对启动 cwd 或绝对），缺省走 cosmiconfig 搜索 */
+  config?: string
+}
+
+/** 下发给前端的项目视图（含运行态信息） */
+export interface ProjectInfo extends ProjectEntry {
+  /** 是否为当前活动项目 */
+  active: boolean
+  /** 是否已加载（生成过文档） */
+  loaded: boolean
+  /** 已加载时的文件数 */
+  fileCount?: number
+  /** 已加载时的函数数 */
+  functionCount?: number
+}
+
+/** 新增项目的输入 */
+export interface NewProjectInput {
+  name: string
+  root: string
+  config?: string
+}
+
+/** GET /api/projects 响应 */
+export interface ProjectsResponse {
+  projects: ProjectInfo[]
+  /** 当前活动项目 id，无则为 null（前端据此显示中枢页） */
+  activeId: string | null
+  /** 只读模式（静态导出）下禁用切换与新增 */
+  readOnly: boolean
+}

@@ -1,4 +1,6 @@
 export { buildApp, type BuildAppOptions } from './app.js'
 export { createDocService, regenerate, type DocService, type WarnFn } from './context.js'
 export { exportStaticSite } from './export.js'
+export { pickFolder } from './pickFolder.js'
+export { ProjectManager, makeProjectId, type ProjectManagerOptions } from './projects.js'
 export { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'

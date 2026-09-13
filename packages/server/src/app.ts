@@ -2,12 +2,14 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { AnnotationTargetType } from '@autodoc/shared-types'
-import { regenerate, type DocService } from './context.js'
+import type { AnnotationTargetType, NewProjectInput, ProjectsResponse } from '@autodoc/shared-types'
+import { regenerate } from './context.js'
+import { pickFolder } from './pickFolder.js'
+import type { ProjectManager } from './projects.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
 
 export interface BuildAppOptions {
-  service: DocService
+  manager: ProjectManager
   /** 前端构建产物目录，存在则作为静态站点托管 */
   webDist?: string
   /** 只读模式（export 场景复用同一套路由时预留） */
@@ -25,14 +27,81 @@ interface AnnotationBody {
 
 export async function buildApp(options: BuildAppOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: false })
-  const { service } = options
+  const { manager } = options
   const readOnly = options.readOnly ?? false
 
-  app.get('/api/meta', async () => toMeta(service, readOnly))
+  /* ------------------------- 多项目（hub）路由 ------------------------- */
 
-  app.get('/api/files', async () => service.files.map(toFileSummary))
+  app.get('/api/projects', async (): Promise<ProjectsResponse> => ({
+    projects: manager.list(),
+    activeId: manager.getActiveId(),
+    readOnly
+  }))
+
+  app.post<{ Params: { id: string } }>('/api/projects/:id/activate', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    try {
+      const service = await manager.activate(req.params.id)
+      return {
+        ok: true,
+        activeId: manager.getActiveId(),
+        fileCount: service.files.length,
+        generatedAt: service.generatedAt
+      }
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+
+  app.post('/api/projects', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const body = req.body as Partial<NewProjectInput>
+    if (typeof body.root !== 'string' || body.root.trim().length === 0) {
+      return reply.code(400).send({ error: '缺少 root（项目根目录）' })
+    }
+    try {
+      const info = await manager.add({
+        name: typeof body.name === 'string' ? body.name : '',
+        root: body.root.trim(),
+        config: typeof body.config === 'string' ? body.config : undefined
+      })
+      return reply.code(201).send(info)
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+
+  app.delete<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const removed = await manager.remove(req.params.id)
+    if (!removed) return reply.code(404).send({ error: `project not found: ${req.params.id}` })
+    return reply.code(204).send()
+  })
+
+  // 弹出系统原生文件夹选择对话框，返回选中绝对路径（供前端「浏览…」按钮用）
+  app.post('/api/system/pick-folder', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const path = await pickFolder()
+    return { path }
+  })
+
+  /* ------------------------- 文档数据路由（作用于活动项目） ------------------------- */
+
+  app.get('/api/meta', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    return toMeta(service, readOnly)
+  })
+
+  app.get('/api/files', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    return service.files.map(toFileSummary)
+  })
 
   app.get('/api/files/*', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
     const fileId = (req.params as Record<string, string>)['*']
     const file = service.files.find((f) => f.fileId === fileId)
     if (!file) {
@@ -41,15 +110,23 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     return toFileDocView(service, file)
   })
 
-  app.get('/api/functions/index', async () => toFunctionIndex(service))
+  app.get('/api/functions/index', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    return toFunctionIndex(service)
+  })
 
-  app.get('/api/annotations', async (req) => {
+  app.get('/api/annotations', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
     const { targetId } = req.query as { targetId?: string }
     return service.storage.listAnnotations(targetId)
   })
 
   app.post('/api/annotations', async (req, reply) => {
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
     const body = req.body as AnnotationBody
     if (
       typeof body.targetType !== 'string' ||
@@ -74,6 +151,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   app.put('/api/annotations/:id', async (req, reply) => {
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
     const { id } = req.params as { id: string }
     const body = req.body as AnnotationBody
     const patch: { content?: string; author?: string } = {}
@@ -93,13 +172,18 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   app.delete('/api/annotations/:id', async (req, reply) => {
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
     const { id } = req.params as { id: string }
     const removed = service.storage.deleteAnnotation(id)
     if (!removed) return reply.code(404).send({ error: `annotation not found: ${id}` })
     return reply.code(204).send()
   })
 
-  app.post('/api/refresh', async () => {
+  app.post('/api/refresh', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
     await regenerate(service, (message) => console.warn(`[autodoc] ${message}`))
     return { ok: true, generatedAt: service.generatedAt }
   })
