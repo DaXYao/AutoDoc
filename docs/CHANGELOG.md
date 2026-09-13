@@ -12,6 +12,18 @@
 
 ## [未发布] 2026-09-13
 
+### feat: 调用关系升级为「执行链路」（角色着色 + 箭头 + 用途说明）
+- **内容**：
+  - shared-types：`CallEdge` 新增 `role`（CallRole: core/validation/exception）、`line`（调用点行号）、`calleePurpose`（被调方用途）；
+  - 新增 [parser/role.ts](../packages/core/src/parser/role.ts) `detectCallRole`：调用点角色静态判定（catch/throw 内→exception；守卫 if 或 validate/check/isXxx 命名→validation；其余→core），优先级 exception>validation>core；
+  - parser：`ParsedFunction.calledNames` 改为 `callSites`（名称+行号+角色）；jsFamily/csharp 的 collectCalls 产出调用点；
+  - generate.ts：调用边按调用点行号排序（= 执行顺序）、同名去重保留首次行号/角色、同文件被调方回填 `calleePurpose`；
+  - web：[FunctionCard.vue](../packages/web/src/components/FunctionCard.vue) 「调用关系」改为「调用链路」：顶部三色图例（绿=核心/灰=校验/红=异常）、纵向链路节点间 ↓ 箭头、每节点着色点+名称+角色+分类标签+行号、同文件被调方显示「作用：…」用途并可点击跳转；format.ts 新增 ROLE_LABELS/ROLE_COLORS。
+- **影响范围**：packages/shared-types、packages/core（role/parser/generate/test）、packages/web（format/FunctionCard）。
+- **动机**：原「按分类聚合的扁平名单」看不出执行顺序与各被调函数的作用；用户希望类代码图谱的链路 + 角色着色。
+- **关联**：48 个 Vitest 全绿（含角色断言 Fetch=core / throw=exception）；浏览器子代理实测：图例/箭头/着色/用途/可点击均正常，validate=灰、Error=红，零控制台报错。
+- **风险/回滚点**：跨文件 import 的被调方仍归「外部/未解析」（README 将跨文件调用图列为 Phase 4，不靠裸名字猜测）；静态导出旧数据无 role/line 字段，重新 export 即可。
+
 ### feat: web 文件列表改为递归目录树（空目录链压缩 + 自适应默认展开）
 - **内容**：
   - 新增 [utils/fileTree.ts](../packages/web/src/utils/fileTree.ts) `buildFileTree`：由文件相对路径构建目录树森林，支持空目录链压缩（无直属文件且仅一个子目录时合并，如 `core/src`），自底向上聚合文件数/函数数/三分类计数；
