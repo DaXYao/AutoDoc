@@ -1,4 +1,4 @@
-import type { ChangeType, FunctionCategory } from '@autodoc/shared-types'
+import type { CallRole, ChangeType, FunctionCategory } from '@autodoc/shared-types'
 
 export const CATEGORY_LABELS: Record<FunctionCategory, string> = {
   business: '业务接口',
@@ -19,6 +19,20 @@ export const CHANGE_LABELS: Record<ChangeType, string> = {
   modified: '修改',
   deleted: '删除',
   renamed: '重命名'
+}
+
+/** 调用点角色标签（链路展示用） */
+export const ROLE_LABELS: Record<CallRole, string> = {
+  core: '核心实现',
+  validation: '参数/状态校验',
+  exception: '异常处理'
+}
+
+/** 调用点角色配色：core=绿 / validation=黑灰 / exception=红 */
+export const ROLE_COLORS: Record<CallRole, { dot: string; text: string; border: string }> = {
+  core: { dot: 'bg-green-500', text: 'text-green-700', border: 'border-green-300' },
+  validation: { dot: 'bg-gray-500', text: 'text-gray-700', border: 'border-gray-300' },
+  exception: { dot: 'bg-red-500', text: 'text-red-600', border: 'border-red-300' }
 }
 
 /** ISO 时间 → 本地「年-月-日 时:分」 */

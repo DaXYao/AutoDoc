@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import type { CallEdge, FunctionCategory, FunctionDocView } from '@autodoc/shared-types'
 import { appState, findFunctionEntry } from '../store/app'
 import { expandDefault, isExpanded, toggle } from '../store/expand'
-import { CHANGE_LABELS, CATEGORY_LABELS, editorLink, formatDate } from '../utils/format'
+import { CHANGE_LABELS, CATEGORY_LABELS, ROLE_COLORS, ROLE_LABELS, editorLink, formatDate } from '../utils/format'
 import AnnotationPanel from './AnnotationPanel.vue'
 
 const props = defineProps<{ fn: FunctionDocView }>()
@@ -13,26 +13,11 @@ const emit = defineEmits<{ changed: [] }>()
 
 const router = useRouter()
 
-/** 调用关系按「三分类 + 外部/未解析」聚合展示 */
-const callGroups = computed(() => {
-  const groups = new Map<CallEdge['calleeCategory'], CallEdge[]>()
-  for (const edge of props.fn.calls) {
-    const list = groups.get(edge.calleeCategory) ?? []
-    list.push(edge)
-    groups.set(edge.calleeCategory, list)
-  }
-  const order: CallEdge['calleeCategory'][] = [
-    'business',
-    'implementation',
-    'utility',
-    'pending',
-    'external'
-  ]
-  return order.filter((c) => groups.has(c)).map((c) => ({ category: c, edges: groups.get(c)! }))
-})
+/** 调用链路：按调用点行号（= 源码执行顺序）排序，逐节点着色 + 用途说明 */
+const callChain = computed(() => [...props.fn.calls].sort((a, b) => a.line - b.line))
 
-function calleeLabel(edge: CallEdge): string {
-  return edge.calleeName
+function chainKey(edge: CallEdge, i: number): string {
+  return `${i}-${edge.calleeName}-${edge.calleeId ?? 'x'}`
 }
 
 function goToCallee(edge: CallEdge): void {
@@ -113,28 +98,61 @@ const annotationsKey = (): string => `card:${props.fn.id}:annotations`
       </div>
     </div>
 
-    <!-- 内部调用关系：按三分类 + 外部/未解析聚合 -->
+    <!-- 内部调用关系：按执行顺序的链路（角色着色 + 箭头 + 用途说明） -->
     <div v-if="fn.calls.length > 0" class="border-t border-gray-100 px-4 py-2">
       <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(callsKey(), expandDefault('callGraph'))">
-        调用关系（{{ fn.calls.length }}）
+        调用链路（{{ fn.calls.length }}）
         {{ isExpanded(callsKey(), expandDefault('callGraph')) ? '▾' : '▸' }}
       </button>
-      <div v-if="isExpanded(callsKey(), expandDefault('callGraph'))" class="mt-2 flex flex-col gap-1.5">
-        <div v-for="group in callGroups" :key="group.category" class="flex flex-wrap items-center gap-1.5 text-xs">
-          <n-tag size="tiny" :type="group.category === 'external' ? 'default' : 'info'" :bordered="false">
-            {{ group.category === 'external' ? '外部/未解析' : CATEGORY_LABELS[group.category as FunctionCategory] }}
-          </n-tag>
-          <template v-for="edge in group.edges" :key="`${edge.calleeName}-${edge.calleeId ?? 'x'}`">
-            <button
-              v-if="edge.calleeId && findFunctionEntry(edge.calleeId)"
-              class="font-mono text-blue-600 hover:underline"
-              @click="goToCallee(edge)"
-            >
-              {{ calleeLabel(edge) }}
-            </button>
-            <span v-else class="font-mono text-gray-500">{{ calleeLabel(edge) }}</span>
-          </template>
+      <div v-if="isExpanded(callsKey(), expandDefault('callGraph'))" class="mt-2">
+        <!-- 角色图例 -->
+        <div class="flex flex-wrap items-center gap-3 text-xs text-gray-500 mb-2">
+          <span v-for="(label, role) in ROLE_LABELS" :key="role" class="flex items-center gap-1">
+            <span class="inline-block w-2.5 h-2.5 rounded-full" :class="ROLE_COLORS[role as keyof typeof ROLE_COLORS].dot" />
+            {{ label }}
+          </span>
         </div>
+        <!-- 链路：节点（着色点 + 名称 + 角色 + 分类 + 用途）之间用箭头连接 -->
+        <ol class="flex flex-col">
+          <template v-for="(edge, i) in callChain" :key="chainKey(edge, i)">
+            <li class="flex items-start gap-2">
+              <span
+                class="mt-1 w-2.5 h-2.5 rounded-full shrink-0"
+                :class="ROLE_COLORS[edge.role].dot"
+              />
+              <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2 text-xs">
+                  <button
+                    v-if="edge.calleeId && findFunctionEntry(edge.calleeId)"
+                    class="font-mono hover:underline"
+                    :class="ROLE_COLORS[edge.role].text"
+                    @click="goToCallee(edge)"
+                  >
+                    {{ edge.calleeName }}
+                  </button>
+                  <span v-else class="font-mono" :class="ROLE_COLORS[edge.role].text">
+                    {{ edge.calleeName }}
+                  </span>
+                  <span class="text-gray-400">· {{ ROLE_LABELS[edge.role] }}</span>
+                  <n-tag size="tiny" :bordered="false" :type="edge.calleeCategory === 'external' ? 'default' : 'info'">
+                    {{ edge.calleeCategory === 'external' ? '外部/未解析' : CATEGORY_LABELS[edge.calleeCategory as FunctionCategory] }}
+                  </n-tag>
+                  <span class="text-gray-300">L{{ edge.line }}</span>
+                </div>
+                <div v-if="edge.calleePurpose" class="text-xs text-gray-500 mt-0.5">
+                  作用：{{ edge.calleePurpose }}
+                </div>
+                <div v-else-if="edge.calleeCategory === 'external'" class="text-xs text-gray-400 mt-0.5">
+                  作用：外部/未解析调用（不在本项目索引内）
+                </div>
+              </div>
+            </li>
+            <li v-if="i < callChain.length - 1" class="flex gap-2 py-0.5" aria-hidden="true">
+              <span class="w-2.5 flex justify-center text-gray-300 text-xs leading-none">↓</span>
+              <span />
+            </li>
+          </template>
+        </ol>
       </div>
     </div>
 
