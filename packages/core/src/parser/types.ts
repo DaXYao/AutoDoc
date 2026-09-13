@@ -42,5 +42,22 @@ export interface LanguageParser {
   id: string
   /** 处理的文件扩展名（不含点） */
   extensions: string[]
-  parse(source: string): Promise<ParsedFunction[]>
+  parse(source: string): Promise<ParsedFile>
+}
+
+/** 单条 import：导入后在本文件使用的局部名 → 源模块 */
+export interface ParsedImport {
+  /** 本文件内使用的局部名 */
+  localName: string
+  /** 源模块中的导出名（named 无 as 时等于 localName；default 为 'default'；namespace 为 '*'） */
+  importedName: string
+  /** 模块说明符（如 './role.js'、'vue'、'node:fs'） */
+  source: string
+  kind: 'named' | 'default' | 'namespace'
+}
+
+/** 解析器对单个文件的产出：函数列表 + 导入列表（跨文件调用解析用） */
+export interface ParsedFile {
+  functions: ParsedFunction[]
+  imports: ParsedImport[]
 }

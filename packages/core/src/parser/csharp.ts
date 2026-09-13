@@ -1,7 +1,7 @@
 import type { Parser, Node as SyntaxNode } from 'web-tree-sitter'
 import type { CodeBlock, Visibility } from '@autodoc/shared-types'
 import { detectCallRole } from './role.js'
-import type { LanguageParser, ParsedCallSite, ParsedFunction } from './types.js'
+import type { LanguageParser, ParsedCallSite, ParsedFile, ParsedFunction } from './types.js'
 
 /**
  * C# 解析器（tree-sitter WASM，grammar = tree-sitter-c-sharp）。
@@ -241,12 +241,14 @@ export class CSharpParser implements LanguageParser {
     private readonly parser: Parser
   ) {}
 
-  async parse(source: string): Promise<ParsedFunction[]> {
+  async parse(source: string): Promise<ParsedFile> {
     const tree = this.parser.parse(source)
     const out: ParsedFunction[] = []
-    if (!tree) return out
+    if (!tree) return { functions: out, imports: [] }
     this.walk(tree.rootNode, null, out)
-    return out
+    // C# 的 using 指令映射的是命名空间而非源文件，无法可靠建立「标识符→文件」，
+    // 故跨文件调用解析仅对 JS/TS 系生效，C# 保持文件内解析
+    return { functions: out, imports: [] }
   }
 
   /** 深度遍历：命名空间/类型下钻，遇到函数级声明则产出 ParsedFunction */

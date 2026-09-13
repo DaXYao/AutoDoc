@@ -10,7 +10,7 @@ async function parseFixture(relPath: string) {
   const parser = parserRegistry.forFile(relPath)
   expect(parser, `缺少 ${relPath} 的解析器`).toBeTruthy()
   const source = await readFile(join(fixtureDir, relPath), 'utf-8')
-  return parser!.parse(source)
+  return (await parser!.parse(source)).functions
 }
 
 beforeAll(async () => {

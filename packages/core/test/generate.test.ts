@@ -55,7 +55,8 @@ describe('文档生成管线（fixture 集成测试）', () => {
     const utils = files.find((f) => f.fileId === 'src/utils/format.ts')!
     expect(utils.functions.every((f) => f.category === 'utility')).toBe(true)
 
-    // 文件内调用可解析（同类私有方法）；跨文件调用归「外部/未解析」，禁止猜测
+    // 文件内调用可解析（同类私有方法）；跨文件经 import 映射解析（formatDate）；
+    // 无法经 import 关联的（new UserService、成员调用 listUsers）仍归外部/未解析
     const listUsers = service.functions.find((f) => f.name === 'listUsers')!
     const loadRowsEdge = listUsers.calls.find((c) => c.calleeName === 'loadRows')
     expect(loadRowsEdge?.calleeId).toBeTruthy()
@@ -65,7 +66,15 @@ describe('文档生成管线（fixture 集成测试）', () => {
     expect(sliceEdge?.calleeCategory).toBe('external')
 
     const handler = controller.functions[0]
-    expect(handler.calls.every((c) => c.calleeCategory === 'external')).toBe(true)
+    // 跨文件：formatDate 经 import '../utils/format' 解析到目标文件导出函数，带用途
+    const formatDateEdge = handler.calls.find((c) => c.calleeName === 'formatDate')
+    expect(formatDateEdge?.calleeId).toBeTruthy()
+    expect(formatDateEdge?.calleeCategory).toBe('utility')
+    expect(formatDateEdge?.calleePurpose).toContain('格式化')
+    // new UserService() 无对应导出函数条目（类构造不作函数导出）→ 外部
+    const ctorEdge = handler.calls.find((c) => c.calleeName === 'UserService')
+    expect(ctorEdge?.calleeId).toBeNull()
+    expect(ctorEdge?.calleeCategory).toBe('external')
 
     // 注释块携带所属函数稳定 ID
     expect(listUsers.codeBlocks.length).toBe(2)

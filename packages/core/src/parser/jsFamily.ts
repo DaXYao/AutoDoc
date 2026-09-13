@@ -1,7 +1,7 @@
 import type { Parser, Node as SyntaxNode } from 'web-tree-sitter'
 import type { CodeBlock, Visibility } from '@autodoc/shared-types'
 import { detectCallRole } from './role.js'
-import type { LanguageParser, ParsedCallSite, ParsedFunction } from './types.js'
+import type { LanguageParser, ParsedCallSite, ParsedFile, ParsedFunction, ParsedImport } from './types.js'
 
 /**
  * JavaScript / TypeScript 系解析器（tree-sitter WASM）。
@@ -162,6 +162,39 @@ export function extractCodeBlocks(body: SyntaxNode | null): Omit<CodeBlock, 'fun
   return out
 }
 
+/** 提取 import 声明：named / default / namespace → 局部名与源模块（跨文件调用解析用） */
+function collectImports(root: SyntaxNode): ParsedImport[] {
+  const out: ParsedImport[] = []
+  for (const stmt of namedKids(root)) {
+    if (stmt.type !== 'import_statement') continue
+    const sourceNode = stmt.childForFieldName('source')
+    if (!sourceNode) continue
+    const source = sourceNode.text.replace(/^['"]|['"]$/g, '')
+    const clause = namedKids(stmt).find((c) => c.type === 'import_clause')
+    if (!clause) continue
+    for (const part of namedKids(clause)) {
+      if (part.type === 'identifier') {
+        out.push({ localName: part.text, importedName: 'default', source, kind: 'default' })
+      } else if (part.type === 'namespace_import') {
+        const ns = namedKids(part)[0]
+        if (ns) out.push({ localName: ns.text, importedName: '*', source, kind: 'namespace' })
+      } else if (part.type === 'named_imports') {
+        for (const spec of namedKids(part)) {
+          if (spec.type !== 'import_specifier') continue
+          const ids = namedKids(spec).filter((c) => c.type === 'identifier')
+          if (ids.length === 1) {
+            out.push({ localName: ids[0].text, importedName: ids[0].text, source, kind: 'named' })
+          } else if (ids.length >= 2) {
+            // [原名, 别名]：本文件用别名调用，源模块导出名为原名
+            out.push({ localName: ids[1].text, importedName: ids[0].text, source, kind: 'named' })
+          }
+        }
+      }
+    }
+  }
+  return out
+}
+
 interface BuildOptions {
   node: SyntaxNode
   /** 文档注释与行号的锚点（最外层包装节点，如 export_statement） */
@@ -184,14 +217,14 @@ export class JsFamilyParser implements LanguageParser {
     private readonly parser: Parser
   ) {}
 
-  async parse(source: string): Promise<ParsedFunction[]> {
+  async parse(source: string): Promise<ParsedFile> {
     const tree = this.parser.parse(source)
     const out: ParsedFunction[] = []
-    if (!tree) return out
+    if (!tree) return { functions: out, imports: [] }
     for (const child of namedKids(tree.rootNode)) {
       this.collectTopLevel(child, false, out)
     }
-    return out
+    return { functions: out, imports: collectImports(tree.rootNode) }
   }
 
   private buildEntry(opts: BuildOptions): ParsedFunction {
