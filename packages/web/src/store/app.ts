@@ -1,18 +1,36 @@
 import { reactive } from 'vue'
-import type { FileDocView, FileSummary, FunctionIndexEntry, ServerMeta } from '@autodoc/shared-types'
+import type {
+  FileDocView,
+  FileSummary,
+  FunctionIndexEntry,
+  NewProjectInput,
+  ProjectInfo,
+  ServerMeta
+} from '@autodoc/shared-types'
 import {
+  activateProject,
+  addProject as apiAddProject,
   fetchFileView,
   fetchFunctionIndex,
   fetchMeta,
+  fetchProjects,
   fetchSummaries,
-  initDataSource
+  getMode,
+  initDataSource,
+  isHubEnabled,
+  refreshDocs,
+  removeProject as apiRemoveProject
 } from '../data/api'
 
-/** 全局应用状态：元信息、文件列表、函数索引与按需加载的文件视图缓存 */
+/** 全局应用状态：元信息、项目列表、文件列表、函数索引与按需加载的文件视图缓存 */
 export interface AppState {
   loading: boolean
   error: string | null
   meta: ServerMeta | null
+  /** 多项目中枢：项目列表与当前活动项目 id（静态/单项目模式下为空） */
+  projects: ProjectInfo[]
+  activeProjectId: string | null
+  hubEnabled: boolean
   summaries: FileSummary[]
   functionIndex: FunctionIndexEntry[]
   /** fileId → 视图（serve 模式下按需拉取） */
@@ -23,24 +41,54 @@ export const appState = reactive<AppState>({
   loading: false,
   error: null,
   meta: null,
+  projects: [],
+  activeProjectId: null,
+  hubEnabled: false,
   summaries: [],
   functionIndex: [],
   fileViews: new Map()
 })
+
+/** 加载当前活动项目的文档数据（meta/summaries/index）；无活动项目时清空 */
+async function loadActiveDocs(): Promise<void> {
+  if (appState.activeProjectId === null && appState.hubEnabled) {
+    appState.meta = null
+    appState.summaries = []
+    appState.functionIndex = []
+    return
+  }
+  const [meta, summaries, index] = await Promise.all([
+    fetchMeta(),
+    fetchSummaries(),
+    fetchFunctionIndex()
+  ])
+  appState.meta = meta
+  appState.summaries = summaries
+  appState.functionIndex = index
+}
 
 export async function bootstrap(): Promise<void> {
   appState.loading = true
   appState.error = null
   try {
     await initDataSource()
-    const [meta, summaries, index] = await Promise.all([
-      fetchMeta(),
-      fetchSummaries(),
-      fetchFunctionIndex()
-    ])
-    appState.meta = meta
-    appState.summaries = summaries
-    appState.functionIndex = index
+    appState.hubEnabled = isHubEnabled()
+    if (appState.hubEnabled) {
+      const resp = await fetchProjects()
+      appState.projects = resp?.projects ?? []
+      appState.activeProjectId = resp?.activeId ?? null
+    } else {
+      appState.projects = []
+      appState.activeProjectId = null
+    }
+    // 静态模式或已有活动项目时加载文档数据；hub 模式无活动项目则等待用户选择
+    if (getMode() === 'static' || appState.activeProjectId !== null || !appState.hubEnabled) {
+      await loadActiveDocs()
+    } else {
+      appState.meta = null
+      appState.summaries = []
+      appState.functionIndex = []
+    }
   } catch (error) {
     appState.error = error instanceof Error ? error.message : String(error)
   } finally {
@@ -52,6 +100,76 @@ export async function bootstrap(): Promise<void> {
 export async function reloadAll(): Promise<void> {
   appState.fileViews.clear()
   await bootstrap()
+}
+
+/** 切换活动项目：激活 → 清缓存 → 重新加载该项目文档数据 */
+export async function switchProject(id: string): Promise<void> {
+  appState.loading = true
+  appState.error = null
+  try {
+    await activateProject(id)
+    appState.fileViews.clear()
+    appState.activeProjectId = id
+    for (const p of appState.projects) p.active = p.id === id
+    await loadActiveDocs()
+    // 激活后项目的 loaded/计数已变化，刷新一次列表
+    const resp = await fetchProjects()
+    if (resp) {
+      appState.projects = resp.projects
+      appState.activeProjectId = resp.activeId
+    }
+  } catch (error) {
+    appState.error = error instanceof Error ? error.message : String(error)
+    throw error
+  } finally {
+    appState.loading = false
+  }
+}
+
+/** 新增项目并激活 */
+export async function addProject(input: NewProjectInput): Promise<ProjectInfo> {
+  appState.loading = true
+  appState.error = null
+  try {
+    const info = await apiAddProject(input)
+    appState.fileViews.clear()
+    const resp = await fetchProjects()
+    if (resp) {
+      appState.projects = resp.projects
+      appState.activeProjectId = resp.activeId
+    }
+    await loadActiveDocs()
+    return info
+  } catch (error) {
+    appState.error = error instanceof Error ? error.message : String(error)
+    throw error
+  } finally {
+    appState.loading = false
+  }
+}
+
+/** 移除项目（不删除目标数据，仅从注册表移除） */
+export async function removeProject(id: string): Promise<void> {
+  await apiRemoveProject(id)
+  appState.fileViews.clear()
+  const resp = await fetchProjects()
+  if (resp) {
+    appState.projects = resp.projects
+    appState.activeProjectId = resp.activeId
+  }
+  if (appState.activeProjectId === null) {
+    appState.meta = null
+    appState.summaries = []
+    appState.functionIndex = []
+  } else {
+    await loadActiveDocs()
+  }
+}
+
+/** 重新生成当前活动项目文档 */
+export async function regenerateActive(): Promise<void> {
+  await refreshDocs()
+  await reloadAll()
 }
 
 export async function getFileView(fileId: string): Promise<FileDocView> {
