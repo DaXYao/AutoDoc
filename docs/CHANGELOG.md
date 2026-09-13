@@ -12,6 +12,16 @@
 
 ## [未发布] 2026-09-13
 
+### feat: web 文件列表改为递归目录树（空目录链压缩 + 自适应默认展开）
+- **内容**：
+  - 新增 [utils/fileTree.ts](../packages/web/src/utils/fileTree.ts) `buildFileTree`：由文件相对路径构建目录树森林，支持空目录链压缩（无直属文件且仅一个子目录时合并，如 `core/src`），自底向上聚合文件数/函数数/三分类计数；
+  - 新增 [components/FileTree.vue](../packages/web/src/components/FileTree.vue) 递归组件：目录行可折叠（▾/▸）带聚合统计与分类标签、逐级缩进；直属文件以 2 列卡片网格呈现（文件名/语言/函数数/标签）；
+  - [FileList.vue](../packages/web/src/views/FileList.vue) 用目录树替换原「按首段分组 + 平铺网格」；自适应默认展开：顶层根目录 ≤3 个时展开一层（AutoDoc 立即看到 packages→core/server/…），多根目录时全折叠（Prism 32 个示例不炸屏）。
+- **影响范围**：packages/web（utils/fileTree.ts、components/FileTree.vue、views/FileList.vue）。
+- **动机**：原按首段分组对 AutoDoc 这类所有源码同在 `packages/` 下的项目退化为单个大平铺，看不出层级；目录树对任意项目都能呈现真实目录结构。
+- **关联**：浏览器子代理实测：AutoDoc 呈现 packages→core/src、server/src、shared-types/src→parser/storage 层级；Prism 32 目录默认折叠；展开/折叠/统计/标签/文件跳转均正常，无控制台报错。
+- **风险/回滚点**：纯前端展示层改动，不影响数据与 API；.vue 等未解析语言的文件仍不会出现（受 include 配置限制）。
+
 ### feat: 多项目中枢（hub 模式）+ 快捷启动器 + 系统文件夹选择
 - **内容**：
   - 后端：新增 [projects.ts](../packages/server/src/projects.ts) `ProjectManager`（项目注册表 configs/projects.json + 活动项目懒加载/缓存/activate/add/remove）；[app.ts](../packages/server/src/app.ts) 从「闭包单 service」重构为「引用 manager 活动 service」，新增 `/api/projects`、`/api/projects/:id/activate`、`POST /api/projects`、`DELETE /api/projects/:id`、`/api/system/pick-folder` 路由（无活动项目时文档路由返回 409）；
