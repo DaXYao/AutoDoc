@@ -264,3 +264,67 @@ export interface ProjectsResponse {
   /** 只读模式（静态导出）下禁用切换与新增 */
   readOnly: boolean
 }
+
+/* ------------------------- 项目洞察 / 代码图谱 ------------------------- */
+
+/** 功能模块（目录+连通性静态聚类，AI 命名与描述） */
+export interface InsightModule {
+  id: string
+  /** AI 命名（无 AI 时=目录名） */
+  name: string
+  /** AI 职责描述（无 AI 时=静态模板） */
+  description: string
+  fileIds: string[]
+  /** 模块内 core 函数 id（按 coreScore 降序） */
+  coreFunctionIds: string[]
+  chainIds: string[]
+  fileCount: number
+  functionCount: number
+}
+
+/** 一条实现链路：从入口到叶子的调用路径 */
+export interface InsightChain {
+  id: string
+  moduleId: string
+  entryId: string
+  /** 路径上的函数 id 序列 */
+  path: string[]
+  /** AI 叙事（无 AI 时为空串） */
+  narrative: string
+  /** 路径上每步的上下文职责（AI）；key=functionId */
+  stepRoles: Record<string, string>
+}
+
+/** 函数级图谱洞察 */
+export interface FunctionInsight {
+  functionId: string
+  inDegree: number
+  outDegree: number
+  coreScore: number
+  isCore: boolean
+  chainIds: string[]
+  moduleIds: string[]
+  /** 上游 callers（调用它的函数 id） */
+  callerIds: string[]
+  /** 下游 callees（它调用的项目内函数 id） */
+  calleeIds: string[]
+  /** AI 系统级角色（无 AI 时为空串） */
+  systemRole: string
+  /** AI 上下文职责；key=chainId */
+  chainRoles: Record<string, string>
+}
+
+/** 项目洞察聚合（静态 + 可选 AI 增强） */
+export interface ProjectInsight {
+  generatedAt: string
+  graphFingerprint: string
+  /** 是否配置了 AI（DeepSeek key） */
+  aiEnabled: boolean
+  /** AI 摘要是否已生成（缓存命中或本次生成） */
+  aiGenerated: boolean
+  /** 项目级 AI 概述（无 AI 时为空串） */
+  summary: string
+  modules: InsightModule[]
+  chains: InsightChain[]
+  functions: Record<string, FunctionInsight>
+}

@@ -6,6 +6,7 @@ import type { AnnotationTargetType, NewProjectInput, ProjectsResponse } from '@a
 import { regenerate } from './context.js'
 import { pickFolder } from './pickFolder.js'
 import type { ProjectManager } from './projects.js'
+import { loadInsight, refreshInsightAI } from './insight.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
 
 export interface BuildAppOptions {
@@ -90,6 +91,25 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
     const path = await pickFolder()
     return { path }
+  })
+
+  /* ------------------------- 项目洞察 / 代码图谱 ------------------------- */
+
+  // 静态洞察 + 命中缓存的 AI（不触发网络，快）
+  app.get('/api/insight', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    return loadInsight(service).insight
+  })
+
+  // 按需生成 AI 洞察（force=true 忽略缓存）；无 key/失败降级为静态
+  app.post('/api/insight/ai', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const body = (req.body ?? {}) as { force?: unknown }
+    const { insight } = await refreshInsightAI(service, body.force === true)
+    return insight
   })
 
   /* ------------------------- 文档数据路由（作用于活动项目） ------------------------- */
