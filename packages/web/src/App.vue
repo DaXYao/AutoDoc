@@ -53,6 +53,22 @@ async function handleRefresh(): Promise<void> {
         <router-link to="/" class="text-lg font-semibold text-gray-800 shrink-0">
           AutoDoc
         </router-link>
+        <nav class="flex items-center gap-1 shrink-0">
+          <router-link
+            to="/"
+            class="px-2 py-1 rounded text-xs text-gray-600 hover:bg-gray-100"
+            active-class="bg-gray-100 text-gray-900 font-medium"
+          >
+            洞察
+          </router-link>
+          <router-link
+            to="/files"
+            class="px-2 py-1 rounded text-xs text-gray-600 hover:bg-gray-100"
+            active-class="bg-gray-100 text-gray-900 font-medium"
+          >
+            文件
+          </router-link>
+        </nav>
 
         <!-- 项目切换（仅 hub 模式） -->
         <n-dropdown

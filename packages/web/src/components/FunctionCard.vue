@@ -16,6 +16,21 @@ const router = useRouter()
 /** 调用链路：按调用点行号（= 源码执行顺序）排序，逐节点着色 + 用途说明 */
 const callChain = computed(() => [...props.fn.calls].sort((a, b) => a.line - b.line))
 
+/** 图谱洞察（核心度/上下游/链路职责） */
+const fi = computed(() => appState.insight?.functions[props.fn.id] ?? null)
+
+function fnName(id: string): string {
+  const entry = findFunctionEntry(id)
+  if (!entry) return id.split('::')[1] ?? id
+  return `${entry.className ? `${entry.className}.` : ''}${entry.name}`
+}
+
+function goFunction(id: string): void {
+  const entry = findFunctionEntry(id)
+  if (!entry) return
+  void router.push({ name: 'file', params: { fileId: entry.fileId }, query: { fn: id } })
+}
+
 function chainKey(edge: CallEdge, i: number): string {
   return `${i}-${edge.calleeName}-${edge.calleeId ?? 'x'}`
 }
@@ -34,6 +49,7 @@ const sourceHref = computed(() =>
 
 const blocksKey = (): string => `card:${props.fn.id}:blocks`
 const callsKey = (): string => `card:${props.fn.id}:calls`
+const graphKey = (): string => `card:${props.fn.id}:graph`
 const changesKey = (): string => `card:${props.fn.id}:changes`
 const annotationsKey = (): string => `card:${props.fn.id}:annotations`
 </script>
@@ -47,6 +63,15 @@ const annotationsKey = (): string => `card:${props.fn.id}:annotations`
           {{ fn.className ? `${fn.className}.` : '' }}{{ fn.signature }}
         </span>
         <n-tag v-if="fn.exported" size="tiny" :bordered="false">exported</n-tag>
+        <n-tag
+          v-if="fi?.isCore"
+          size="tiny"
+          type="success"
+          :bordered="false"
+          :title="`coreScore ${fi.coreScore} · ${fi.chainIds.length} 条链路`"
+        >
+          核心
+        </n-tag>
         <n-tag v-if="fn.visibility === 'private'" size="tiny" type="warning" :bordered="false">
           private
         </n-tag>
@@ -73,6 +98,9 @@ const annotationsKey = (): string => `card:${props.fn.id}:annotations`
         </span>
       </div>
       <p class="mt-1 text-sm text-gray-600">{{ fn.purpose }}</p>
+      <p v-if="fi?.systemRole" class="mt-1 text-xs text-green-700">
+        系统角色：{{ fi.systemRole }}
+      </p>
       <details v-if="fn.docComment" class="mt-1 text-xs text-gray-500">
         <summary class="cursor-pointer select-none">文档注释</summary>
         <pre class="mt-1 whitespace-pre-wrap font-mono">{{ fn.docComment }}</pre>
@@ -153,6 +181,44 @@ const annotationsKey = (): string => `card:${props.fn.id}:annotations`
             </li>
           </template>
         </ol>
+      </div>
+    </div>
+
+    <!-- 图谱位置：核心度 / 上游 / 下游 / 链路上下文职责 -->
+    <div v-if="fi" class="border-t border-gray-100 px-4 py-2">
+      <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(graphKey(), false)">
+        图谱位置（上游 {{ fi.callerIds.length }} / 下游 {{ fi.calleeIds.length }} / {{ fi.chainIds.length }} 链路）
+        {{ isExpanded(graphKey(), false) ? '▾' : '▸' }}
+      </button>
+      <div v-if="isExpanded(graphKey(), false)" class="mt-2 flex flex-col gap-2 text-xs">
+        <div v-if="fi.callerIds.length > 0">
+          <span class="text-gray-500">上游（调用它）：</span>
+          <button
+            v-for="c in fi.callerIds.slice(0, 8)"
+            :key="c"
+            class="font-mono text-blue-600 hover:underline mr-1.5"
+            @click="goFunction(c)"
+          >
+            {{ fnName(c) }}
+          </button>
+        </div>
+        <div v-if="fi.calleeIds.length > 0">
+          <span class="text-gray-500">下游（它调用）：</span>
+          <button
+            v-for="c in fi.calleeIds.slice(0, 8)"
+            :key="c"
+            class="font-mono text-blue-600 hover:underline mr-1.5"
+            @click="goFunction(c)"
+          >
+            {{ fnName(c) }}
+          </button>
+        </div>
+        <div v-if="Object.keys(fi.chainRoles).length > 0">
+          <span class="text-gray-500">在链路中的职责：</span>
+          <ul class="mt-1 flex flex-col gap-0.5 text-gray-600">
+            <li v-for="(role, cid) in fi.chainRoles" :key="cid">· {{ role }}</li>
+          </ul>
+        </div>
       </div>
     </div>
 

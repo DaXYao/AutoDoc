@@ -6,10 +6,10 @@ import type {
   FunctionIndexEntry,
   NewProjectInput,
   ProjectInfo,
+  ProjectInsight,
   ProjectsResponse,
   ServerMeta
 } from '@autodoc/shared-types'
-
 /**
  * 数据访问层：serve 模式走 REST API；静态导出模式回退读取 autodoc-data.json（只读）。
  * hub 能力（多项目切换）仅在 serve 且服务端支持 /api/projects 时启用。
@@ -102,6 +102,30 @@ export async function pickFolder(): Promise<string | null> {
   if (!res.ok) return null
   const data = (await res.json()) as { path: string | null }
   return data.path ?? null
+}
+
+/* ------------------------- 项目洞察 / 代码图谱 ------------------------- */
+
+/** 静态洞察 + 命中缓存的 AI（快，不触发网络） */
+export async function fetchInsight(): Promise<ProjectInsight | null> {
+  if (mode !== 'api') return null
+  try {
+    return await fetchJson<ProjectInsight>('/api/insight')
+  } catch {
+    return null
+  }
+}
+
+/** 按需生成 AI 洞察（force 忽略缓存）；无 key/失败返回 null（前端降级） */
+export async function requestInsightAI(force = false): Promise<ProjectInsight | null> {
+  if (mode !== 'api') return null
+  const res = await fetch('/api/insight/ai', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force })
+  })
+  if (!res.ok) return null
+  return (await res.json()) as ProjectInsight
 }
 
 export async function fetchMeta(): Promise<ServerMeta> {

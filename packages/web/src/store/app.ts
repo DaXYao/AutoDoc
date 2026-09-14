@@ -5,6 +5,7 @@ import type {
   FunctionIndexEntry,
   NewProjectInput,
   ProjectInfo,
+  ProjectInsight,
   ServerMeta
 } from '@autodoc/shared-types'
 import {
@@ -12,6 +13,7 @@ import {
   addProject as apiAddProject,
   fetchFileView,
   fetchFunctionIndex,
+  fetchInsight,
   fetchMeta,
   fetchProjects,
   fetchSummaries,
@@ -19,7 +21,8 @@ import {
   initDataSource,
   isHubEnabled,
   refreshDocs,
-  removeProject as apiRemoveProject
+  removeProject as apiRemoveProject,
+  requestInsightAI
 } from '../data/api'
 
 /** 全局应用状态：元信息、项目列表、文件列表、函数索引与按需加载的文件视图缓存 */
@@ -33,6 +36,8 @@ export interface AppState {
   hubEnabled: boolean
   summaries: FileSummary[]
   functionIndex: FunctionIndexEntry[]
+  /** 项目洞察/代码图谱（静态+可选AI） */
+  insight: ProjectInsight | null
   /** fileId → 视图（serve 模式下按需拉取） */
   fileViews: Map<string, FileDocView>
 }
@@ -46,6 +51,7 @@ export const appState = reactive<AppState>({
   hubEnabled: false,
   summaries: [],
   functionIndex: [],
+  insight: null,
   fileViews: new Map()
 })
 
@@ -55,6 +61,7 @@ async function loadActiveDocs(): Promise<void> {
     appState.meta = null
     appState.summaries = []
     appState.functionIndex = []
+    appState.insight = null
     return
   }
   const [meta, summaries, index] = await Promise.all([
@@ -65,6 +72,21 @@ async function loadActiveDocs(): Promise<void> {
   appState.meta = meta
   appState.summaries = summaries
   appState.functionIndex = index
+  appState.insight = await fetchInsight()
+}
+
+/** 若已配置 AI 且尚未生成摘要，按需触发一次 AI 生成（命中缓存则秒回） */
+export async function ensureInsightAI(): Promise<void> {
+  const cur = appState.insight
+  if (!cur || !cur.aiEnabled || cur.aiGenerated) return
+  const enriched = await requestInsightAI(false)
+  if (enriched) appState.insight = enriched
+}
+
+/** 强制重新生成 AI 洞察 */
+export async function regenerateInsightAI(): Promise<void> {
+  const enriched = await requestInsightAI(true)
+  if (enriched) appState.insight = enriched
 }
 
 export async function bootstrap(): Promise<void> {
@@ -88,6 +110,7 @@ export async function bootstrap(): Promise<void> {
       appState.meta = null
       appState.summaries = []
       appState.functionIndex = []
+      appState.insight = null
     }
   } catch (error) {
     appState.error = error instanceof Error ? error.message : String(error)
