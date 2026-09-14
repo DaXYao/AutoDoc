@@ -10,6 +10,20 @@
 
 ---
 
+## [未发布] 2026-09-14
+
+### feat: AI 增强的「项目洞察 / 代码图谱」（DeepSeek，按需+缓存）
+- **内容**：
+  - 密钥供给：零依赖 .env 加载器 [server/src/env.ts](../packages/server/src/env.ts)（真实环境变量优先）；.env 已 gitignore，新增可提交模板 .env.example；默认模型 deepseek-v4.1-flash（DEEPSEEK_MODEL 可覆盖）；未配置 key 时 AI 优雅降级为纯静态；
+  - 静态图谱 [server/src/graph.ts](../packages/server/src/graph.ts)：全项目调用图（复用跨文件 CallEdge）→ in/out-degree、核心度（inDegree*2+链路数+跨模块被调）、入口点、有界 DFS 链路（环保护+上限）、目录模块聚类；
+  - AI 客户端 [server/src/ai.ts](../packages/server/src/ai.ts)（内置 fetch）+ 指纹缓存 [aiCache.ts](../packages/server/src/aiCache.ts)（.autodoc/ai-cache.json，图指纹变自动失效）；[insight.ts](../packages/server/src/insight.ts) 按需生成：模块命名/职责+项目概述、核心函数系统角色、逐模块链路叙事+步骤上下文职责；
+  - 路由 GET /api/insight（静态+缓存AI，快）、POST /api/insight/ai（按需生成，force 重生成）；
+  - web：默认首页改为 [InsightHome.vue](../packages/web/src/views/InsightHome.vue)（项目概述+核心函数芯片+功能模块卡片）；新增 [ModuleDetail.vue](../packages/web/src/views/ModuleDetail.vue)（链路叙事+每步「在这里」职责+核心+文件）；原文件列表移至 /files；[FunctionCard.vue](../packages/web/src/components/FunctionCard.vue) 加「核心」徽章+系统角色+「图谱位置」（上游/下游/链路职责）；App.vue 加洞察/文件导航。
+- **影响范围**：packages/shared-types（Insight 类型）、packages/server（env/ai/aiCache/graph/insight/app）、packages/web（api/store/router/InsightHome/ModuleDetail/FunctionCard/App）、根 .env/.env.example/.gitignore。
+- **动机**：用户痛点：看不出项目核心、不知道函数在某条链路里的职责、只能逐文件点、呈现无趣。引入 AI 按功能模块划分、标核心、给链路上下文职责，并支持上游/下游导航。
+- **关联**：48 个 Vitest 全绿；浏览器实测 5 步全通过（洞察首页/模块详情/链路跳转/核心徽章/图谱位置/文件列表），无 key 降级正常，零控制台报错。
+- **风险/回滚点**：AI 结果依赖 DeepSeek 可用性/费用，已按需+缓存+降级；模型 id 若不符可在 .env 改 DEEPSEEK_MODEL；旧 key 已泄露作废，新 key 由用户自行填入 .env（不入库）。
+
 ## [未发布] 2026-09-13
 
 ### feat: 跨文件调用解析（import 映射，principled）+ API 禁缓存
