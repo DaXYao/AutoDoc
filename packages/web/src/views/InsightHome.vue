@@ -2,11 +2,13 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import { appState, ensureInsightAI, findFunctionEntry, regenerateInsightAI } from '../store/app'
+import { appState, ensureInsightAI, findFunctionEntry, regenerateInsightAI, repartitionInsight } from '../store/app'
 
 const router = useRouter()
 const message = useMessage()
 const aiBusy = ref(false)
+const feedback = ref('')
+const partitionBusy = ref(false)
 
 onMounted(() => {
   void triggerAI(false)
@@ -24,6 +26,28 @@ async function triggerAI(force: boolean): Promise<void> {
     message.error(error instanceof Error ? error.message : String(error))
   } finally {
     aiBusy.value = false
+  }
+}
+
+/** 提交用户建议，让 AI 在当前划分基础上重新划分 */
+async function handleRepartition(): Promise<void> {
+  if (!feedback.value.trim()) {
+    message.warning('请先填写对当前划分的建议')
+    return
+  }
+  partitionBusy.value = true
+  try {
+    await repartitionInsight(feedback.value.trim())
+    const cur = appState.insight
+    if (cur && cur.partitionSource === 'ai' && cur.partitionFeedback === feedback.value.trim()) {
+      message.success('已按建议重新划分')
+    } else {
+      message.warning('AI 划分失败（可能输出超长），已回退目录划分；可重试或简化建议')
+    }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error))
+  } finally {
+    partitionBusy.value = false
   }
 }
 
@@ -114,6 +138,30 @@ function goModule(id: string): void {
 
       <!-- 项目概述 -->
       <p v-if="insight.summary" class="text-sm text-gray-600 mb-4">{{ insight.summary }}</p>
+
+      <!-- 模块划分反馈（AI 主导划分 + 用户建议迭代） -->
+      <section v-if="insight.aiEnabled" class="mb-5 rounded-lg border border-gray-200 bg-white px-4 py-3">
+        <div class="flex items-center gap-2 mb-2">
+          <h3 class="text-sm font-semibold text-gray-700">功能模块划分</h3>
+          <n-tag size="tiny" :type="insight.partitionSource === 'ai' ? 'success' : 'default'" :bordered="false">
+            {{ insight.partitionSource === 'ai' ? 'AI 划分' : '目录划分' }}
+          </n-tag>
+          <span v-if="insight.partitionFeedback" class="text-xs text-gray-400">
+            已采纳建议：{{ insight.partitionFeedback.slice(0, 40) }}
+          </span>
+        </div>
+        <n-input
+          v-model:value="feedback"
+          type="textarea"
+          :autosize="{ minRows: 2, maxRows: 4 }"
+          placeholder="对当前划分不满意？写下你的建议（如：把存储和备份合并为一个模块；解析器应拆成 C# 与 TS 两个模块），AI 会据此重新划分。"
+        />
+        <div class="mt-2 flex justify-end">
+          <n-button size="small" type="primary" :loading="partitionBusy" @click="handleRepartition">
+            按建议重新划分
+          </n-button>
+        </div>
+      </section>
 
       <!-- 核心函数 -->
       <section v-if="coreFunctions.length" class="mb-5">

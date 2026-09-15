@@ -22,7 +22,8 @@ import {
   isHubEnabled,
   refreshDocs,
   removeProject as apiRemoveProject,
-  requestInsightAI
+  requestInsightAI,
+  requestInsightPartition
 } from '../data/api'
 
 /** 全局应用状态：元信息、项目列表、文件列表、函数索引与按需加载的文件视图缓存 */
@@ -86,6 +87,12 @@ export async function ensureInsightAI(): Promise<void> {
 /** 强制重新生成 AI 洞察 */
 export async function regenerateInsightAI(): Promise<void> {
   const enriched = await requestInsightAI(true)
+  if (enriched) appState.insight = enriched
+}
+
+/** 按用户建议重新划分功能模块（仅重生成划分，其余 AI 结果走缓存） */
+export async function repartitionInsight(feedback: string): Promise<void> {
+  const enriched = await requestInsightPartition(feedback)
   if (enriched) appState.insight = enriched
 }
 

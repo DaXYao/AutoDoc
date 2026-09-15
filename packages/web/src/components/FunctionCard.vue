@@ -76,6 +76,15 @@ const annotationsKey = (): string => `card:${props.fn.id}:annotations`
           private
         </n-tag>
         <n-tag
+          v-if="fi?.aiCategory"
+          size="tiny"
+          type="info"
+          :bordered="false"
+          :title="fi.aiCategoryReason || 'AI 判定的三分类'"
+        >
+          AI 判定: {{ CATEGORY_LABELS[fi.aiCategory] }}
+        </n-tag>
+        <n-tag
           v-for="decorator in fn.decorators"
           :key="decorator"
           size="tiny"

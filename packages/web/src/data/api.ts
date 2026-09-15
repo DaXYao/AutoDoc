@@ -106,23 +106,39 @@ export async function pickFolder(): Promise<string | null> {
 
 /* ------------------------- 项目洞察 / 代码图谱 ------------------------- */
 
-/** 静态洞察 + 命中缓存的 AI（快，不触发网络） */
-export async function fetchInsight(): Promise<ProjectInsight | null> {
+/** 静态洞察 + 命中缓存的 AI（快，不触发网络）；feedback 读取对应建议版本 */
+export async function fetchInsight(feedback = ''): Promise<ProjectInsight | null> {
   if (mode !== 'api') return null
   try {
-    return await fetchJson<ProjectInsight>('/api/insight')
+    const qs = feedback ? `?feedback=${encodeURIComponent(feedback)}` : ''
+    return await fetchJson<ProjectInsight>(`/api/insight${qs}`)
   } catch {
     return null
   }
 }
 
 /** 按需生成 AI 洞察（force 忽略缓存）；无 key/失败返回 null（前端降级） */
-export async function requestInsightAI(force = false): Promise<ProjectInsight | null> {
+export async function requestInsightAI(
+  force = false,
+  feedback = ''
+): Promise<ProjectInsight | null> {
   if (mode !== 'api') return null
   const res = await fetch('/api/insight/ai', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ force })
+    body: JSON.stringify({ force, feedback })
+  })
+  if (!res.ok) return null
+  return (await res.json()) as ProjectInsight
+}
+
+/** 按用户建议重新划分模块（仅重生成划分，其余走缓存） */
+export async function requestInsightPartition(feedback: string): Promise<ProjectInsight | null> {
+  if (mode !== 'api') return null
+  const res = await fetch('/api/insight/partition', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ feedback })
   })
   if (!res.ok) return null
   return (await res.json()) as ProjectInsight
