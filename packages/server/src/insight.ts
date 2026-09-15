@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto'
 import { dirname } from 'node:path'
 import type {
+  FunctionCategory,
   FunctionDoc,
   InsightChain,
   InsightModule,
@@ -9,20 +11,35 @@ import { deepseekChat, extractJson, type ChatMessage } from './ai.js'
 import { AiCache } from './aiCache.js'
 import type { DocService } from './context.js'
 import { getDeepSeekConfig } from './env.js'
-import { buildGraph, type ProjectGraph } from './graph.js'
+import { applyPartition, buildGraph, type Partition, type ProjectGraph } from './graph.js'
 
-/** AI 产出信封（缓存单元） */
-interface AIEnvelope {
+/** AI 划分信封（缓存单元）：members 为函数在索引表中的下标 */
+interface PartitionEnvelope {
   summary: string
-  modules: Record<string, { name?: string; description?: string }>
-  coreRoles: Record<string, string>
-  chains: Record<string, { narrative?: string; stepRoles?: Record<string, string> }>
+  feedback: string
+  modules: { name: string; description: string; members: number[] }[]
+}
+interface CategoryEnvelope {
+  [fnId: string]: { category: FunctionCategory; reason: string }
+}
+interface NarrativeEnvelope {
+  [chainKey: string]: { narrative?: string; stepRoles?: Record<string, string> }
 }
 
 const MAX_AI_MODULES = 6
 const MAX_AI_CHAINS_PER_MODULE = 4
 const MAX_AI_CORES = 25
 const AI_MAX_TOKENS = 4000
+/** 划分输出含全部成员索引，体量最大，单独给更高上限防截断 */
+const PARTITION_MAX_TOKENS = 8000
+const CATEGORIES: FunctionCategory[] = ['business', 'implementation', 'utility']
+
+const hash8 = (s: string): string => createHash('sha256').update(s).digest('hex').slice(0, 8)
+
+/** 稳定索引表：idx ↔ functionId */
+function indexTable(graph: ProjectGraph): string[] {
+  return [...graph.nodes.keys()].sort()
+}
 
 function fnLabel(fn: FunctionDoc): string {
   return `${fn.className ? `${fn.className}.` : ''}${fn.name}`
@@ -37,82 +54,82 @@ function systemPrompt(): ChatMessage {
   }
 }
 
-/** 静态洞察（无 AI）：模块用目录名 + 模板描述，AI 字段留空 */
-function buildStaticInsight(graph: ProjectGraph, aiEnabled: boolean): ProjectInsight {
-  const modules: InsightModule[] = graph.modules.map((m) => ({
-    ...m,
-    description: m.description || `目录 ${m.name} · ${m.functionCount} 函数 · ${m.fileCount} 文件`
-  }))
-  const chains: InsightChain[] = graph.chains.map((c) => ({ ...c }))
-  const functions: ProjectInsight['functions'] = {}
-  for (const [id, ins] of graph.insights) functions[id] = { ...ins }
-  return {
-    generatedAt: new Date().toISOString(),
-    graphFingerprint: graph.fingerprint,
-    aiEnabled,
-    aiGenerated: false,
-    summary: '',
-    modules,
-    chains,
-    functions
-  }
-}
+/* ------------------------- AI 调用 ------------------------- */
 
-/** 将 AI 信封套用到静态洞察上 */
-function applyEnvelope(insight: ProjectInsight, env: AIEnvelope): void {
-  insight.summary = env.summary ?? ''
-  for (const mod of insight.modules) {
-    const ai = env.modules?.[mod.id]
-    if (ai) {
-      if (ai.name) mod.name = ai.name
-      if (ai.description) mod.description = ai.description
-    }
-  }
-  for (const [fnId, role] of Object.entries(env.coreRoles ?? {})) {
-    const f = insight.functions[fnId]
-    if (f && role) f.systemRole = role
-  }
-  for (const chain of insight.chains) {
-    // 模型可能回显键时丢掉 "chain:" 前缀，两种键都容忍
-    const ai =
-      env.chains?.[chain.id] ?? env.chains?.[chain.id.replace(/^chain:/, '')]
-    if (!ai) continue
-    if (ai.narrative) chain.narrative = ai.narrative
-    if (ai.stepRoles) {
-      chain.stepRoles = { ...ai.stepRoles }
-      for (const [fnId, role] of Object.entries(ai.stepRoles)) {
-        const f = insight.functions[fnId]
-        if (f && role) f.chainRoles[chain.id] = role
-      }
-    }
-  }
-  insight.aiGenerated = true
-}
-
-/** 调用 1：项目概述 + 模块命名/描述 */
-async function aiModules(graph: ProjectGraph): Promise<Pick<AIEnvelope, 'summary' | 'modules'>> {
-  const lines = graph.modules
-    .slice(0, 40)
-    .map((m) => {
-      const reps = m.coreFunctionIds
-        .slice(0, 4)
-        .map((id) => fnLabel(graph.nodes.get(id)!))
-        .join(', ')
-      return `${m.id} | ${m.name} | ${m.fileCount}文件 | ${m.functionCount}函数 | 代表: ${reps || '-'}`
+/** AI 主导的功能模块划分（可携带用户建议与上一版划分做迭代） */
+async function aiPartition(
+  graph: ProjectGraph,
+  feedback: string,
+  previous: PartitionEnvelope | null
+): Promise<PartitionEnvelope | null> {
+  const ids = indexTable(graph)
+  const lines = ids
+    .map((id, i) => {
+      const fn = graph.nodes.get(id)!
+      return `${i}|${fnLabel(fn)}|${graph.fileOf.get(id)}|${fn.category}|${fn.purpose.slice(0, 40)}|入${graph.inDegree.get(id) ?? 0}/出${graph.outDegree.get(id) ?? 0}`
     })
     .join('\n')
+  let ctx = ''
+  if (previous && previous.modules.length > 0) {
+    ctx +=
+      `上一版划分：\n${previous.modules
+        .map((m) => `「${m.name}」: ${m.description}`)
+        .join('\n')}\n`
+  }
+  if (feedback.trim()) {
+    ctx += `用户对上一版划分的建议（必须采纳并据此调整）：\n${feedback.trim()}\n`
+  }
   const user =
-    `项目共 ${graph.nodes.size} 个函数、${graph.chains.length} 条调用链路。功能模块清单(id|目录|文件数|函数数|代表函数)：\n${lines}\n` +
-    `输出 JSON: {"summary":"项目一句话概述","modules":{"<模块id>":{"name":"简短中文功能名","description":"一句话职责"}}}`
+    `以下是一个项目的全部函数（索引|名称|文件|当前分类|用途|入度/出度）：\n${lines}\n` +
+    ctx +
+    `请把它们划分为若干"功能模块"（按业务功能而非目录），每个模块给出 name(<=14字)、description(一句话职责)、members(函数索引数组)。` +
+    `要求：覆盖全部索引、模块间职责不重叠、数量适中(4-10个)。` +
+    `另给 summary(项目一句话概述)。` +
+    `输出 JSON: {"summary":"...","modules":[{"name":"...","description":"...","members":[0,3,7]}]}`
+  const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+    maxTokens: PARTITION_MAX_TOKENS
+  })
+  const parsed = extractJson<Omit<PartitionEnvelope, 'feedback'>>(text)
+  if (!parsed || !Array.isArray(parsed.modules) || parsed.modules.length === 0) {
+    console.warn('[autodoc] AI 划分返回无法解析，回退目录划分')
+    return null
+  }
+  return { summary: parsed.summary ?? '', feedback, modules: parsed.modules }
+}
+
+/** AI 判定原本 pending（规则无法分类）的函数三分类 */
+async function aiCategories(graph: ProjectGraph): Promise<CategoryEnvelope> {
+  const ids = indexTable(graph)
+  const pending = ids
+    .map((id, i) => ({ id, i, fn: graph.nodes.get(id)! }))
+    .filter((x) => x.fn.category === 'pending')
+  if (pending.length === 0) return {}
+  const lines = pending
+    .map((x) => `${x.i}|${fnLabel(x.fn)}|${graph.fileOf.get(x.id)}|${x.fn.purpose.slice(0, 50)}`)
+    .join('\n')
+  const user =
+    `以下函数未能被规则分类（索引|名称|文件|用途）：\n${lines}\n` +
+    `请为每个函数判定最合适的类别：business(对外入口/业务接口)、implementation(业务背后的具体实现)、utility(无业务状态的通用工具)。` +
+    `输出 JSON: {"<索引>":{"category":"business|implementation|utility","reason":"一句话理由"}}`
   const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
     maxTokens: AI_MAX_TOKENS
   })
-  return (
-    extractJson<Pick<AIEnvelope, 'summary' | 'modules'>>(text) ?? { summary: '', modules: {} }
-  )
+  const raw = extractJson<Record<string, { category?: string; reason?: string }>>(text)
+  if (!raw) {
+    console.warn('[autodoc] AI 分类返回无法解析，pending 保持未分类')
+    return {}
+  }
+  const out: CategoryEnvelope = {}
+  for (const [key, v] of Object.entries(raw)) {
+    const idx = Number(key)
+    const item = pending.find((p) => p.i === idx)
+    if (!item || !v || !CATEGORIES.includes(v.category as FunctionCategory)) continue
+    out[item.id] = { category: v.category as FunctionCategory, reason: v.reason ?? '' }
+  }
+  return out
 }
 
-/** 调用 2：核心函数系统级角色 */
+/** 核心函数系统级角色 */
 async function aiCoreRoles(graph: ProjectGraph): Promise<Record<string, string>> {
   const cores = [...graph.insights.values()]
     .filter((f) => f.isCore)
@@ -133,17 +150,15 @@ async function aiCoreRoles(graph: ProjectGraph): Promise<Record<string, string>>
   })
   const parsed = extractJson<Record<string, string>>(text)
   if (!parsed) {
-    console.warn('[autodoc] AI 核心角色返回无法解析为 JSON，已忽略')
+    console.warn('[autodoc] AI 核心角色返回无法解析，已忽略')
     return {}
   }
   return parsed
 }
 
-/** 调用 3..N：逐模块的链路叙事 + 步骤上下文职责 */
-async function aiChains(
-  graph: ProjectGraph
-): Promise<Record<string, { narrative?: string; stepRoles?: Record<string, string> }>> {
-  const out: AIEnvelope['chains'] = {}
+/** 逐模块链路叙事 + 步骤上下文职责 */
+async function aiNarratives(graph: ProjectGraph): Promise<NarrativeEnvelope> {
+  const out: NarrativeEnvelope = {}
   const modulesWithChains = graph.modules
     .filter((m) => m.chainIds.length > 0)
     .sort((a, b) => b.chainIds.length - a.chainIds.length)
@@ -174,93 +189,244 @@ async function aiChains(
       const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
         maxTokens: AI_MAX_TOKENS
       })
-      const parsed = extractJson<AIEnvelope['chains']>(text)
+      const parsed = extractJson<NarrativeEnvelope>(text)
       if (parsed) Object.assign(out, parsed)
-      else console.warn(`[autodoc] AI 链路叙事(模块 ${mod.name}) 返回无法解析为 JSON，已忽略`)
+      else console.warn(`[autodoc] AI 链路叙事(模块 ${mod.name}) 返回无法解析，已忽略`)
     } catch (e) {
-      console.warn(`[autodoc] AI 链路叙事(模块 ${mod.name}) 失败：${e instanceof Error ? e.message : String(e)}`)
+      console.warn(
+        `[autodoc] AI 链路叙事(模块 ${mod.name}) 失败：${e instanceof Error ? e.message : String(e)}`
+      )
     }
   }
   return out
 }
 
-/** 生成完整 AI 信封（多次调用）；任一子调用失败则对应部分留空并打日志 */
-async function generateEnvelope(graph: ProjectGraph): Promise<AIEnvelope> {
-  const warn = (label: string, e: unknown): void => {
-    console.warn(`[autodoc] AI ${label} 失败：${e instanceof Error ? e.message : String(e)}`)
-  }
-  const [modPart, coreRoles, chains] = await Promise.all([
-    aiModules(graph).catch((e) => {
-      warn('模块摘要', e)
-      return { summary: '', modules: {} }
-    }),
-    aiCoreRoles(graph).catch((e) => {
-      warn('核心角色', e)
-      return {}
-    }),
-    aiChains(graph).catch((e) => {
-      warn('链路叙事', e)
-      return {}
-    })
-  ])
+/* ------------------------- 应用 AI 结果 ------------------------- */
+
+function toPartition(graph: ProjectGraph, env: PartitionEnvelope): Partition {
+  const ids = indexTable(graph)
   return {
-    summary: modPart.summary ?? '',
-    modules: modPart.modules ?? {},
-    coreRoles,
-    chains
+    source: 'ai',
+    modules: env.modules.map((m) => ({
+      name: m.name,
+      description: m.description,
+      members: (m.members ?? [])
+        .map((i) => ids[i])
+        .filter((id): id is string => typeof id === 'string')
+    }))
   }
 }
 
-/** 信封是否全空（key/模型/网络问题导致全部子调用失败） */
-function isEmptyEnvelope(env: AIEnvelope): boolean {
-  return (
-    !env.summary &&
-    Object.keys(env.modules ?? {}).length === 0 &&
-    Object.keys(env.coreRoles ?? {}).length === 0 &&
-    Object.keys(env.chains ?? {}).length === 0
-  )
+function buildInsight(
+  graph: ProjectGraph,
+  aiEnabled: boolean,
+  feedback: string
+): ProjectInsight {
+  const modules: InsightModule[] = graph.modules.map((m) => ({
+    ...m,
+    functionIds: [...m.functionIds],
+    description: m.description || `目录 ${m.name} · ${m.functionCount} 函数 · ${m.fileCount} 文件`
+  }))
+  const chains: InsightChain[] = graph.chains.map((c) => ({ ...c, stepRoles: { ...c.stepRoles } }))
+  const functions: ProjectInsight['functions'] = {}
+  for (const [id, ins] of graph.insights) {
+    functions[id] = { ...ins, chainRoles: { ...ins.chainRoles }, moduleIds: [...ins.moduleIds] }
+  }
+  return {
+    generatedAt: new Date().toISOString(),
+    graphFingerprint: graph.fingerprint,
+    aiEnabled,
+    aiGenerated: false,
+    partitionSource: graph.partition.source,
+    partitionFeedback: feedback,
+    summary: '',
+    modules,
+    chains,
+    functions
+  }
 }
+
+function applyCategories(
+  insight: ProjectInsight,
+  graph: ProjectGraph,
+  cats: CategoryEnvelope
+): void {
+  for (const [fnId, v] of Object.entries(cats)) {
+    const f = insight.functions[fnId]
+    if (!f) continue
+    f.aiCategory = v.category
+    f.aiCategoryReason = v.reason
+    // 同步到图谱/服务内存中的 FunctionDoc，使三分类分组与统计反映 AI 判定
+    const node = graph.nodes.get(fnId)
+    if (node && node.category === 'pending') node.category = v.category
+  }
+}
+
+function applyRoles(insight: ProjectInsight, roles: Record<string, string>): void {
+  for (const [fnId, role] of Object.entries(roles)) {
+    const f = insight.functions[fnId]
+    if (f && role) f.systemRole = role
+  }
+}
+
+function applyNarratives(insight: ProjectInsight, narr: NarrativeEnvelope): void {
+  for (const chain of insight.chains) {
+    const ai = narr[chain.id] ?? narr[chain.id.replace(/^chain:/, '')]
+    if (!ai) continue
+    if (ai.narrative) chain.narrative = ai.narrative
+    if (ai.stepRoles) {
+      chain.stepRoles = { ...ai.stepRoles }
+      for (const [fnId, role] of Object.entries(ai.stepRoles)) {
+        const f = insight.functions[fnId]
+        if (f && role) f.chainRoles[chain.id] = role
+      }
+    }
+  }
+}
+
+/* ------------------------- 对外入口 ------------------------- */
 
 export interface InsightBundle {
   insight: ProjectInsight
   graph: ProjectGraph
 }
 
+export interface RefreshOptions {
+  force?: boolean
+  feedback?: string
+  forcePartition?: boolean
+}
+
 /** 读取洞察：静态 + 命中缓存的 AI（不触发网络） */
-export function loadInsight(service: DocService): InsightBundle {
+export function loadInsight(service: DocService, feedback = ''): InsightBundle {
   const graph = buildGraph(service.files)
   const aiEnabled = getDeepSeekConfig() !== null
-  const insight = buildStaticInsight(graph, aiEnabled)
-  if (aiEnabled) {
-    const cache = new AiCache(dirname(service.storage.dataPath))
-    const cached = cache.get<AIEnvelope>(graph.fingerprint, 'insight')
-    if (cached) applyEnvelope(insight, cached)
+  const insight = buildInsight(graph, aiEnabled, feedback)
+  if (!aiEnabled) return { insight, graph }
+  const cache = new AiCache(dirname(service.storage.dataPath))
+  const fp = graph.fingerprint
+  let touched = false
+  const p = cache.get<PartitionEnvelope>(fp, `partition:${hash8(feedback)}`)
+  if (p) {
+    applyPartition(graph, toPartition(graph, p))
+    rebuildInsightFromGraph(insight, graph, p.summary)
+    insight.partitionFeedback = p.feedback ?? ''
+    touched = true
   }
+  const cats = cache.get<CategoryEnvelope>(fp, 'categories')
+  if (cats) {
+    applyCategories(insight, graph, cats)
+    touched = true
+  }
+  const roles = cache.get<Record<string, string>>(fp, 'coreRoles')
+  if (roles) {
+    applyRoles(insight, roles)
+    touched = true
+  }
+  const narr = cache.get<NarrativeEnvelope>(fp, 'narratives')
+  if (narr) {
+    applyNarratives(insight, narr)
+    touched = true
+  }
+  insight.aiGenerated = touched
   return { insight, graph }
 }
 
-/** 按需生成 AI 洞察（force=true 忽略缓存重新生成）；无 key/失败时降级为静态 */
-export async function refreshInsightAI(service: DocService, force: boolean): Promise<InsightBundle> {
+/** 划分改变后，用 graph 的最新 modules 重建 insight 的模块与摘要 */
+function rebuildInsightFromGraph(
+  insight: ProjectInsight,
+  graph: ProjectGraph,
+  summary: string
+): void {
+  insight.modules = graph.modules.map((m) => ({
+    ...m,
+    functionIds: [...m.functionIds],
+    description: m.description || `目录 ${m.name} · ${m.functionCount} 函数 · ${m.fileCount} 文件`
+  }))
+  insight.partitionSource = graph.partition.source
+  if (summary) insight.summary = summary
+  // 模块归属变化后刷新每个函数的 moduleIds
+  for (const [id, ins] of Object.entries(insight.functions)) {
+    ins.moduleIds = [...(graph.moduleIdsOf.get(id) ?? [])]
+  }
+}
+
+/** 按需生成 AI 洞察（命中缓存则秒回）；无 key/失败降级为静态 */
+export async function refreshInsightAI(
+  service: DocService,
+  opts: RefreshOptions = {}
+): Promise<InsightBundle> {
+  const feedback = opts.feedback ?? ''
   const graph = buildGraph(service.files)
   const aiEnabled = getDeepSeekConfig() !== null
-  const insight = buildStaticInsight(graph, aiEnabled)
+  const insight = buildInsight(graph, aiEnabled, feedback)
   if (!aiEnabled) return { insight, graph }
   const cache = new AiCache(dirname(service.storage.dataPath))
-  let env = force ? undefined : cache.get<AIEnvelope>(graph.fingerprint, 'insight')
-  if (!env) {
+  const fp = graph.fingerprint
+  const fbKey = `partition:${hash8(feedback)}`
+
+  // 1) 划分（AI 主导；可携带用户建议迭代）
+  let p = opts.force || opts.forcePartition ? undefined : cache.get<PartitionEnvelope>(fp, fbKey)
+  if (!p) {
+    const previous = cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? null
     try {
-      env = await generateEnvelope(graph)
+      p = (await aiPartition(graph, feedback, previous)) ?? undefined
     } catch (e) {
-      console.warn(`[autodoc] AI 生成异常，降级为静态：${e instanceof Error ? e.message : String(e)}`)
-      return { insight, graph }
+      console.warn(`[autodoc] AI 划分失败，回退目录划分：${e instanceof Error ? e.message : String(e)}`)
     }
-    // 全空信封不写缓存（避免 key/模型/网络故障污染缓存），降级为静态
-    if (isEmptyEnvelope(env)) {
-      console.warn('[autodoc] AI 返回为空（检查 DEEPSEEK_API_KEY / DEEPSEEK_MODEL / 网络），降级为静态')
-      return { insight, graph }
+    if (p) {
+      cache.set(fp, fbKey, p)
+      cache.set(fp, 'partition:latest', p)
     }
-    cache.set(graph.fingerprint, 'insight', env)
   }
-  applyEnvelope(insight, env)
+  if (p) {
+    applyPartition(graph, toPartition(graph, p))
+    rebuildInsightFromGraph(insight, graph, p.summary)
+    insight.partitionFeedback = feedback
+  } else {
+    // 划分失败回退目录：不记录 feedback，避免误导「已采纳」
+    insight.partitionFeedback = ''
+  }
+
+  // 2) pending 函数 AI 分类
+  let cats = opts.force ? undefined : cache.get<CategoryEnvelope>(fp, 'categories')
+  if (!cats) {
+    try {
+      cats = await aiCategories(graph)
+      if (Object.keys(cats).length > 0) cache.set(fp, 'categories', cats)
+    } catch (e) {
+      console.warn(`[autodoc] AI 分类失败：${e instanceof Error ? e.message : String(e)}`)
+      cats = {}
+    }
+  }
+  applyCategories(insight, graph, cats ?? {})
+
+  // 3) 核心角色
+  let roles = opts.force ? undefined : cache.get<Record<string, string>>(fp, 'coreRoles')
+  if (!roles) {
+    try {
+      roles = await aiCoreRoles(graph)
+      if (Object.keys(roles).length > 0) cache.set(fp, 'coreRoles', roles)
+    } catch (e) {
+      console.warn(`[autodoc] AI 核心角色失败：${e instanceof Error ? e.message : String(e)}`)
+      roles = {}
+    }
+  }
+  applyRoles(insight, roles ?? {})
+
+  // 4) 链路叙事
+  let narr = opts.force ? undefined : cache.get<NarrativeEnvelope>(fp, 'narratives')
+  if (!narr) {
+    try {
+      narr = await aiNarratives(graph)
+      if (Object.keys(narr).length > 0) cache.set(fp, 'narratives', narr)
+    } catch (e) {
+      console.warn(`[autodoc] AI 链路叙事失败：${e instanceof Error ? e.message : String(e)}`)
+      narr = {}
+    }
+  }
+  applyNarratives(insight, narr ?? {})
+
+  insight.aiGenerated = !!(p || Object.keys(cats ?? {}).length || Object.keys(roles ?? {}).length || Object.keys(narr ?? {}).length)
   return { insight, graph }
 }

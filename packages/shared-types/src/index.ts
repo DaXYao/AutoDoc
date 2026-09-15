@@ -267,13 +267,17 @@ export interface ProjectsResponse {
 
 /* ------------------------- 项目洞察 / 代码图谱 ------------------------- */
 
-/** 功能模块（目录+连通性静态聚类，AI 命名与描述） */
+/** 功能模块（AI 划分优先，目录聚类兑底） */
 export interface InsightModule {
   id: string
-  /** AI 命名（无 AI 时=目录名） */
+  /** AI 命名（目录兑底时=目录名） */
   name: string
-  /** AI 职责描述（无 AI 时=静态模板） */
+  /** AI 职责描述 */
   description: string
+  /** 划分来源：ai=AI 划分，dir=目录聚类兑底 */
+  source: 'ai' | 'dir'
+  /** 模块成员函数 id */
+  functionIds: string[]
   fileIds: string[]
   /** 模块内 core 函数 id（按 coreScore 降序） */
   coreFunctionIds: string[]
@@ -312,6 +316,10 @@ export interface FunctionInsight {
   systemRole: string
   /** AI 上下文职责；key=chainId */
   chainRoles: Record<string, string>
+  /** AI 对原本 pending 函数的三分类判定（非 AI 判定则为 null） */
+  aiCategory: FunctionCategory | null
+  /** AI 分类理由 */
+  aiCategoryReason: string
 }
 
 /** 项目洞察聚合（静态 + 可选 AI 增强） */
@@ -322,6 +330,10 @@ export interface ProjectInsight {
   aiEnabled: boolean
   /** AI 摘要是否已生成（缓存命中或本次生成） */
   aiGenerated: boolean
+  /** 模块划分来源 */
+  partitionSource: 'ai' | 'dir'
+  /** 本次划分所依据的用户建议（空串=无） */
+  partitionFeedback: string
   /** 项目级 AI 概述（无 AI 时为空串） */
   summary: string
   modules: InsightModule[]

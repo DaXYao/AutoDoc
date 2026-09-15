@@ -95,11 +95,12 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   /* ------------------------- 项目洞察 / 代码图谱 ------------------------- */
 
-  // 静态洞察 + 命中缓存的 AI（不触发网络，快）
+  // 静态洞察 + 命中缓存的 AI（不触发网络，快）；feedback 用于读取对应建议版本的划分缓存
   app.get('/api/insight', async (req, reply) => {
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
-    return loadInsight(service).insight
+    const { feedback } = req.query as { feedback?: string }
+    return loadInsight(service, feedback ?? '').insight
   })
 
   // 按需生成 AI 洞察（force=true 忽略缓存）；无 key/失败降级为静态
@@ -107,8 +108,25 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
-    const body = (req.body ?? {}) as { force?: unknown }
-    const { insight } = await refreshInsightAI(service, body.force === true)
+    const body = (req.body ?? {}) as { force?: unknown; feedback?: unknown }
+    const { insight } = await refreshInsightAI(service, {
+      force: body.force === true,
+      feedback: typeof body.feedback === 'string' ? body.feedback : ''
+    })
+    return insight
+  })
+
+  // 按用户建议重新划分模块（仅重生成划分，其余 AI 结果走缓存）
+  app.post('/api/insight/partition', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const body = (req.body ?? {}) as { feedback?: unknown; force?: unknown }
+    const { insight } = await refreshInsightAI(service, {
+      forcePartition: true,
+      force: body.force === true,
+      feedback: typeof body.feedback === 'string' ? body.feedback : ''
+    })
     return insight
   })
 
