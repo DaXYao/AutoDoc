@@ -54,6 +54,6 @@ export function getDeepSeekConfig(): DeepSeekConfig | null {
       /\/+$/,
       ''
     ),
-    model: process.env.DEEPSEEK_MODEL?.trim() || 'deepseek-v4.1-flash'
+    model: process.env.DEEPSEEK_MODEL?.trim() || 'deepseek-flash'
   }
 }

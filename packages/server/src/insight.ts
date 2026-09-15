@@ -20,7 +20,9 @@ interface AIEnvelope {
 }
 
 const MAX_AI_MODULES = 6
-const MAX_AI_CHAINS_PER_MODULE = 6
+const MAX_AI_CHAINS_PER_MODULE = 4
+const MAX_AI_CORES = 25
+const AI_MAX_TOKENS = 4000
 
 function fnLabel(fn: FunctionDoc): string {
   return `${fn.className ? `${fn.className}.` : ''}${fn.name}`
@@ -71,7 +73,9 @@ function applyEnvelope(insight: ProjectInsight, env: AIEnvelope): void {
     if (f && role) f.systemRole = role
   }
   for (const chain of insight.chains) {
-    const ai = env.chains?.[chain.id]
+    // 模型可能回显键时丢掉 "chain:" 前缀，两种键都容忍
+    const ai =
+      env.chains?.[chain.id] ?? env.chains?.[chain.id.replace(/^chain:/, '')]
     if (!ai) continue
     if (ai.narrative) chain.narrative = ai.narrative
     if (ai.stepRoles) {
@@ -101,7 +105,7 @@ async function aiModules(graph: ProjectGraph): Promise<Pick<AIEnvelope, 'summary
     `项目共 ${graph.nodes.size} 个函数、${graph.chains.length} 条调用链路。功能模块清单(id|目录|文件数|函数数|代表函数)：\n${lines}\n` +
     `输出 JSON: {"summary":"项目一句话概述","modules":{"<模块id>":{"name":"简短中文功能名","description":"一句话职责"}}}`
   const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
-    maxTokens: 1500
+    maxTokens: AI_MAX_TOKENS
   })
   return (
     extractJson<Pick<AIEnvelope, 'summary' | 'modules'>>(text) ?? { summary: '', modules: {} }
@@ -113,7 +117,7 @@ async function aiCoreRoles(graph: ProjectGraph): Promise<Record<string, string>>
   const cores = [...graph.insights.values()]
     .filter((f) => f.isCore)
     .sort((a, b) => b.coreScore - a.coreScore)
-    .slice(0, 40)
+    .slice(0, MAX_AI_CORES)
   if (cores.length === 0) return {}
   const lines = cores
     .map((f) => {
@@ -125,9 +129,14 @@ async function aiCoreRoles(graph: ProjectGraph): Promise<Record<string, string>>
     `以下是被多条调用链路依赖的核心函数(id|签名|静态用途|被调用次数|链路数)：\n${lines}\n` +
     `输出 JSON: {"<函数id>":"该函数在整个系统中的角色(一句话)"}`
   const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
-    maxTokens: 1500
+    maxTokens: AI_MAX_TOKENS
   })
-  return extractJson<Record<string, string>>(text) ?? {}
+  const parsed = extractJson<Record<string, string>>(text)
+  if (!parsed) {
+    console.warn('[autodoc] AI 核心角色返回无法解析为 JSON，已忽略')
+    return {}
+  }
+  return parsed
 }
 
 /** 调用 3..N：逐模块的链路叙事 + 步骤上下文职责 */
@@ -163,23 +172,36 @@ async function aiChains(
       `输出 JSON: {"<链路id>":{"narrative":"这条链路完成了什么(一句话)","stepRoles":{"<函数id>":"该函数在本链路里的职责(一句话)"}}}`
     try {
       const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
-        maxTokens: 1800
+        maxTokens: AI_MAX_TOKENS
       })
       const parsed = extractJson<AIEnvelope['chains']>(text)
       if (parsed) Object.assign(out, parsed)
-    } catch {
-      // 单模块失败不影响其它模块
+      else console.warn(`[autodoc] AI 链路叙事(模块 ${mod.name}) 返回无法解析为 JSON，已忽略`)
+    } catch (e) {
+      console.warn(`[autodoc] AI 链路叙事(模块 ${mod.name}) 失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
   return out
 }
 
-/** 生成完整 AI 信封（多次调用）；任一子调用失败则对应部分留空 */
+/** 生成完整 AI 信封（多次调用）；任一子调用失败则对应部分留空并打日志 */
 async function generateEnvelope(graph: ProjectGraph): Promise<AIEnvelope> {
+  const warn = (label: string, e: unknown): void => {
+    console.warn(`[autodoc] AI ${label} 失败：${e instanceof Error ? e.message : String(e)}`)
+  }
   const [modPart, coreRoles, chains] = await Promise.all([
-    aiModules(graph).catch(() => ({ summary: '', modules: {} })),
-    aiCoreRoles(graph).catch(() => ({})),
-    aiChains(graph).catch(() => ({}))
+    aiModules(graph).catch((e) => {
+      warn('模块摘要', e)
+      return { summary: '', modules: {} }
+    }),
+    aiCoreRoles(graph).catch((e) => {
+      warn('核心角色', e)
+      return {}
+    }),
+    aiChains(graph).catch((e) => {
+      warn('链路叙事', e)
+      return {}
+    })
   ])
   return {
     summary: modPart.summary ?? '',
@@ -187,6 +209,16 @@ async function generateEnvelope(graph: ProjectGraph): Promise<AIEnvelope> {
     coreRoles,
     chains
   }
+}
+
+/** 信封是否全空（key/模型/网络问题导致全部子调用失败） */
+function isEmptyEnvelope(env: AIEnvelope): boolean {
+  return (
+    !env.summary &&
+    Object.keys(env.modules ?? {}).length === 0 &&
+    Object.keys(env.coreRoles ?? {}).length === 0 &&
+    Object.keys(env.chains ?? {}).length === 0
+  )
 }
 
 export interface InsightBundle {
@@ -218,10 +250,16 @@ export async function refreshInsightAI(service: DocService, force: boolean): Pro
   if (!env) {
     try {
       env = await generateEnvelope(graph)
-      cache.set(graph.fingerprint, 'insight', env)
-    } catch {
-      return { insight, graph } // AI 不可用 → 静态降级
+    } catch (e) {
+      console.warn(`[autodoc] AI 生成异常，降级为静态：${e instanceof Error ? e.message : String(e)}`)
+      return { insight, graph }
     }
+    // 全空信封不写缓存（避免 key/模型/网络故障污染缓存），降级为静态
+    if (isEmptyEnvelope(env)) {
+      console.warn('[autodoc] AI 返回为空（检查 DEEPSEEK_API_KEY / DEEPSEEK_MODEL / 网络），降级为静态')
+      return { insight, graph }
+    }
+    cache.set(graph.fingerprint, 'insight', env)
   }
   applyEnvelope(insight, env)
   return { insight, graph }
