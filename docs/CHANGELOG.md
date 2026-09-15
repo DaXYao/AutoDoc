@@ -10,6 +10,20 @@
 
 ---
 
+## [未发布] 2026-09-15
+
+### feat: AI 主导功能模块划分 + 用户建议迭代重划分 + AI 判定 pending 分类
+- **内容**：
+  - graph.ts 重构：模块划分抽为可替换 `Partition`（`dirPartition` 兑底 + `applyPartition` 应用任意划分并重算 moduleIds/chain.moduleId/核心度）；
+  - insight.ts：新增 `aiPartition`（AI 主导按业务功能划分，索引化成员输出）与 `aiCategories`（对规则无法分类的 pending 函数判 business/implementation/utility + 理由）；划分缓存键含 feedback 哈希支持迭代；`POST /api/insight/partition {feedback}` 仅重生成划分、其余走缓存；
+  - AI 判定同步写回 FunctionDoc.category，使三分类分组/统计反映 AI 结果；FunctionCard 加「AI 判定」标签（hover 理由）；
+  - web：InsightHome 新增「功能模块划分」卡（AI划分/目录划分 标签 + 建议文本框 + 按建议重新划分）；
+  - 修复：带 feedback 时划分输出偶发超 max_tokens 截断→解析失败回退目录（划分单独 PARTITION_MAX_TOKENS=8000）；失败时不再误写 partitionFeedback/误报「已采纳」（前端按实际 partitionSource 提示）。
+- **影响范围**：packages/shared-types（InsightModule.source/functionIds、FunctionInsight.aiCategory、ProjectInsight.partitionSource/partitionFeedback）、packages/server（graph/insight/app）、packages/web（api/store/InsightHome/FunctionCard）。
+- **动机**：用户痛点：目录划分不完整、看不出业务模块；pending 函数无人判定。改为 AI 主导划分 + 用户建议迭代 + AI 判分类。
+- **关联**：实测 AI 划分出 9 个业务模块（配置/C#解析/JS-TS解析/身份变更/生成分类/存储/图谱AI/服务端）；反馈「合并解析模块」→ 生成「多语言解析(46fn)」；8 个 pending 被 AI 判定+理由；浏览器验证划分卡/AI判定标签正常。
+- **风险/回滚点**：AI 划分成员索引依赖图指纹稳定（同指纹同索引序）；划分失败自动回退目录划分不阻断。
+
 ## [未发布] 2026-09-14
 
 ### feat: AI 增强的「项目洞察 / 代码图谱」（DeepSeek，按需+缓存）
