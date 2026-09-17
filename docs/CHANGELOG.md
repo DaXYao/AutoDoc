@@ -10,6 +10,19 @@
 
 ---
 
+## [未发布] 2026-09-17
+
+### feat: 核心函数改由 AI 按功能重要性判定（替代纯调用次数）
+- **内容**：
+  - shared-types：FunctionInsight 新增 `coreSource`('ai'|'static') 与 `coreReason`；
+  - graph.ts：新增 `applyCoreJudgment`（应用 AI 判定、未列入者非核心、重算模块 coreFunctionIds）；静态中心度 isCore 保留为无 AI 兑底并标 coreSource='static'；
+  - insight.ts：新增 `aiCoreJudgment`（把全部函数的模块/分类/用途/入出度/链路数/是否入口作为证据喂给 AI，但由 AI 依功能重要性裁核心，明确「高频琐碎工具不算核心」）；缓存键 'coreJudgment'；顺序调整为 划分→核心判定→核心角色→叙事→分类；
+  - web：核心徽章显示「核心(AI)」，hover 显示 coreReason（InsightHome/ModuleDetail/FunctionCard 同步）。
+- **影响范围**：packages/shared-types、packages/server（graph/insight）、packages/web（FunctionCard/InsightHome/ModuleDetail）。
+- **动机**：用户指出原核心判定仅看调用次数/中心度，会把高频琐碎工具误判核心、漏掉低频关键编排器；改为 AI 按功能划分核心。
+- **关联**：实测 AI 判 34 个核心均带功能性理由；namedKids/stripGenerics 等高频工具不再为核心；buildApp/generateDocs/walk/classifyFunction/makeStableId/loadConfig 等编排器/引擎入选。
+- **风险/回滚点**：无 AI/失败时回退静态中心度（coreSource='static'）；核心判定缓存随图指纹失效。
+
 ## [未发布] 2026-09-15
 
 ### feat: AI 主导功能模块划分 + 用户建议迭代重划分 + AI 判定 pending 分类

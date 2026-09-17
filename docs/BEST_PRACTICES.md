@@ -21,12 +21,24 @@
 - [ ] **本地服务 /api 响应加 Cache-Control: no-store**：否则浏览器缓存 GET 会让切换/重新生成后 UI 仍显示陈旧数据（见 2026-09-13 条）。
 - [ ] **AI 增强分析 = 静态图谱先算 + AI 按需补语义 + 指纹缓存 + 无 key 降级**（见 2026-09-14 条）。
 - [ ] **AI 主导划分用「索引化成员」输出 + feedback 哈希缓存键支持迭代；划分输出单独给高 max_tokens 防截断**（见 2026-09-15 条）。
+- [ ] **核心函数由 AI 按功能重要性判定，静态中心度只作证据与无 AI 兑底**（见 2026-09-17 条）。
 - [ ] **密钥只放 gitignore 的 .env / 环境变量，绝不进代码/文档/git**；提供 .env.example 模板（见 2026-09-14 条）。
 - [ ] （后续不断补充……）
 
 ---
 
 ## 成功经验条目
+
+### 2026-09-17 · 核心函数判定：AI 按功能重要性，静态中心度仅作证据与兑底
+- **场景**：标出项目「核心函数」。纯调用次数/中心度会把高频琐碎工具（如 namedKids/stripGenerics）误判核心、漏掉低频但关键的编排器/入口。
+- **做法**：
+  1. 静态中心度（inDegree*2+链路+跨模块）仍计算，但只作为**证据**与无 AI 时的**兑底**（coreSource='static'）；
+  2. 把全部函数的「模块/分类/用途/入出度/链路数/是否入口」索引化喂给 AI，prompt 明确「依功能重要性而非调用次数；高频琐碎工具不算核心」；
+  3. AI 返回核心索引+理由 → applyCoreJudgment 覆盖 isCore、写 coreReason/coreSource='ai'、重算模块 coreFunctionIds；
+  4. 缓存键 'coreJudgment' 随图指纹失效；失败回退静态。
+- **收益**：核心集合贴合「编排器/引擎/入口」（buildApp/generateDocs/walk/classifyFunction/makeStableId/loadConfig），琐碎工具出局；每个核心带可读理由。
+- **适用条件**：有 AI 可用；无 AI 时自动降级为中心度，不阻断。
+- **关联**：packages/server/src/graph.ts(applyCoreJudgment)、insight.ts(aiCoreJudgment)。
 
 ### 2026-09-15 · AI 主导功能划分：索引化成员 + feedback 迭代 + 截断防护
 - **场景**：让 LLM 按业务功能（而非目录）划分模块，并允许用户提建议后迭代重划分；同时让 AI 判定规则分不了的函数。
