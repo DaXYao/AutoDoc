@@ -130,11 +130,15 @@ export function applyPartition(graph: ProjectGraph, partition: Partition): void 
   for (const [fnId, ins] of graph.insights) {
     ins.coreScore = ins.inDegree * 2 + ins.chainIds.length + (cross.get(fnId) ?? 0)
   }
-  // 重算 isCore 阈值
+  // 重算 isCore 阈值（静态中心度兑底；AI 判定可后续覆盖）
   const sorted = [...graph.insights.values()].map((i) => i.coreScore).sort((a, b) => b - a)
   const cutoff = Math.max(0, Math.floor(sorted.length * 0.12) - 1)
   const threshold = Math.max(3, sorted[cutoff] ?? 3)
-  for (const ins of graph.insights.values()) ins.isCore = ins.coreScore > 0 && ins.coreScore >= threshold
+  for (const ins of graph.insights.values()) {
+    ins.isCore = ins.coreScore > 0 && ins.coreScore >= threshold
+    ins.coreSource = 'static'
+    ins.coreReason = ''
+  }
 
   // 回填模块 coreFunctionIds / chainIds
   for (const mod of modules) {
@@ -256,7 +260,9 @@ export function buildGraph(files: FileDoc[]): ProjectGraph {
       systemRole: '',
       chainRoles: {},
       aiCategory: null,
-      aiCategoryReason: ''
+      aiCategoryReason: '',
+      coreSource: 'static',
+      coreReason: ''
     })
   }
 
@@ -281,4 +287,36 @@ export function buildGraph(files: FileDoc[]): ProjectGraph {
   }
   applyPartition(graph, dirPartition(graph))
   return graph
+}
+
+/** AI 核心判定结果：fnId → {core, reason} */
+export interface CoreJudgment {
+  [fnId: string]: { core: boolean; reason: string }
+}
+
+/**
+ * 应用 AI 核心判定（按功能重要性）：未列入者视为非核心。
+ * 覆盖静态中心度的 isCore，并重算各模块 coreFunctionIds。
+ */
+export function applyCoreJudgment(graph: ProjectGraph, judgments: CoreJudgment): void {
+  for (const ins of graph.insights.values()) {
+    ins.isCore = false
+    ins.coreSource = 'ai'
+    ins.coreReason = ''
+  }
+  for (const [fnId, j] of Object.entries(judgments)) {
+    const ins = graph.insights.get(fnId)
+    if (!ins || !j) continue
+    ins.isCore = j.core === true
+    ins.coreSource = 'ai'
+    ins.coreReason = j.reason ?? ''
+  }
+  for (const mod of graph.modules) {
+    mod.coreFunctionIds = mod.functionIds
+      .filter((id) => graph.insights.get(id)?.isCore)
+      .sort(
+        (a, b) =>
+          (graph.insights.get(b)?.coreScore ?? 0) - (graph.insights.get(a)?.coreScore ?? 0)
+      )
+  }
 }

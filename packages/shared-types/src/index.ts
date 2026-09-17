@@ -306,6 +306,10 @@ export interface FunctionInsight {
   outDegree: number
   coreScore: number
   isCore: boolean
+  /** 核心判定来源：ai=AI 按功能重要性判定，static=静态中心度兑底 */
+  coreSource: 'ai' | 'static'
+  /** AI 判为核心的理由（非 AI 判定为空串） */
+  coreReason: string
   chainIds: string[]
   moduleIds: string[]
   /** 上游 callers（调用它的函数 id） */

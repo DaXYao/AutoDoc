@@ -11,7 +11,7 @@ import { deepseekChat, extractJson, type ChatMessage } from './ai.js'
 import { AiCache } from './aiCache.js'
 import type { DocService } from './context.js'
 import { getDeepSeekConfig } from './env.js'
-import { applyPartition, buildGraph, type Partition, type ProjectGraph } from './graph.js'
+import { applyCoreJudgment, applyPartition, buildGraph, type CoreJudgment, type Partition, type ProjectGraph } from './graph.js'
 
 /** AI 划分信封（缓存单元）：members 为函数在索引表中的下标 */
 interface PartitionEnvelope {
@@ -125,6 +125,40 @@ async function aiCategories(graph: ProjectGraph): Promise<CategoryEnvelope> {
     const item = pending.find((p) => p.i === idx)
     if (!item || !v || !CATEGORIES.includes(v.category as FunctionCategory)) continue
     out[item.id] = { category: v.category as FunctionCategory, reason: v.reason ?? '' }
+  }
+  return out
+}
+
+/** AI 按功能重要性判核心（而非调用次数）；返回 fnId → {core,reason} */
+async function aiCoreJudgment(graph: ProjectGraph): Promise<CoreJudgment> {
+  const ids = indexTable(graph)
+  const modName = new Map(graph.modules.map((m) => [m.id, m.name]))
+  const lines = ids
+    .map((id, i) => {
+      const fn = graph.nodes.get(id)!
+      const mid = graph.moduleIdsOf.get(id)?.[0]
+      const chains = graph.chainIdsOf.get(id)?.length ?? 0
+      const isIn = graph.inDegree.get(id) ?? 0
+      return `${i}|${fnLabel(fn)}|${modName.get(mid ?? '') ?? ''}|${fn.category}|${fn.purpose.slice(0, 40)}|入${isIn}/出${graph.outDegree.get(id) ?? 0}|${chains}链路|${isIn === 0 ? '入口' : '-'}`
+    })
+    .join('\n')
+  const user =
+    `以下是项目全部函数（索引|名称|模块|分类|用途|入度/出度|链路数|是否入口）：\n${lines}\n` +
+    `请选出「核心函数」：对系统功能起关键支撑/编排作用者（主流程入口、关键编排器、核心解析/生成/存储引擎）。` +
+    `判断依据是功能重要性而非调用次数；被频繁调用的琐碎工具/辅助函数不算核心。\n` +
+    `输出 JSON: {"core":[{"idx":0,"reason":"一句话为何核心"}]}`
+  const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+    maxTokens: AI_MAX_TOKENS
+  })
+  const parsed = extractJson<{ core?: { idx?: number; reason?: string }[] }>(text)
+  if (!parsed || !Array.isArray(parsed.core)) {
+    console.warn('[autodoc] AI 核心判定返回无法解析，回退静态中心度')
+    return {}
+  }
+  const out: CoreJudgment = {}
+  for (const item of parsed.core) {
+    const id = ids[item.idx ?? -1]
+    if (id) out[id] = { core: true, reason: item.reason ?? '' }
   }
   return out
 }
@@ -262,6 +296,17 @@ function applyCategories(
   }
 }
 
+/** 将图谱的核心判定同步到 insight.functions */
+function syncCore(insight: ProjectInsight, graph: ProjectGraph): void {
+  for (const [id, ins] of Object.entries(insight.functions)) {
+    const g = graph.insights.get(id)
+    if (!g) continue
+    ins.isCore = g.isCore
+    ins.coreSource = g.coreSource
+    ins.coreReason = g.coreReason
+  }
+}
+
 function applyRoles(insight: ProjectInsight, roles: Record<string, string>): void {
   for (const [fnId, role] of Object.entries(roles)) {
     const f = insight.functions[fnId]
@@ -311,6 +356,12 @@ export function loadInsight(service: DocService, feedback = ''): InsightBundle {
     applyPartition(graph, toPartition(graph, p))
     rebuildInsightFromGraph(insight, graph, p.summary)
     insight.partitionFeedback = p.feedback ?? ''
+    touched = true
+  }
+  const cj = cache.get<CoreJudgment>(fp, 'coreJudgment')
+  if (cj && Object.keys(cj).length > 0) {
+    applyCoreJudgment(graph, cj)
+    syncCore(insight, graph)
     touched = true
   }
   const cats = cache.get<CategoryEnvelope>(fp, 'categories')
@@ -388,7 +439,23 @@ export async function refreshInsightAI(
     insight.partitionFeedback = ''
   }
 
-  // 2) pending 函数 AI 分类
+  // 2) AI 核心判定（按功能重要性，覆盖静态中心度）
+  let cj = opts.force ? undefined : cache.get<CoreJudgment>(fp, 'coreJudgment')
+  if (!cj) {
+    try {
+      cj = await aiCoreJudgment(graph)
+      if (Object.keys(cj).length > 0) cache.set(fp, 'coreJudgment', cj)
+    } catch (e) {
+      console.warn(`[autodoc] AI 核心判定失败，回退静态中心度：${e instanceof Error ? e.message : String(e)}`)
+      cj = {}
+    }
+  }
+  if (cj && Object.keys(cj).length > 0) {
+    applyCoreJudgment(graph, cj)
+    syncCore(insight, graph)
+  }
+
+  // 3) pending 函数 AI 分类
   let cats = opts.force ? undefined : cache.get<CategoryEnvelope>(fp, 'categories')
   if (!cats) {
     try {
@@ -401,7 +468,7 @@ export async function refreshInsightAI(
   }
   applyCategories(insight, graph, cats ?? {})
 
-  // 3) 核心角色
+  // 4) 核心角色
   let roles = opts.force ? undefined : cache.get<Record<string, string>>(fp, 'coreRoles')
   if (!roles) {
     try {
@@ -414,7 +481,7 @@ export async function refreshInsightAI(
   }
   applyRoles(insight, roles ?? {})
 
-  // 4) 链路叙事
+  // 5) 链路叙事
   let narr = opts.force ? undefined : cache.get<NarrativeEnvelope>(fp, 'narratives')
   if (!narr) {
     try {
@@ -427,6 +494,12 @@ export async function refreshInsightAI(
   }
   applyNarratives(insight, narr ?? {})
 
-  insight.aiGenerated = !!(p || Object.keys(cats ?? {}).length || Object.keys(roles ?? {}).length || Object.keys(narr ?? {}).length)
+  insight.aiGenerated = !!(
+    p ||
+    Object.keys(cj ?? {}).length ||
+    Object.keys(cats ?? {}).length ||
+    Object.keys(roles ?? {}).length ||
+    Object.keys(narr ?? {}).length
+  )
   return { insight, graph }
 }
