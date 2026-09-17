@@ -173,7 +173,7 @@ function goModule(id: string): void {
             v-for="f in coreFunctions"
             :key="f.functionId"
             class="px-2 py-1 rounded border border-green-300 bg-green-50 text-green-700 text-xs font-mono hover:underline"
-            :title="f.systemRole || `coreScore ${f.coreScore} · ${f.chainIds.length} 条链路`"
+            :title="f.coreReason || f.systemRole || `coreScore ${f.coreScore} · ${f.chainIds.length} 链路`"
             @click="goFunction(f.functionId)"
           >
             {{ fnName(f.functionId) }}

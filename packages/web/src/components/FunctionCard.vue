@@ -68,9 +68,9 @@ const annotationsKey = (): string => `card:${props.fn.id}:annotations`
           size="tiny"
           type="success"
           :bordered="false"
-          :title="`coreScore ${fi.coreScore} · ${fi.chainIds.length} 条链路`"
+          :title="fi.coreReason || `静态中心度 coreScore ${fi.coreScore} · ${fi.chainIds.length} 条链路`"
         >
-          核心
+          核心{{ fi.coreSource === 'ai' ? '(AI)' : '' }}
         </n-tag>
         <n-tag v-if="fn.visibility === 'private'" size="tiny" type="warning" :bordered="false">
           private

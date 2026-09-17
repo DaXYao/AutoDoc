@@ -94,7 +94,7 @@ function goFile(fileId: string): void {
             v-for="cid in module.coreFunctionIds"
             :key="cid"
             class="px-2 py-1 rounded border border-green-300 bg-green-50 text-green-700 text-xs font-mono hover:underline"
-            :title="fnInsight(cid)?.systemRole || ''"
+            :title="fnInsight(cid)?.coreReason || fnInsight(cid)?.systemRole || ''"
             @click="goFunction(cid)"
           >
             {{ fnName(cid) }}
