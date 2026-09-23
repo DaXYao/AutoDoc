@@ -16,7 +16,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsx watch src/cli.ts serve --root ../..",
+    "dev": "tsx watch src/cli.ts serve --port 7788",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

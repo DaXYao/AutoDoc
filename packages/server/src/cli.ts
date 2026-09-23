@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { exec } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { relative, resolve, sep } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { watch, type FSWatcher } from 'chokidar'
 import { Command } from 'commander'
 import picomatch from 'picomatch'
 import { buildApp } from './app.js'
 import { createDocService, regenerate, type DocService } from './context.js'
+import { loadEnv } from './env.js'
 import { exportStaticSite } from './export.js'
 import { ProjectManager } from './projects.js'
 
@@ -22,6 +24,23 @@ function warn(message: string): void {
 
 function resolveRoot(root: string | undefined): string {
   return resolve(process.cwd(), root ?? '.')
+}
+
+/**
+ * 解析仓库根（hub base）：从 cli 模块自身位置（import.meta.url）逐级上溯，
+ * 找到含 pnpm-workspace.yaml 的目录。与 cwd 无关——dev（cwd=packages/server）与
+ * 生产/VBS（cwd=仓库根）均命中同一目录；未能定位时回退 cwd（保持旧行为）。
+ * hub 模式下用它解析 configs/projects.json、相对项目路径与 .env。
+ */
+function findRepoRoot(): string {
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (;;) {
+    if (existsSync(join(dir, 'pnpm-workspace.yaml'))) return dir
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return process.cwd()
 }
 
 /** 跨平台打开默认浏览器（Windows 用 cmd start，macOS 用 open，其余 xdg-open） */
@@ -111,19 +130,23 @@ program
       open?: boolean
       watch: boolean
     }) => {
-      const baseDir = process.cwd()
+      const cwd = process.cwd()
+      // 仓库根（hub base）：与 cwd 无关，供 hub 模式解析 configs/projects.json、相对项目路径
+      const repoRoot = findRepoRoot()
+      // .env 尽早加载（锚定仓库根、cwd 无关），确保首次 getDeepSeekConfig 前 AI 配置已就绪
+      loadEnv(repoRoot)
       const manager = new ProjectManager({
         registryPath: options.root ? null : options.projects,
-        baseDir,
+        baseDir: repoRoot,
         onWarn: warn
       })
 
       let watcher: FSWatcher | null = null
 
       if (options.root) {
-        // 单项目模式（向后兼容）：注册临时项目并立即激活
+        // 单项目模式（向后兼容）：注册临时项目并立即激活。root/config 仍相对 cwd 解析，保持既有便利
         const rootDir = resolveRoot(options.root)
-        const configPath = options.config ? resolve(baseDir, options.config) : undefined
+        const configPath = options.config ? resolve(cwd, options.config) : undefined
         manager.register({ id: 'default', name: rootDir.split(/[\\/]/).pop() ?? 'project', root: rootDir, config: configPath })
         const service = await manager.activate('default')
         console.log(
@@ -139,7 +162,7 @@ program
         await manager.loadRegistry()
         const projects = manager.list()
         console.log(
-          `[autodoc] 中枢模式：已加载 ${projects.length} 个项目注册表（${resolve(baseDir, options.projects)}）`
+          `[autodoc] 中枢模式：已加载 ${projects.length} 个项目注册表（${resolve(repoRoot, options.projects)}）`
         )
         if (options.watch) {
           console.log('[autodoc] 中枢模式下文件监听未启用，请在网页中切换项目或点击「重新生成」')
