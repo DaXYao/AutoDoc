@@ -138,4 +138,23 @@ describe('文档生成管线（fixture 集成测试）', () => {
     expect(storage.listChanges(isEmpty.id)).toHaveLength(2)
     storage.close()
   })
+
+  it('非 Git 目录：generateDocs 走指纹快照路径，变更来源缺省 snapshot', async () => {
+    // prepare() 复制到普通临时目录（非 git 仓库），验证不依赖 git 也能正常生成
+    const root = prepare()
+    const normalized = await loadConfig(root)
+    const storage = createStorage(normalized.config.storage, root)
+    const { changes } = await generateDocs({ rootDir: root, normalized, storage })
+
+    // 首次生成全部记为新增，管线不崩溃
+    expect(changes.length).toBeGreaterThan(0)
+    expect(changes.every((c) => c.type === 'added')).toBe(true)
+
+    // 指纹路径持久化的记录不带 git 来源/提交信息
+    const persisted = storage.listChanges(changes[0].targetId)
+    expect(persisted.length).toBeGreaterThan(0)
+    expect(persisted.every((c) => (c.source ?? 'snapshot') === 'snapshot')).toBe(true)
+    expect(persisted.every((c) => c.commit === undefined)).toBe(true)
+    storage.close()
+  })
 })

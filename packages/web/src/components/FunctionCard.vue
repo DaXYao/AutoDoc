@@ -42,6 +42,11 @@ function goToCallee(edge: CallEdge): void {
   void router.push({ name: 'file', params: { fileId: entry.fileId }, query: { fn: edge.calleeId! } })
 }
 
+/** 过长文本截断显示（配合 title 属性悬浮全文） */
+function truncateText(text: string, max = 72): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
 /** 稳定 ID 首段即相对路径，用于拼编辑器跳转链接 */
 const sourceHref = computed(() =>
   editorLink(appState.meta?.editor.linkTemplate, props.fn.id.split('::')[0] ?? '', props.fn.startLine)
@@ -238,16 +243,37 @@ const annotationsKey = (): string => `card:${props.fn.id}:annotations`
         {{ isExpanded(changesKey(), expandDefault('changes')) ? '▾' : '▸' }}
       </button>
       <ul v-if="isExpanded(changesKey(), expandDefault('changes'))" class="mt-2 flex flex-col gap-1 text-xs">
-        <li v-for="change in fn.recentChanges" :key="change.id" class="flex items-center gap-2">
+        <li v-for="change in fn.recentChanges" :key="change.id" class="flex items-start gap-2">
           <n-tag
             size="tiny"
             :bordered="false"
+            class="mt-0.5 shrink-0"
             :type="change.type === 'added' ? 'success' : change.type === 'deleted' ? 'error' : change.type === 'renamed' ? 'info' : 'warning'"
           >
             {{ CHANGE_LABELS[change.type] }}
           </n-tag>
-          <span class="text-gray-600">{{ change.description }}</span>
-          <span class="ml-auto text-gray-400">{{ formatDate(change.date) }}</span>
+          <!-- 来源徽标：Git 提交历史 / 工作区快照对比 -->
+          <n-tag
+            size="tiny"
+            :bordered="false"
+            class="mt-0.5 shrink-0"
+            :type="change.source === 'git' ? 'info' : 'default'"
+            :title="change.source === 'git' ? '来自 Git 提交历史' : '来自工作区快照对比'"
+          >
+            {{ change.source === 'git' ? 'Git' : '快照' }}
+          </n-tag>
+          <div class="min-w-0 flex-1">
+            <!-- Git 来源：短 hash · 作者 · subject（过长截断，title 悬浮全文） -->
+            <template v-if="change.source === 'git' && change.commit">
+              <span class="font-mono text-gray-500">{{ change.commit.hash.slice(0, 7) }}</span>
+              <span class="mx-1 text-gray-300">·</span>
+              <span class="text-gray-600">{{ change.commit.author }}</span>
+              <span class="mx-1 text-gray-300">·</span>
+              <span class="text-gray-600" :title="change.commit.subject">{{ truncateText(change.commit.subject) }}</span>
+            </template>
+            <span v-else class="text-gray-600">{{ change.description }}</span>
+          </div>
+          <span class="ml-auto shrink-0 text-gray-400">{{ formatDate(change.date) }}</span>
         </li>
       </ul>
     </div>

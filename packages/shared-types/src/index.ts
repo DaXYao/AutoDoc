@@ -40,6 +40,16 @@ export interface CodeBlock {
 
 export type ChangeType = 'added' | 'modified' | 'deleted' | 'renamed'
 
+/** 变更来源：git=Git 提交历史回填；snapshot=工作区指纹快照对比 */
+export type ChangeSource = 'git' | 'snapshot'
+
+/** Git 来源变更关联的提交元信息 */
+export interface ChangeCommitInfo {
+  hash: string
+  author: string
+  subject: string
+}
+
 /** 函数级变更记录（全量归档，展示层只取最近三条） */
 export interface ChangeRecord {
   id: string
@@ -48,6 +58,10 @@ export interface ChangeRecord {
   date: string
   type: ChangeType
   description: string
+  /** 变更来源；旧记录缺省视为 'snapshot'（向后兼容） */
+  source?: ChangeSource
+  /** Git 来源时关联的提交信息（快照来源为 undefined） */
+  commit?: ChangeCommitInfo
 }
 
 /** 调用点角色：用于调用链路的着色（core=绿 / validation=黑灰 / exception=红） */
@@ -190,6 +204,11 @@ export interface EditorConfig {
   linkTemplate?: string
 }
 
+export interface GitConfig {
+  /** 首次接入 Git 历史时的回填提交深度上限，缺省 20 */
+  maxBackfillCommits?: number
+}
+
 export interface AutodocConfig {
   /** 待扫描源码的包含 glob（相对项目根） */
   include?: string[]
@@ -202,6 +221,7 @@ export interface AutodocConfig {
   }
   storage?: StorageConfig
   editor?: EditorConfig
+  git?: GitConfig
 }
 
 /** /api/meta 返回的服务元信息 */

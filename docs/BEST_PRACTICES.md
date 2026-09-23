@@ -23,11 +23,24 @@
 - [ ] **AI 主导划分用「索引化成员」输出 + feedback 哈希缓存键支持迭代；划分输出单独给高 max_tokens 防截断**（见 2026-09-15 条）。
 - [ ] **核心函数由 AI 按功能重要性判定，静态中心度只作证据与无 AI 兑底**（见 2026-09-17 条）。
 - [ ] **密钥只放 gitignore 的 .env / 环境变量，绝不进代码/文档/git**；提供 .env.example 模板（见 2026-09-14 条）。
+- [ ] **外部工具（Git）集成**：可注入只读抽象 + 双层测试（内存 Fake 算法层 + 真实 git 集成层，不可用自动 skip）+ watermark 增量 + 全程降级（见 2026-09-23 条）。
 - [ ] （后续不断补充……）
 
 ---
 
 ## 成功经验条目
+
+### 2026-09-23 · 外部工具（Git）集成：可注入抽象 + 双层测试 + watermark 增量 + 全程降级
+- **场景**：要把 Git 提交历史回填成函数级变更记录，但真实 git 慢、依赖环境、CI/无 git 机器上不能跑；且历史可能很长、随时可能异常。
+- **做法**：
+  1. **抽象可注入**：定义只读 `GitClient` 接口（isRepo/repoRoot/recentCommits/changedFiles/readFileAtCommit/blobHash），生产用 simple-git 实现；算法入口 `applyGitHistory({…, gitClient?})` 默认真实实现、测试注入内存 Fake——把「算法」与「git 交互」彻底解耦；
+  2. **双层测试**：层 1 用 FakeGitClient（提交序列 + 每提交完整 tree，复刻 `sinceHash..HEAD -n limit` 与 `^` 父引用语义）跑纯算法，覆盖 added/modified/deleted/renamed、watermark 增量、回填上限、异常降级，快且确定；层 2 用 mkdtemp + 真实 `git init/config/commit`（`GIT_AUTHOR_DATE` 控时、writeFileSync 避 BOM、存储放仓库外免污染 `git add`）跑端到端，`beforeAll` 探测 `git --version` 不可用则 `describe.skip`；
+  3. **watermark 增量**：存储层记「已消化到的 commit hash」，每次只处理 `watermark..HEAD`，首次回填受 `maxBackfillCommits` 上限；父/本版本对比**复用既有** `diffFileSnapshots`，不另造轮子；
+  4. **内容寻址缓存**：解析结果按 `blobHash + 路径` 缓存，父子链/跨提交同内容只解析一次（键含路径以区分重命名的同内容不同文件）；
+  5. **全程降级**：整个入口 try/catch，非仓库/空仓库/任何 git 失败都只记日志跳过，绝不让主生成管线崩溃；后台 fire-and-forget 调用 + 按「存储身份」（dataPath）而非对象引用的并发守卫去重（同一物理库的新旧 service 实例也能拦截，见 core/git/backfillGuard.ts），不阻塞 API 首次可用。
+- **收益**：算法在内存 Fake 上秒级全绿、不依赖 git；真实集成层又锁住 simple-git 用法；无 git 环境自动 skip 不误报；回填增量、可中断续跑、失败无害。
+- **适用条件**：集成任何「慢/环境相关/可能失败」的外部 CLI（git/hg/容器等）时；抽象层要能表达父引用与区间语义，Fake 才测得动增量逻辑。
+- **关联**：packages/core/src/git/gitClient.ts、git/gitChanges.ts、test/gitChanges.test.ts；storage 的 getGitWatermark/setGitWatermark。
 
 ### 2026-09-17 · 核心函数判定：AI 按功能重要性，静态中心度仅作证据与兑底
 - **场景**：标出项目「核心函数」。纯调用次数/中心度会把高频琐碎工具（如 namedKids/stripGenerics）误判核心、漏掉低频但关键的编排器/入口。

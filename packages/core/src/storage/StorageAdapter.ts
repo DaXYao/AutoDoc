@@ -1,4 +1,4 @@
-import type { Annotation, AnnotationTargetType, ChangeRecord, ChangeType } from '@autodoc/shared-types'
+import type { Annotation, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 
 export interface NewAnnotationInput {
@@ -17,6 +17,12 @@ export interface NewChangeInput {
   targetId: string
   type: ChangeType
   description: string
+  /** 变更时间；缺省取当前时间（快照对比）。Git 回填传 commit.authorDate */
+  date?: string
+  /** 变更来源；缺省 'snapshot'。Git 历史回填传 'git' */
+  source?: ChangeSource
+  /** Git 来源时关联的提交信息 */
+  commit?: ChangeCommitInfo
 }
 
 /**
@@ -47,4 +53,9 @@ export interface StorageAdapter {
 
   getSnapshot(fileId: string): FileSnapshot | null
   saveSnapshot(snapshot: FileSnapshot): void
+
+  /** Git 历史回填水位线：已消化到的 commit hash；从未回填返回 null */
+  getGitWatermark(): string | null
+  /** 推进 Git 水位线（写操作，触发写前备份） */
+  setGitWatermark(hash: string): void
 }

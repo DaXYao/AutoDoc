@@ -1,8 +1,9 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { JsonStorage } from '../src/storage/JsonStorage.js'
+import { JsonStorage, backupBaseName, pruneBackups } from '../src/storage/JsonStorage.js'
 import { SqliteStorage } from '../src/storage/SqliteStorage.js'
 import type { StorageAdapter } from '../src/storage/StorageAdapter.js'
 
@@ -103,6 +104,36 @@ function runAdapterSuite(create: (dir: string) => StorageAdapter): void {
     expect(storage.getSnapshot('f.ts')?.functions).toHaveLength(0)
   })
 
+  it('Git 水位线读写（getGitWatermark / setGitWatermark）', () => {
+    expect(storage.getGitWatermark()).toBeNull()
+    storage.setGitWatermark('abc123')
+    expect(storage.getGitWatermark()).toBe('abc123')
+    // 覆盖更新为最新提交
+    storage.setGitWatermark('def456')
+    expect(storage.getGitWatermark()).toBe('def456')
+  })
+
+  it('变更来源：缺省回落 snapshot，git 来源携带 commit 元信息', () => {
+    storage.appendChange({ targetId: 'fn#s', type: 'added', description: '快照来源' })
+    storage.appendChange({
+      targetId: 'fn#g',
+      type: 'modified',
+      description: 'git 来源',
+      date: '2024-05-01T10:00:00+00:00',
+      source: 'git',
+      commit: { hash: 'deadbeef', author: 'Dev', subject: 'fix: x' }
+    })
+
+    const snap = storage.listChanges('fn#s')[0]
+    expect(snap.source).toBe('snapshot')
+    expect(snap.commit).toBeUndefined()
+
+    const gitRec = storage.listChanges('fn#g')[0]
+    expect(gitRec.source).toBe('git')
+    expect(gitRec.date).toBe('2024-05-01T10:00:00+00:00')
+    expect(gitRec.commit).toEqual({ hash: 'deadbeef', author: 'Dev', subject: 'fix: x' })
+  })
+
   it('写操作前生成备份（数据安全）', () => {
     storage.addAnnotation({
       targetType: 'file',
@@ -135,4 +166,239 @@ describe('JsonStorage（侧车 JSON 适配器）', () => {
 
 describe('SqliteStorage（SQLite 适配器，node:sqlite）', () => {
   runAdapterSuite((dir) => new SqliteStorage(join(dir, 'autodoc.db')))
+})
+
+describe('存储层迁移与向后兼容', () => {
+  it('SqliteStorage：changes 新列迁移幂等（对已存在库重复 init 不报错）', () => {
+    const dir = freshDir()
+    const dbPath = join(dir, 'autodoc.db')
+    const first = new SqliteStorage(dbPath)
+    first.init()
+    first.appendChange({ targetId: 't', type: 'added', description: 'x' })
+    first.close()
+
+    // 再次打开：ALTER TABLE ADD COLUMN 重复执行应被 try/catch 忽略
+    const second = new SqliteStorage(dbPath)
+    expect(() => second.init()).not.toThrow()
+    expect(second.listChanges('t')).toHaveLength(1)
+    second.close()
+  })
+
+  it('SqliteStorage：旧行 source 为 NULL 读出回落 snapshot', () => {
+    const dir = freshDir()
+    const dbPath = join(dir, 'autodoc.db')
+    const bootstrap = new SqliteStorage(dbPath)
+    bootstrap.init()
+    bootstrap.close()
+
+    // 模拟迁移前的旧数据：直接写入 source/commit_json 均为 NULL 的行
+    const db = new DatabaseSync(dbPath)
+    db.prepare(
+      "INSERT INTO changes (id, target_id, date, type, description, source, commit_json) VALUES ('legacy-1', 't', '2023-01-01T00:00:00.000Z', 'added', '旧记录', NULL, NULL)"
+    ).run()
+    db.close()
+
+    const reopened = new SqliteStorage(dbPath)
+    reopened.init()
+    const rec = reopened.listChanges('t')[0]
+    expect(rec.source).toBe('snapshot')
+    expect(rec.commit).toBeUndefined()
+    reopened.close()
+  })
+
+  it('JsonStorage：缺失 source 字段的旧侧车数据读出回落 snapshot', () => {
+    const dir = freshDir()
+    const dataPath = join(dir, 'autodoc.json')
+    writeFileSync(
+      dataPath,
+      JSON.stringify({
+        version: 1,
+        annotations: [],
+        changes: [
+          { id: 'legacy-1', targetId: 't', date: '2023-01-01T00:00:00.000Z', type: 'added', description: '旧记录' }
+        ],
+        snapshots: {}
+      }),
+      'utf-8'
+    )
+    const storage = new JsonStorage(dataPath)
+    storage.init()
+    const rec = storage.listChanges('t')[0]
+    expect(rec.source).toBe('snapshot')
+    expect(rec.commit).toBeUndefined()
+    storage.close()
+  })
+
+  it('SqliteStorage：升级旧 schema 库时，ALTER 迁移前先生成备份且旧数据完好（Major-2）', () => {
+    const dir = freshDir()
+    const dbPath = join(dir, 'autodoc.db')
+
+    // 1) 手工构造「旧 schema」库：changes 表无 source/commit_json 列，且已有变更行与批注
+    const old = new DatabaseSync(dbPath)
+    old.exec(`
+      CREATE TABLE annotations (
+        id TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_id TEXT NOT NULL,
+        author TEXT NOT NULL, content TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE changes (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+        target_id TEXT NOT NULL, date TEXT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL
+      );
+      CREATE TABLE snapshots (file_id TEXT PRIMARY KEY, json TEXT NOT NULL);
+    `)
+    old
+      .prepare(
+        "INSERT INTO changes (id, target_id, date, type, description) VALUES ('old-1','t','2023-01-01T00:00:00.000Z','added','旧记录')"
+      )
+      .run()
+    old
+      .prepare(
+        "INSERT INTO annotations (id,target_type,target_id,author,content,created_at,updated_at) VALUES ('a-1','function','t','tester','旧批注','2023-01-01T00:00:00.000Z','2023-01-01T00:00:00.000Z')"
+      )
+      .run()
+    old.close()
+
+    const backupDir = join(dir, 'backups')
+    // 迁移前尚无备份目录
+    expect(existsSync(backupDir)).toBe(false)
+
+    // 2) 用 SqliteStorage 打开同一库并 init（触发「备份 → 迁移」）
+    const upgraded = new SqliteStorage(dbPath)
+    upgraded.init()
+
+    // ① 迁移前已生成 VACUUM 备份文件
+    expect(existsSync(backupDir)).toBe(true)
+    expect(readdirSync(backupDir).filter((f) => f.endsWith('.bak')).length).toBeGreaterThan(0)
+    // ② 旧数据完好未丢
+    expect(upgraded.listChanges('t').map((c) => c.id)).toContain('old-1')
+    expect(upgraded.listAnnotations('t')).toHaveLength(1)
+    // ③ 新列已加上：可正常 appendChange 带 source/commit
+    upgraded.appendChange({
+      targetId: 't',
+      type: 'modified',
+      description: 'git 来源',
+      source: 'git',
+      commit: { hash: 'beef', author: 'Dev', subject: 's' }
+    })
+    const gitRec = upgraded.listChanges('t').find((c) => c.source === 'git')
+    expect(gitRec?.commit).toEqual({ hash: 'beef', author: 'Dev', subject: 's' })
+    upgraded.close()
+  })
+
+  it('SqliteStorage：全新库（文件不存在）init 不产生备份（无用户数据）', () => {
+    const dir = freshDir()
+    const dbPath = join(dir, 'autodoc.db')
+    expect(existsSync(dbPath)).toBe(false)
+    const fresh = new SqliteStorage(dbPath)
+    fresh.init()
+    // 全新库无需迁移前备份
+    expect(existsSync(join(dir, 'backups'))).toBe(false)
+    fresh.close()
+  })
+})
+
+describe('备份可辨识与防轮转（M-1）', () => {
+  it('backupBaseName：去掉扩展名得到库标识前缀', () => {
+    expect(backupBaseName(join('.autodoc', 'prism-samples-wpf.db'))).toBe('prism-samples-wpf')
+    expect(backupBaseName(join('.autodoc', 'autodoc.json'))).toBe('autodoc')
+  })
+
+  it('SqliteStorage：迁移前备份名含库 basename 且带 premigrate 段（可辨识）', () => {
+    const dir = freshDir()
+    // 用与 autodoc.db 不同的库名，验证前缀确实来自 dataPath 的 basename
+    const dbPath = join(dir, 'prism-samples-wpf.db')
+    const boot = new SqliteStorage(dbPath)
+    boot.init()
+    boot.close()
+    // 重开已有库 → isUpgrade → 触发迁移前 premigrate 备份
+    const reopened = new SqliteStorage(dbPath)
+    reopened.init()
+    reopened.close()
+
+    const backupDir = join(dir, 'backups')
+    const premigrate = readdirSync(backupDir).filter(
+      (f) => f.endsWith('.bak') && f.includes('.premigrate.')
+    )
+    expect(premigrate.length).toBeGreaterThan(0)
+    for (const f of premigrate) {
+      // 文件名以「库basename.premigrate.」开头，不同库/不同用途均可辨识
+      expect(f.startsWith('prism-samples-wpf.premigrate.')).toBe(true)
+    }
+  })
+
+  it('JsonStorage：普通写前备份名含库 basename（可辨识）', () => {
+    const dir = freshDir()
+    const dataPath = join(dir, 'prism-samples-wpf.json')
+    writeFileSync(
+      dataPath,
+      JSON.stringify({ version: 1, annotations: [], changes: [], snapshots: {} }),
+      'utf-8'
+    )
+    const storage = new JsonStorage(dataPath)
+    storage.init()
+    storage.addAnnotation({ targetType: 'file', targetId: 'f.ts', author: 'tester', content: 'x' })
+    storage.close()
+
+    const backupDir = join(dir, 'backups')
+    const baks = readdirSync(backupDir).filter((f) => f.endsWith('.bak'))
+    expect(baks.length).toBeGreaterThan(0)
+    for (const f of baks) expect(f.startsWith('prism-samples-wpf.')).toBe(true)
+  })
+
+  it('SqliteStorage：普通备份 churn 超配额触发轮转后，premigrate 备份不被淘汰', () => {
+    const dir = freshDir()
+    const dbPath = join(dir, 'autodoc.db')
+    const backupDir = join(dir, 'backups')
+    const boot = new SqliteStorage(dbPath)
+    boot.init()
+    boot.close()
+
+    // 预置：1 份 premigrate + 12 份普通备份（已超普通配额 10），命名确定、不依赖时钟
+    mkdirSync(backupDir, { recursive: true })
+    const preName = 'autodoc.premigrate.2026-01-01T00-00-00-000Z.bak'
+    writeFileSync(join(backupDir, preName), 'pre')
+    for (let i = 0; i < 12; i++) {
+      writeFileSync(
+        join(backupDir, `autodoc.2026-01-02T00-00-${String(i).padStart(2, '0')}-000Z.bak`),
+        'n'
+      )
+    }
+
+    // 重开已有库 → init 内 premigrate 备份调用 pruneBackups（普通配额 10 / premigrate 配额 3）
+    const reopened = new SqliteStorage(dbPath)
+    reopened.init()
+    reopened.close()
+
+    const remaining = readdirSync(backupDir)
+    // premigrate 备份在普通 churn 中存活（未被普通配额淘汰）
+    expect(remaining).toContain(preName)
+    // 普通备份被裁到配额内（<=10）
+    const normal = remaining.filter((f) => f.startsWith('autodoc.') && !f.includes('.premigrate.'))
+    expect(normal.length).toBeLessThanOrEqual(10)
+  })
+
+  it('pruneBackups：premigrate 超独立配额（3）按最旧裁剪，且不误删其它库备份', () => {
+    const dir = freshDir()
+    const backupDir = join(dir, 'backups')
+    mkdirSync(backupDir, { recursive: true })
+    for (let i = 0; i < 5; i++) {
+      writeFileSync(
+        join(backupDir, `autodoc.premigrate.2026-01-0${i + 1}T00-00-00-000Z.bak`),
+        'p'
+      )
+    }
+    writeFileSync(join(backupDir, 'other.premigrate.2026-01-01T00-00-00-000Z.bak'), 'o')
+
+    pruneBackups(backupDir, 'autodoc')
+
+    const remaining = readdirSync(backupDir)
+    expect(remaining.filter((f) => f.startsWith('autodoc.premigrate.'))).toHaveLength(3)
+    // 最旧两份被删、最新三份保留
+    expect(remaining).not.toContain('autodoc.premigrate.2026-01-01T00-00-00-000Z.bak')
+    expect(remaining).not.toContain('autodoc.premigrate.2026-01-02T00-00-00-000Z.bak')
+    expect(remaining).toContain('autodoc.premigrate.2026-01-05T00-00-00-000Z.bak')
+    // 其它库（basename 不同）的备份不受影响
+    expect(remaining).toContain('other.premigrate.2026-01-01T00-00-00-000Z.bak')
+  })
 })

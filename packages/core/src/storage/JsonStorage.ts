@@ -1,8 +1,8 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, basename, extname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { Annotation, ChangeRecord } from '@autodoc/shared-types'
+import type { Annotation, ChangeRecord, ChangeSource } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 import type {
   AnnotationPatch,
@@ -16,22 +16,51 @@ interface JsonData {
   annotations: Annotation[]
   changes: ChangeRecord[]
   snapshots: Record<string, FileSnapshot>
+  /** Git 历史回填水位线（已消化到的 commit hash） */
+  gitWatermark?: string
 }
 
-const EMPTY: JsonData = { version: 1, annotations: [], changes: [], snapshots: {} }
+/** 每次返回全新的空数据对象；避免 module 级单例的可变引用被写操作跨实例污染 */
+function emptyData(): JsonData {
+  return { version: 1, annotations: [], changes: [], snapshots: {} }
+}
 
 const MAX_BACKUPS = 10
+/** 迁移前备份（premigrate）的独立小配额：与普通备份分开管理，避免改 schema 前的回滚点被普通备份 churn 立即淘汰 */
+const MAX_PREMIGRATE_BACKUPS = 3
 
-/** 备份目录中按时间戳命名，超限删除最旧（仅清理备份，不触碰正式数据） */
-export function pruneBackups(backupDir: string, max = MAX_BACKUPS): void {
+/**
+ * 仅清理备份目录中属于指定库（basename）的 .bak 文件，绝不触碰正式数据库/侧车数据。
+ *
+ * 备份名形如 `<basename>.<stamp>.bak`（普通写前）与 `<basename>.premigrate.<stamp>.bak`（迁移前）；
+ * 两类各自独立配额，且仅清理本库（basename 前缀）的备份，不影响同目录下其它库。
+ * stamp 为 ISO 时间戳（:/．→-），字典序即时间序，故 sort() 后 shift() 删的是最旧。
+ */
+export function pruneBackups(
+  backupDir: string,
+  baseName: string,
+  max = MAX_BACKUPS,
+  maxPremigrate = MAX_PREMIGRATE_BACKUPS
+): void {
   if (!existsSync(backupDir)) return
-  const files = readdirSync(backupDir)
-    .filter((f) => f.endsWith('.bak'))
-    .sort()
-  while (files.length > max) {
-    const oldest = files.shift()
+  const premigratePrefix = `${baseName}.premigrate.`
+  const normalPrefix = `${baseName}.`
+  const all = readdirSync(backupDir).filter((f) => f.endsWith('.bak'))
+  const premigrate = all.filter((f) => f.startsWith(premigratePrefix)).sort()
+  const normal = all.filter((f) => f.startsWith(normalPrefix) && !f.startsWith(premigratePrefix)).sort()
+  while (premigrate.length > maxPremigrate) {
+    const oldest = premigrate.shift()
     if (oldest) rmSync(join(backupDir, oldest), { force: true })
   }
+  while (normal.length > max) {
+    const oldest = normal.shift()
+    if (oldest) rmSync(join(backupDir, oldest), { force: true })
+  }
+}
+
+/** 由 dataPath 推导可辨识的库名前缀（去扩展名），用于备份命名与按库轮转 */
+export function backupBaseName(dataPath: string): string {
+  return basename(dataPath, extname(dataPath))
 }
 
 /**
@@ -40,7 +69,7 @@ export function pruneBackups(backupDir: string, max = MAX_BACKUPS): void {
  */
 export class JsonStorage implements StorageAdapter {
   readonly kind = 'json' as const
-  private data: JsonData = EMPTY
+  private data: JsonData = emptyData()
   private loaded = false
   private backedUp = false
 
@@ -50,11 +79,14 @@ export class JsonStorage implements StorageAdapter {
     if (this.loaded) return
     if (existsSync(this.dataPath)) {
       try {
-        this.data = { ...EMPTY, ...(JSON.parse(readFileSync(this.dataPath, 'utf-8')) as JsonData) }
+        this.data = { ...emptyData(), ...(JSON.parse(readFileSync(this.dataPath, 'utf-8')) as JsonData) }
       } catch {
         // 数据损坏时不覆盖原文件，从空状态开始并保留原文件待人工处理
-        this.data = EMPTY
+        this.data = emptyData()
       }
+    } else {
+      // 文件不存在：使用本实例独立的空数据（不复用共享引用）
+      this.data = emptyData()
     }
     this.loaded = true
   }
@@ -63,15 +95,18 @@ export class JsonStorage implements StorageAdapter {
     // JSON 存储无长连接资源
   }
 
-  private backupOnce(): void {
+  private backupOnce(kind: 'write' | 'premigrate' = 'write'): void {
     if (this.backedUp) return
     this.backedUp = true
     if (!existsSync(this.dataPath)) return
     const backupDir = join(dirname(this.dataPath), 'backups')
     mkdirSync(backupDir, { recursive: true })
+    const base = backupBaseName(this.dataPath)
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-    copyFileSync(this.dataPath, join(backupDir, `autodoc.${stamp}.bak`))
-    pruneBackups(backupDir)
+    // 备份名纳入库标识（basename），不同库/不同用途（premigrate vs 普通）在文件名上可辨识
+    const name = kind === 'premigrate' ? `${base}.premigrate.${stamp}.bak` : `${base}.${stamp}.bak`
+    copyFileSync(this.dataPath, join(backupDir, name))
+    pruneBackups(backupDir, base)
   }
 
   private save(): void {
@@ -151,7 +186,11 @@ export class JsonStorage implements StorageAdapter {
   listChanges(targetId: string): ChangeRecord[] {
     this.init()
     // 变更按追加顺序存储，倒序即「新→旧」，避免同毫秒时间戳排序不稳定
-    return this.data.changes.filter((c) => c.targetId === targetId).reverse()
+    // 旧数据无 source 字段，读出时回落为 'snapshot'（与 SqliteStorage 一致）
+    return this.data.changes
+      .filter((c) => c.targetId === targetId)
+      .reverse()
+      .map((c) => (c.source ? c : { ...c, source: 'snapshot' as ChangeSource }))
   }
 
   appendChange(input: NewChangeInput): ChangeRecord {
@@ -159,10 +198,12 @@ export class JsonStorage implements StorageAdapter {
     const record: ChangeRecord = {
       id: randomUUID(),
       targetId: input.targetId,
-      date: new Date().toISOString(),
+      date: input.date ?? new Date().toISOString(),
       type: input.type,
-      description: input.description
+      description: input.description,
+      source: input.source ?? 'snapshot'
     }
+    if (input.commit) record.commit = input.commit
     this.data.changes.push(record)
     this.save()
     return record
@@ -176,6 +217,17 @@ export class JsonStorage implements StorageAdapter {
   saveSnapshot(snapshot: FileSnapshot): void {
     this.mutate()
     this.data.snapshots[snapshot.fileId] = snapshot
+    this.save()
+  }
+
+  getGitWatermark(): string | null {
+    this.init()
+    return this.data.gitWatermark ?? null
+  }
+
+  setGitWatermark(hash: string): void {
+    this.mutate()
+    this.data.gitWatermark = hash
     this.save()
   }
 }

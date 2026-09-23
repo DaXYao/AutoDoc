@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import type { NewProjectInput, ProjectEntry, ProjectInfo } from '@autodoc/shared-types'
-import { createDocService, type DocService, type WarnFn } from './context.js'
+import { createDocService, scheduleGitBackfill, type DocService, type WarnFn } from './context.js'
 
 /**
  * 项目注册表 + 活动项目懒加载管理器（hub 模式核心）。
@@ -148,6 +148,10 @@ export class ProjectManager {
         throw new Error(`项目根目录不存在：${rootDir}`)
       }
       managed.service = await createDocService(rootDir, this.warn, configPath)
+      // createDocService 内部已在首次全量生成后调度 Git 回填
+    } else {
+      // 复用已加载服务：切回时增量拾取新提交（后台异步、并发去重）
+      scheduleGitBackfill(managed.service, this.warn)
     }
     this.activeId = id
     return managed.service

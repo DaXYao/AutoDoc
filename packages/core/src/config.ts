@@ -98,6 +98,14 @@ const configSchema = {
       properties: {
         linkTemplate: { type: 'string' }
       }
+    },
+    git: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        // 正整数、[1, 10000]：下界避免 0/负数/小数被误当成「不限制」；上界避免 1e9 等超大值使首次回填退化为全量历史，均在 loadConfig 阶段即报错
+        maxBackfillCommits: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
     }
   }
 } as const

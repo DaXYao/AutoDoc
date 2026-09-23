@@ -2,9 +2,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { Annotation, AnnotationTargetType, ChangeRecord, ChangeType } from '@autodoc/shared-types'
+import type { Annotation, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
-import { pruneBackups } from './JsonStorage.js'
+import { backupBaseName, pruneBackups } from './JsonStorage.js'
 import type {
   AnnotationPatch,
   NewAnnotationInput,
@@ -25,6 +25,9 @@ export class SqliteStorage implements StorageAdapter {
 
   init(): void {
     if (this.db) return
+    // 先判定是否为「升级已有库」（必须在 new DatabaseSync 之前，否则文件会被新建）：
+    // 若库文件已存在，说明可能含真实用户数据，schema 迁移（ALTER）前必须先备份。
+    const isUpgrade = existsSync(this.dataPath)
     mkdirSync(dirname(this.dataPath), { recursive: true })
     this.db = new DatabaseSync(this.dataPath)
     this.db.exec(`
@@ -51,7 +54,27 @@ export class SqliteStorage implements StorageAdapter {
         file_id TEXT PRIMARY KEY,
         json TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS git_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `)
+    // 迁移前备份：仅升级已有库时触发，用 'premigrate' 类型命名（<base>.premigrate.<stamp>.bak），
+    // 使其可与普通写前备份辨识、并受独立配额保护、不被普通备份 churn 立即轮转掉。
+    // 此时 this.db 已就绪，backupOnce() 内 conn()→init() 因 this.db 非空会立即返回（不递归）；
+    // backedUp 幂等标志确保备份只做一次。全新库（文件此前不存在）无用户数据，无需备份，直接迁移。
+    if (isUpgrade) this.backupOnce('premigrate')
+    // 幂等迁移：为已存在的 changes 表补充新列（重复执行时忽略 duplicate column 错误）
+    for (const ddl of [
+      'ALTER TABLE changes ADD COLUMN source TEXT',
+      'ALTER TABLE changes ADD COLUMN commit_json TEXT'
+    ]) {
+      try {
+        this.db.exec(ddl)
+      } catch {
+        // 列已存在（已迁移过的库），忽略
+      }
+    }
   }
 
   close(): void {
@@ -65,17 +88,20 @@ export class SqliteStorage implements StorageAdapter {
     return this.db
   }
 
-  private backupOnce(): void {
+  private backupOnce(kind: 'write' | 'premigrate' = 'write'): void {
     if (this.backedUp) return
     this.backedUp = true
     if (!existsSync(this.dataPath)) return
     const backupDir = join(dirname(this.dataPath), 'backups')
     mkdirSync(backupDir, { recursive: true })
+    const base = backupBaseName(this.dataPath)
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-    const target = join(backupDir, `autodoc.${stamp}.bak`).replace(/'/g, "''")
-    // VACUUM INTO 生成一致性的整库快照
+    // 备份名纳入库标识（basename）；迁移前备份额外带 premigrate 段，与普通备份可辨识、且不被其配额立即轮转
+    const name = kind === 'premigrate' ? `${base}.premigrate.${stamp}.bak` : `${base}.${stamp}.bak`
+    // VACUUM INTO 路径中的单引号需转义（SQL 字符串字面量）
+    const target = join(backupDir, name).replace(/'/g, "''")
     this.conn().exec(`VACUUM INTO '${target}'`)
-    pruneBackups(backupDir)
+    pruneBackups(backupDir, base)
   }
 
   listAnnotations(targetId?: string): Annotation[] {
@@ -158,16 +184,29 @@ export class SqliteStorage implements StorageAdapter {
 
   appendChange(input: NewChangeInput): ChangeRecord {
     this.backupOnce()
+    const source: ChangeSource = input.source ?? 'snapshot'
     const record: ChangeRecord = {
       id: randomUUID(),
       targetId: input.targetId,
-      date: new Date().toISOString(),
+      date: input.date ?? new Date().toISOString(),
       type: input.type,
-      description: input.description
+      description: input.description,
+      source
     }
+    if (input.commit) record.commit = input.commit
     this.conn()
-      .prepare('INSERT INTO changes (id, target_id, date, type, description) VALUES (?, ?, ?, ?, ?)')
-      .run(record.id, record.targetId, record.date, record.type, record.description)
+      .prepare(
+        'INSERT INTO changes (id, target_id, date, type, description, source, commit_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      )
+      .run(
+        record.id,
+        record.targetId,
+        record.date,
+        record.type,
+        record.description,
+        source,
+        input.commit ? JSON.stringify(input.commit) : null
+      )
     return record
   }
 
@@ -184,6 +223,20 @@ export class SqliteStorage implements StorageAdapter {
       .run(snapshot.fileId, JSON.stringify(snapshot))
   }
 
+  getGitWatermark(): string | null {
+    const row = this.conn().prepare("SELECT value FROM git_state WHERE key = 'watermark'").get()
+    return row && typeof row.value === 'string' ? row.value : null
+  }
+
+  setGitWatermark(hash: string): void {
+    this.backupOnce()
+    this.conn()
+      .prepare(
+        "INSERT INTO git_state (key, value) VALUES ('watermark', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+      )
+      .run(hash)
+  }
+
   private rowToAnnotation(row: Record<string, unknown>): Annotation {
     return {
       id: String(row.id),
@@ -197,12 +250,23 @@ export class SqliteStorage implements StorageAdapter {
   }
 
   private rowToChange(row: Record<string, unknown>): ChangeRecord {
-    return {
+    const source: ChangeSource = row.source === 'git' ? 'git' : 'snapshot'
+    const record: ChangeRecord = {
       id: String(row.id),
       targetId: String(row.target_id),
       date: String(row.date),
       type: String(row.type) as ChangeType,
-      description: String(row.description)
+      description: String(row.description),
+      source
     }
+    const commitJson = row.commit_json
+    if (typeof commitJson === 'string' && commitJson.length > 0) {
+      try {
+        record.commit = JSON.parse(commitJson) as ChangeCommitInfo
+      } catch {
+        // commit_json 损坏时忽略，不阻断变更记录读取
+      }
+    }
+    return record
   }
 }
