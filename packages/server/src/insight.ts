@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto'
 import { dirname } from 'node:path'
 import type {
+  AiPassKey,
+  AiPassStatus,
+  FlowNode,
   FunctionCategory,
   FunctionDoc,
   InsightChain,
@@ -11,6 +14,14 @@ import { deepseekChat, extractJson, type ChatMessage } from './ai.js'
 import { AiCache } from './aiCache.js'
 import type { DocService } from './context.js'
 import { getDeepSeekConfig } from './env.js'
+import {
+  DEFAULT_FLOW_CAPS,
+  applyFlows,
+  generateFlows,
+  heuristicFlows,
+  type FlowCaps,
+  type FlowDeps
+} from './flow.js'
 import { applyCoreJudgment, applyPartition, buildGraph, type CoreJudgment, type Partition, type ProjectGraph } from './graph.js'
 
 /** AI 划分信封（缓存单元）：members 为函数在索引表中的下标 */
@@ -24,6 +35,14 @@ interface CategoryEnvelope {
 }
 interface NarrativeEnvelope {
   [chainKey: string]: { narrative?: string; stepRoles?: Record<string, string> }
+}
+
+/** 脉络树缓存单元（整树快照，供 loadInsight 免网络回读） */
+interface FlowTreeCache {
+  tree: FlowNode[]
+  generatedAt: string
+  /** true=AI 生成；false=静态兜底降级 */
+  aiOk: boolean
 }
 
 const MAX_AI_MODULES = 6
@@ -379,6 +398,17 @@ export function loadInsight(service: DocService, feedback = ''): InsightBundle {
     applyNarratives(insight, narr)
     touched = true
   }
+  // 脉络树整树快照回读（免网络）：仅 AI 生成的树计入 aiGenerated
+  const flowsTree = cache.get<FlowTreeCache>(fp, 'flows:tree')
+  if (flowsTree && flowsTree.tree.length > 0) {
+    insight.flows = flowsTree.tree
+    insight.flowsGeneratedAt = flowsTree.generatedAt
+    insight.flowsFingerprint = fp
+    if (flowsTree.aiOk) touched = true
+  }
+  // 各 AI 段状态回读（可观测性，独立于 aiGenerated）
+  const cachedStatus = cache.get<Partial<Record<AiPassKey, AiPassStatus>>>(fp, 'aiStatus')
+  if (cachedStatus) insight.aiStatus = cachedStatus
   insight.aiGenerated = touched
   return { insight, graph }
 }
@@ -415,14 +445,19 @@ export async function refreshInsightAI(
   const cache = new AiCache(dirname(service.storage.dataPath))
   const fp = graph.fingerprint
   const fbKey = `partition:${hash8(feedback)}`
+  const status: Partial<Record<AiPassKey, AiPassStatus>> = {}
 
   // 1) 划分（AI 主导；可携带用户建议迭代）
   let p = opts.force || opts.forcePartition ? undefined : cache.get<PartitionEnvelope>(fp, fbKey)
-  if (!p) {
+  if (p) {
+    status.partition = 'ok'
+  } else {
     const previous = cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? null
     try {
       p = (await aiPartition(graph, feedback, previous)) ?? undefined
+      status.partition = p ? 'ok' : 'failed'
     } catch (e) {
+      status.partition = 'failed'
       console.warn(`[autodoc] AI 划分失败，回退目录划分：${e instanceof Error ? e.message : String(e)}`)
     }
     if (p) {
@@ -445,10 +480,14 @@ export async function refreshInsightAI(
     try {
       cj = await aiCoreJudgment(graph)
       if (Object.keys(cj).length > 0) cache.set(fp, 'coreJudgment', cj)
+      status.coreJudgment = Object.keys(cj).length > 0 ? 'ok' : 'failed'
     } catch (e) {
+      status.coreJudgment = 'failed'
       console.warn(`[autodoc] AI 核心判定失败，回退静态中心度：${e instanceof Error ? e.message : String(e)}`)
       cj = {}
     }
+  } else {
+    status.coreJudgment = Object.keys(cj).length > 0 ? 'ok' : 'failed'
   }
   if (cj && Object.keys(cj).length > 0) {
     applyCoreJudgment(graph, cj)
@@ -456,50 +495,111 @@ export async function refreshInsightAI(
   }
 
   // 3) pending 函数 AI 分类
+  const hadPending = [...graph.nodes.values()].some((f) => f.category === 'pending')
   let cats = opts.force ? undefined : cache.get<CategoryEnvelope>(fp, 'categories')
   if (!cats) {
     try {
       cats = await aiCategories(graph)
       if (Object.keys(cats).length > 0) cache.set(fp, 'categories', cats)
+      status.categories = Object.keys(cats).length > 0 ? 'ok' : hadPending ? 'failed' : 'skipped'
     } catch (e) {
+      status.categories = 'failed'
       console.warn(`[autodoc] AI 分类失败：${e instanceof Error ? e.message : String(e)}`)
       cats = {}
     }
+  } else {
+    status.categories = Object.keys(cats).length > 0 ? 'ok' : hadPending ? 'failed' : 'skipped'
   }
   applyCategories(insight, graph, cats ?? {})
 
   // 4) 核心角色
+  const hadCores = [...graph.insights.values()].some((f) => f.isCore)
   let roles = opts.force ? undefined : cache.get<Record<string, string>>(fp, 'coreRoles')
   if (!roles) {
     try {
       roles = await aiCoreRoles(graph)
       if (Object.keys(roles).length > 0) cache.set(fp, 'coreRoles', roles)
+      status.coreRoles = Object.keys(roles).length > 0 ? 'ok' : hadCores ? 'failed' : 'skipped'
     } catch (e) {
+      status.coreRoles = 'failed'
       console.warn(`[autodoc] AI 核心角色失败：${e instanceof Error ? e.message : String(e)}`)
       roles = {}
     }
+  } else {
+    status.coreRoles = Object.keys(roles).length > 0 ? 'ok' : hadCores ? 'failed' : 'skipped'
   }
   applyRoles(insight, roles ?? {})
 
   // 5) 链路叙事
+  const hadChainModules = graph.modules.some((m) => m.chainIds.length > 0)
   let narr = opts.force ? undefined : cache.get<NarrativeEnvelope>(fp, 'narratives')
   if (!narr) {
     try {
       narr = await aiNarratives(graph)
       if (Object.keys(narr).length > 0) cache.set(fp, 'narratives', narr)
+      status.narratives = Object.keys(narr).length > 0 ? 'ok' : hadChainModules ? 'failed' : 'skipped'
     } catch (e) {
+      status.narratives = 'failed'
       console.warn(`[autodoc] AI 链路叙事失败：${e instanceof Error ? e.message : String(e)}`)
       narr = {}
     }
+  } else {
+    status.narratives = Object.keys(narr).length > 0 ? 'ok' : hadChainModules ? 'failed' : 'skipped'
   }
   applyNarratives(insight, narr ?? {})
+
+  // 6) 递归脉络架构树（依赖前 5 段的 modules/core/chains/narratives）
+  const flowCfg = service.normalized.config.insight?.flow ?? {}
+  const caps: FlowCaps = {
+    maxDepth: flowCfg.maxDepth ?? DEFAULT_FLOW_CAPS.maxDepth,
+    maxChildrenPerNode: flowCfg.maxChildrenPerNode ?? DEFAULT_FLOW_CAPS.maxChildrenPerNode,
+    maxNodesTotal: flowCfg.maxNodesTotal ?? DEFAULT_FLOW_CAPS.maxNodesTotal
+  }
+  let flowsAiOk = false
+  const cachedTree = opts.force ? undefined : cache.get<FlowTreeCache>(fp, 'flows:tree')
+  if (cachedTree && cachedTree.tree.length > 0) {
+    insight.flows = cachedTree.tree
+    insight.flowsGeneratedAt = cachedTree.generatedAt
+    insight.flowsFingerprint = fp
+    flowsAiOk = cachedTree.aiOk
+  } else {
+    let roots: FlowNode[] = []
+    const flowDeps: FlowDeps = { cache, fingerprint: fp, caps }
+    try {
+      roots = await generateFlows(graph, insight, flowDeps)
+      flowsAiOk = roots.length > 0
+    } catch (e) {
+      console.warn(`[autodoc] AI 脉络生成失败，回退静态兜底：${e instanceof Error ? e.message : String(e)}`)
+    }
+    // 任一步失败走 heuristicFlows（不抛、不崩、不影响已生成的其它段）
+    if (!flowsAiOk) {
+      try {
+        roots = heuristicFlows(graph, insight, { caps })
+      } catch {
+        roots = []
+      }
+    }
+    if (roots.length > 0) {
+      applyFlows(insight, graph, roots, { caps })
+      cache.set(fp, 'flows:tree', {
+        tree: insight.flows ?? [],
+        generatedAt: insight.flowsGeneratedAt ?? '',
+        aiOk: flowsAiOk
+      })
+    }
+  }
+  const flowsProduced = !!insight.flows && insight.flows.length > 0
+  status.flows = flowsProduced ? (flowsAiOk ? 'ok' : 'failed') : 'skipped'
 
   insight.aiGenerated = !!(
     p ||
     Object.keys(cj ?? {}).length ||
     Object.keys(cats ?? {}).length ||
     Object.keys(roles ?? {}).length ||
-    Object.keys(narr ?? {}).length
+    Object.keys(narr ?? {}).length ||
+    flowsAiOk
   )
+  cache.set(fp, 'aiStatus', status)
+  insight.aiStatus = status
   return { insight, graph }
 }

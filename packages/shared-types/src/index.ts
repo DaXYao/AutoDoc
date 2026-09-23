@@ -191,6 +191,8 @@ export interface DefaultExpandConfig {
   codeBlocks?: boolean
   changes?: boolean
   annotations?: boolean
+  /** 脉络架构树默认自动展开的层级深度（0=全部折叠） */
+  flowAutoExpandDepth?: number
 }
 
 export interface StorageConfig {
@@ -209,6 +211,20 @@ export interface GitConfig {
   maxBackfillCommits?: number
 }
 
+/** 递归脉络架构树的规模上限（缺省 maxDepth=5 / maxChildrenPerNode=8 / maxNodesTotal=80） */
+export interface FlowConfig {
+  /** 脉络树最大递归深度（根为 0） */
+  maxDepth?: number
+  /** 单个节点最大子节点数，超限分支合并为「其它」叶子 */
+  maxChildrenPerNode?: number
+  /** 整棵脉络树最大节点总数 */
+  maxNodesTotal?: number
+}
+
+export interface InsightConfig {
+  flow?: FlowConfig
+}
+
 export interface AutodocConfig {
   /** 待扫描源码的包含 glob（相对项目根） */
   include?: string[]
@@ -222,6 +238,7 @@ export interface AutodocConfig {
   storage?: StorageConfig
   editor?: EditorConfig
   git?: GitConfig
+  insight?: InsightConfig
 }
 
 /** /api/meta 返回的服务元信息 */
@@ -346,6 +363,43 @@ export interface FunctionInsight {
   aiCategoryReason: string
 }
 
+/**
+ * 递归脉络架构树节点：把扁平的 modules/chains 组织成可下钻的业务主线。
+ * 只存 id 引用（不复制函数/模块/链路数据），前端按 id 回查。
+ */
+export interface FlowNode {
+  /** 层级可读 id：'flow:0'、'flow:0.2'、'flow:0.2.1' */
+  id: string
+  parentId: string | null
+  label: string
+  summary: string
+  /** 同层顺序 */
+  order: number
+  kind: 'module' | 'mainline' | 'branch' | 'leaf'
+  /** 0=项目主线根 */
+  depth: number
+  relatedModuleIds: string[]
+  /** leaf 指向 1 个核心函数 */
+  relatedFunctionIds: string[]
+  relatedChainIds: string[]
+  source: 'ai' | 'heuristic'
+  reason: string
+  /** sha256(relatedFunctionIds.sort().join())[:8]，子树增量用 */
+  contentHash?: string
+  children: FlowNode[]
+}
+
+/** 各 AI 段的执行状态（可观测性：区分成功/失败/空返回） */
+export type AiPassStatus = 'ok' | 'failed' | 'skipped'
+
+export type AiPassKey =
+  | 'partition'
+  | 'coreJudgment'
+  | 'categories'
+  | 'coreRoles'
+  | 'narratives'
+  | 'flows'
+
 /** 项目洞察聚合（静态 + 可选 AI 增强） */
 export interface ProjectInsight {
   generatedAt: string
@@ -363,4 +417,10 @@ export interface ProjectInsight {
   modules: InsightModule[]
   chains: InsightChain[]
   functions: Record<string, FunctionInsight>
+  /** 递归脉络架构树（可选，向后兼容） */
+  flows?: FlowNode[]
+  flowsGeneratedAt?: string
+  flowsFingerprint?: string
+  /** 各 AI 段执行状态（可观测性） */
+  aiStatus?: Partial<Record<AiPassKey, AiPassStatus>>
 }

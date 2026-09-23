@@ -42,7 +42,7 @@ export function extractJson<T>(text: string): T | null {
   let t = text.trim()
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i)
   if (fence) t = fence[1].trim()
-  const start = t.search(/[\[{]/)
+  const start = t.search(/[[{]/)
   if (start === -1) return null
   const end = Math.max(t.lastIndexOf('}'), t.lastIndexOf(']'))
   if (end === -1 || end < start) return null

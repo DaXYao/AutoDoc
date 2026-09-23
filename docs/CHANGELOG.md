@@ -10,6 +10,80 @@
 
 ---
 
+## [未发布] 2026-09-24
+
+### feat: 递归脉络架构树后端（FlowNode 数据模型 + AI 多轮编排 + heuristic 兜底 + aiStatus 可观测性）
+- **内容**：把扁平的 modules/chains 组织成一条可递归下钻的业务主线（项目→核心功能模块→有序脉络节点→递归子节点→核心函数叶子）：
+  - **shared-types**（[packages/shared-types/src/index.ts](../packages/shared-types/src/index.ts)）：新增 `FlowNode`（只存 id 引用，不复制函数/模块/链路数据；`kind: 'module'|'mainline'|'branch'|'leaf'`；`contentHash?: string` = sha256(relatedFunctionIds.sort().join())[:8]，子树增量用）；`ProjectInsight` 追加可选字段 `flows?: FlowNode[]`、`flowsGeneratedAt?`、`flowsFingerprint?`、`aiStatus?: Partial<Record<AiPassKey, AiPassStatus>>`（向后兼容）；`DefaultExpandConfig` 追加 `flowAutoExpandDepth?: number`；新增 `FlowConfig`/`InsightConfig`，`AutodocConfig` 追加 `insight?: InsightConfig`；
+  - **flow.ts**（新增 [packages/server/src/flow.ts](../packages/server/src/flow.ts)）：`aiFlowRoots`（缓存键 `flows:roots`，prompt 输入=modules+entries 前 20+summary，输出 `{roots:[{label,summary,order,relatedModuleIds,reason}]}`，用索引化范式，AI 只吐模块 id，服务端验证映射）；`aiFlowChildren`（缓存键 `flows:node:${id}`，prompt 输入=父节点覆盖的模块/函数/链路 path 摘要+父节点 summary&order 约束，输出 `{children:[{label,summary,order,kind,relatedFunctionIds,relatedChainIds,reason}]}`；递归停止：`kind='leaf'` / `depth>=maxDepth` / 广度/总量上限；单轮 AI 失败→`heuristicChildren` 兜底，树不断裂）；`heuristicFlows`（静态兜底整树：根按 coreScore/链路数排序模块，子节点按链路入口前缀+核心度机械排序，leaf 取该组最高核心函数，全部 `source='heuristic'`）；`applyFlows`（写回 `insight.flows`，order 冲突检测→矛盾子树回退 heuristic，填 flowsGeneratedAt/flowsFingerprint/contentHash）；`generateFlows`（顶层驱动：aiFlowRoots+对每个根递归 aiFlowChildren，任一步失败走 heuristicFlows）；规模降级：候选函数>50 先按链路入口静态子聚类再喂 AI（代表函数≤30）；超 `maxChildrenPerNode` 的分支合并为「其它」叶子；超 `maxNodesTotal` 停止扩展；
+  - **insight.ts 接线**（[packages/server/src/insight.ts](../packages/server/src/insight.ts)）：新增第 6 段 flows pass（读缓存 `flows:tree`/miss 调 `generateFlows`/写缓存/`applyFlows`；成功则 `aiGenerated` 或运算加 `flowsAiOk`）；**aiStatus 可观测性**：6 段（partition/coreJudgment/categories/coreRoles/narratives/flows）各自回填 `ok`/`failed`/`skipped` 状态，缓存键 `aiStatus`，`loadInsight` 免网络回读；修复了此前 coreJudgment 静默失败无法察觉的问题；
+  - **config caps**（[packages/core/src/config.ts](../packages/core/src/config.ts)）：`insight.flow.{maxDepth,maxChildrenPerNode,maxNodesTotal}` AJV 校验 `integer minimum:1 maximum:{20,50,2000}`，默认 5/8/80；`DEFAULT_EXPAND.flowAutoExpandDepth=2`；defaultExpand schema 修正（`flowAutoExpandDepth` 为整数而非布尔）；
+  - **server 测试脚手架**（[packages/server/package.json](../packages/server/package.json)、[packages/server/test/flow.test.ts](../packages/server/test/flow.test.ts)）：新增 `vitest ^3.2.4` devDep + `"test": "vitest run"` 脚本；flow.test.ts 14 用例（注入伪 chat 函数）覆盖：aiFlowRoots 正常路径/跨模块主线归组/非法 moduleId 过滤；aiFlowChildren/generateFlows 正常路径/leaf 收敛到单核心函数/caps 广度（超限合并「其它」）/caps 深度（maxDepth=1 无孙节点）/caps 总量；AI 主线根抛错→heuristicFlows 兜底且树完整；子节点 AI 抛错→子树 heuristic 不断裂；缓存命中跳过重复 AI 调用；applyFlows 写回/contentHash/order 归一；order 冲突→回退 heuristic；refreshInsightAI aiStatus 6 段齐备（集成测试，`vi.mock` deepseekChat）。
+- **影响范围**：packages/shared-types（类型扩展）、packages/core（config schema + DEFAULT_EXPAND）、packages/server（flow.ts 新增、insight.ts 接线、package.json vitest devDep+脚本、test/flow.test.ts 新增）。web 未改（FlowNode 类型为前端阶段二消费做准备）。
+- **实证**：`pnpm --filter @autodoc/server run test` **14 用例全绿**；`pnpm --filter @autodoc/core run test` **97 用例全绿**（无回归）；shared-types/core/server typecheck 均 0 error；改动文件定向 eslint 0 error。对 reply-boost（35 文件）触发 `POST /api/insight/ai {force:true}` 后 `GET /api/insight` 验证：`flows` 产出 **6 条主线根**（文本分段与锚点 / 标记交互与反馈预览 / 规则包定义与编辑 / 会话历史与导出 / 桌面集成与剪贴板 / 通用组件与引导），最深递归到 depth=4，节点有 order/label/summary；`aiStatus` 各段状态可见——**`coreJudgment: failed`（模型响应无法解析，此前静默失败，现可观测）**、`categories: failed`、`partition/coreRoles/narratives/flows: ok`；部分子树因 AI children 调用间歇失败已正确降级为 heuristic（`source=heuristic`），树始终完整不断裂。
+- **已知局限（本次不改）**：`coreJudgment` 对 reply-boost 持续失败（模型响应超 maxTokens 或格式异常导致 extractJson 返回 null），使核心函数选择回退到静态中心度；leaf 节点因此可能指向 `formatDateTime` 类高入度工具函数而非 AI 判定的业务核心。此为 AI 响应质量问题，与本次 flows 实现无关，aiStatus 已将其可观测化，修复属于独立任务（可考虑增大 maxTokens 或精简 prompt）。
+- **风险/回滚点**：flows/aiStatus 均为可选字段（向后兼容），旧版前端不受影响；AI 全失败时 heuristicFlows 保证树不为空；回滚只需删除 flow.ts 并还原 insight.ts/shared-types/config.ts。
+
+---
+
+## [未发布] 2026-09-23
+
+### fix: dev 以中枢模式启动 + .env 加载与 cwd 解耦（修复「AI 用不了」与「项目列表只剩 AutoDoc」）
+- **内容**：一个根因（dev 脚本 `--root ../..` 强制单项目模式 + 路径解析依赖 cwd）同时导致两个现象，本次一并修复：
+  - **仓库根锚定（cwd 无关）**：[server/cli.ts](../packages/server/src/cli.ts) 新增 `findRepoRoot()`——从 cli 模块自身位置（`import.meta.url`）逐级上溯，找到含 `pnpm-workspace.yaml` 的目录作为仓库根（hub base），未命中时回退 `cwd`；`serve` 用它作 `ProjectManager.baseDir` 解析 `configs/projects.json` 与相对项目路径，dev（cwd=packages/server）与生产/VBS（cwd=仓库根）均命中同一目录；单项目模式的 `--root`/`--config` 仍相对 cwd 解析，保持既有便利；
+  - **.env 上溯加载**：[server/env.ts](../packages/server/src/env.ts) 的 `loadEnv()` 由「仅查 `baseDir/.env`」改为从起始目录逐级向上查找 `.env` 直到文件系统根（命中即加载），并在 cli `serve` 启动时以仓库根显式预加载；使 cwd=packages/server（无 .env）也能加载仓库根 `.env`，`getDeepSeekConfig()` 不再因找不到 .env 而返回 null；
+  - **dev 脚本改中枢模式**：[server/package.json](../packages/server/package.json) 的 `dev` 由 `tsx watch src/cli.ts serve --root ../..` 改为 `tsx watch src/cli.ts serve --port 7788`，配合仓库根锚定，在 cwd=packages/server 下也能加载 3 个项目注册表、configs/.autodoc/.env。
+- **影响范围**：packages/server（cli、env、package.json）。core 未改。
+- **动机**：`pnpm dev`（`pnpm -r --parallel run dev`）把 server 进程 cwd 设为 `packages/server`：一方面 `--root ../..` 触发单项目模式，`loadRegistry()` 永不执行，`configs/projects.json`（3 个项目）从不加载，`/api/projects` 只返回一个临时 `id='default'` 的 AutoDoc；另一方面 `loadEnv(process.cwd())` 在 packages/server 下找不到 `.env`（真实 .env 在仓库根），`getDeepSeekConfig()` 返回 null → `insight.ts` 的 `aiEnabled=false`，AI 能力静默失效。VBS 启动器把 cwd 设为仓库根且不带 --root 跑 hub 模式，故此前用 VBS 启动时两功能均正常——本 bug 与近期 Git 改动无关。
+- **关联/实证**：手动重启 dev（停旧进程树、从仓库根后台 `pnpm dev`）后，`GET /api/projects` 返回 **3 个项目**（autodoc、prism-samples-wpf、dsh-plugin-pet），激活 autodoc 后 `GET /api/insight` 的 **aiEnabled=true**（.env 已加载，未在日志/报告泄露密钥值）；改动文件 eslint 与 core/server typecheck 均 0 error；未引入新依赖、未改 README。
+- **风险/回滚点**：`findRepoRoot` 未命中时回退 cwd，`.env` 上溯到文件系统根仍未命中则静默跳过（等价旧行为）；生产 VBS 路径（cwd=仓库根、无 --root）上溯立即命中同一目录，行为不变；单项目模式（`generate/serve --root <dir>`）未改其 cwd 相对解析。回滚只需还原三个文件。
+
+### fix: 备份可辨识/防轮转 + merge 注释更正 + 三处零风险加固
+- **内容**：
+  - **M-1（备份可辨识 + 防轮转）**：[storage/JsonStorage.ts](../packages/core/src/storage/JsonStorage.ts) 与 [storage/SqliteStorage.ts](../packages/core/src/storage/SqliteStorage.ts) 的备份名由硬编码 `autodoc.<stamp>.bak` 改为纳入库标识——`backupBaseName(dataPath)`（basename 去扩展名）作前缀，普通写前为 `<base>.<stamp>.bak`、迁移前为 `<base>.premigrate.<stamp>.bak`（`SqliteStorage.init()` 升级路径改调 `backupOnce('premigrate')`）；`pruneBackups(backupDir, baseName)` 只清理本库前缀的 `.bak`，并按前缀分两类独立配额（普通 10 份 / premigrate 3 份），使改 schema 前的回滚点不被普通备份 churn 立即淘汰，也不误删同目录其它库；两适配器共用同一 `pruneBackups`/`backupBaseName`，JSON 侧车无 schema 迁移故只产生普通备份但命名同样可辨识；
+  - **M-2（merge 注释更正，纯注释）**：[git/gitChanges.ts](../packages/core/src/git/gitChanges.ts) 原注释「merge 提交仅与第一父对比」不准确——`diff-tree` 未加 `-m/-c/--cc` 时对 merge 提交输出为空、合并提交本身不产生任何变更；已改为准确描述（被合并分支提交由 `recentCommits` 全父链遍历各自消化，evil merge/冲突解决改动不在覆盖范围，列为已知后续项）；
+  - **N-1**：rename 顺序兜底审计日志追加 `commit.hash.slice(0,7)`，事后可定位是哪次提交；**N-2**：[git/gitClient.ts](../packages/core/src/git/gitClient.ts) 的 `degrade()` 用 try/catch 包裹日志调用，注入的 logger 自身抛错时静默忽略，守住 GitClient「绝不抛错」契约；**N-4**：[config.ts](../packages/core/src/config.ts) 的 `git.maxBackfillCommits` 加 `maximum:10000`，避免超大值使首次回填退化为全量历史。
+- **影响范围**：packages/core（storage/JsonStorage、storage/SqliteStorage、git/gitChanges、git/gitClient、config、test）。
+- **动机**：聚焦复审确认前两个 Major 已修复后，处理复审建议的 2 个 Minor + 3 个零风险 Nit。`.autodoc/` 下多库共用同一 backups 目录与原命名前缀，恢复时无法辨识 `.bak` 归属、且 10 份配额被两库共同消耗，令 Major-2 的迁移前回滚点在频繁重启下可能数分钟内被轮转掉、身份不明。
+- **关联**：core 新增 storage.test.ts 5 用例（backupBaseName、Sqlite premigrate 命名可辨识、Json 命名可辨识、普通 churn 后 premigrate 存活、premigrate 独立配额裁剪且不误删其它库）+ config.test.ts 2 用例（接受上界 10000、拒绝 10001/1e9）；**core 97 用例全绿**（changes.test.ts 原 5 用例与既有测试未改坏），改动文件 eslint 与 core typecheck（含 test）0 error；未引入新依赖、未改 README。
+- **风险/回滚点**：命名与配额调整仅影响新产生的备份文件名与轮转策略，不改「历史/正式数据只增不删」不变量（`pruneBackups` 只删 `.bak`）；M-2 纯注释、N-1/N-2 仅日志与容错、N-4 收紧校验上界，均零逻辑风险；回滚只需还原五个源文件。
+- **已知后续项（本次未实现）**：N-3（预期降级被记为「失败」的措辞/日志级别）、N-5（`backedUp` 先置位后备份、VACUUM 失败后写操作可能无备份继续）、N-6（Major-2 测试未打开 `.bak` 校验其 schema 为迁移前状态）、Minor-6（INCREMENTAL_COMMIT_LIMIT 截断检测）、Minor-7（提交循环事务化/唯一约束去重）、Nit-9（simple-git 实例复用）、Nit-10（backfillGuard 先登记后执行时序）。
+
+### fix: Git 回填非 ASCII 路径静默跳过 + SQLite 迁移前备份 + Git 降级可观测性
+- **内容**：
+  - **Major-1（中文文件名被静默跳过）**：[git/gitClient.ts](../packages/core/src/git/gitClient.ts) 的 `changedFiles` 给 `diff-tree` 加 `-z`（NUL 分隔、输出原始字节路径、禁用 quotePath 转义）并叠加 `-c core.quotePath=false` 双保险；`parseNameStatus` 改为按 `\0` 顺序解析（正确剥离 `R100`/`C75` 分数前缀、区分 R/C 的 oldPath→newPath 双字段），并导出以便单测；
+  - **Major-2（迁移前备份，数据安全）**：[storage/SqliteStorage.ts](../packages/core/src/storage/SqliteStorage.ts) 的 `init()` 在 `new DatabaseSync` 前先判 `existsSync(dataPath)`，升级已有库时在 `ALTER TABLE` 迁移前调 `backupOnce()`（VACUUM INTO）；因 `this.db` 已就绪，`backupOnce→conn→init` 立即返回不递归，`backedUp` 幂等保证只备份一次；全新库无需备份；
+  - **Minor-3（GitClient 静默 catch）**：`SimpleGitClient` 新增可选 logger，六个方法的 catch 在返回降级值前记录一次 `error.message`（含操作与 rootDir/commit/path），`applyGitHistory` 将已有 `onLog` 传入，区分真实故障与正常降级（仍绝不崩溃）；
+  - **Minor-4（config 校验）**：[config.ts](../packages/core/src/config.ts) 的 `git.maxBackfillCommits` 由 `type:'number'` 收紧为 `type:'integer', minimum:1`，使 0/负数/小数在 `loadConfig` 阶段即报错（带字段说明），避免 0 被误当成不限制；
+  - **Minor-8（rename 兜底可观测）**：[git/gitChanges.ts](../packages/core/src/git/gitChanges.ts) 文件级重命名走到「声明顺序兜底匹配」时记一条审计提示（N 个函数按顺序配对、指纹已变、可能误配）；并顺手更正 Minor-5 的 merge 注释（说明依赖 git log 全父链遍历覆盖被合并分支提交、evil merge 不在范围）。
+- **影响范围**：packages/core（git/gitClient、git/gitChanges、storage/SqliteStorage、config、test）。
+- **动机**：最终代码审查发现两个 Major——本项目面向中文用户，git 默认 `core.quotePath=true` 会把中文路径 C 风格转义，原裸切分解析导致含中文文件名/目录的历史被 **完全静默跳过且无日志**；同时 `init()` 的 schema 迁移未纳入写前备份，对已存在真实用户数据的旧库会在无 VACUUM 备份下改写 schema，违反「任何写操作前必须先备份」不变量与 AGENTS.md 数据安全最高优先。
+- **关联**：core 新增 gitClient.test.ts 6 用例（中文/空格/重命名/复制/混合 -z 解析）、config.test.ts 6 用例（maxBackfillCommits 校验）、storage.test.ts 补 2 用例（旧 schema 升级迁移前备份+旧数据完好+新列可用、全新库不备份）、gitChanges.test.ts 补 1 个中文文件名真实 git 集成；**core 90 用例全绿**（changes.test.ts 原 5 用例与既有测试未改坏），core/server typecheck 与改动文件 eslint 均 0 error；未引入新依赖、未改 README。
+- **风险/回滚点**：`-z` 与 `core.quotePath=false` 仅改变输出分隔与转义、不改语义，ASCII 路径行为不变；迁移前备份仅在升级已有库时触发（新增一次 VACUUM INTO，幂等）；Minor-3 日志为可选注入、缺省静默，根提交父引用缺失等良性降级会各记一条日志（可接受的可观测性成本）；回滚只需还原四个源文件。
+- **已知后续项（本次未实现）**：Minor-5 evil merge 覆盖、Minor-6 INCREMENTAL_COMMIT_LIMIT 截断检测、Minor-7 提交循环事务化/唯一约束去重、Nit-9 simple-git 实例复用、Nit-10 backfillGuard 先登记后执行的时序假设。
+
+### fix: Git 回填并发竞态——去重改按存储身份（dataPath）而非 service 实例
+- **内容**：
+  - core：新增 [git/backfillGuard.ts](../packages/core/src/git/backfillGuard.ts)（`createBackfillGuard`：模块内 `Map<string, Promise<void>>` 按稳定 key 去重，同 key 在飞行时直接复用既有 promise 不重复执行，`finally` 注销防永久卡死；`shouldAnnounce` 把一次性提示也改为按 key 去重）；
+  - server：[context.ts](../packages/server/src/context.ts) 的 `scheduleGitBackfill` 弃用 `WeakSet<service>` 两个集合，改为模块级守卫单例、key 取 `storage.dataPath`；fire-and-forget + `.catch` 兜底不变，仍不阻塞 API 首次可用；projects.ts 的重激活路径走同一入口，无第二套去重逻辑。
+- **影响范围**：packages/core（git/index/test）、packages/server（context）。
+- **动机**：代码审查发现——重激活项目会创建新 DocService 实例但指向同一存储（同一 dbPath），WeakSet 按实例去重无法拦截；旧回填在飞行时新实例又启动一次 → 两个回填并发读写同一 changes 表与 git_state，产生重复记录、watermark 互相覆盖，违反「增量二次运行不产生重复记录」设计意图。
+- **关联**：守卫抽到 core 而非留在 server，因 server 包无 test 脚本也无 vitest，且不得新增依赖；core 新增 backfillGuard.test.ts 5 用例（同 key 并发只执行一次/不同 key 独立/失败也注销/announce 去重）+ gitChanges.test.ts 补 3 个根提交断言（父引用不可得时 prev=null 全函数记 added、不抛错不误判；产品代码已正确处理无需修改）；core 75 用例全绿，core/server typecheck 与改动文件 eslint 0 报错。
+- **风险/回滚点**：同一 key 的回填完成后允许再次调度（顺序重跑由 watermark 保证幂等、processedCommits=0 无副作用）；行为对外不变，仅去重维度从对象引用改为存储路径；回滚只需还原 context.ts 并删除 backfillGuard。
+
+### feat: 基于 Git 历史的函数级变更追踪（增量回填 + 来源徽标）+ ESLint 修复
+- **内容**：
+  - shared-types：`ChangeRecord` 新增可选 `source`('git'|'snapshot') 与 `commit`(hash/author/subject)，旧记录缺省视为 snapshot（向后兼容）；`AutodocConfig` 新增可选 `git.maxBackfillCommits`；
+  - core：新增 [git/gitClient.ts](../packages/core/src/git/gitClient.ts)（`GitClient` 抽象 + 基于 simple-git 的 `SimpleGitClient`：仓库/子目录路径换算，log/diff-tree/show/rev-parse 只读封装，失败一律降级）与 [git/gitChanges.ts](../packages/core/src/git/gitChanges.ts)（`applyGitHistory`：watermark..HEAD 增量、首次回填受上限约束、逐提交取父/本版本快照复用 `diffFileSnapshots`、blob 内容寻址缓存去重、文件级重命名批量 `migrateTarget`、任何异常整体降级不崩溃）；
+  - core/storage：SqliteStorage `changes` 表幂等新增 `source`/`commit_json` 列 + 新增 `git_state` 表存 watermark，JsonStorage 等价扩展，`StorageAdapter` 增 `getGitWatermark`/`setGitWatermark`；顺带修复 JsonStorage 模块级 `EMPTY` 可变引用被跨实例污染的隐患（改 `emptyData()` 工厂）；
+  - server：[context.ts](../packages/server/src/context.ts) / [projects.ts](../packages/server/src/projects.ts) 在生成完成后以 fire-and-forget 后台任务调用 `applyGitHistory`（WeakSet 去重、Git 不可用静默降级）；generate.ts 的指纹快照路径完全保留，继续捕捉工作区未提交改动；
+  - web：[FunctionCard.vue](../packages/web/src/components/FunctionCard.vue) 变更历史每条显示来源徽标（Git/快照），Git 来源额外显示短 hash·作者·subject（截断 + 悬浮全文），「最近三次 + 归档计数」逻辑不变；
+  - fix：[server/src/ai.ts](../packages/server/src/ai.ts) 正则字符类 `/[\[{]/` → `/[[{]/`（消除 ESLint no-useless-escape，语义等价、最小改动）。
+- **影响范围**：packages/shared-types、packages/core（git/storage/config/index/test）、packages/server（context/projects/ai）、packages/web（FunctionCard）。
+- **动机**：补全 README 5.7 优先需求——原变更追踪仅靠工作区指纹快照，须重新生成才逐步积累、无法回溯历史提交；接入 Git 历史后可回填过往提交的函数级增/删/改/重命名，并在 UI 区分「Git / 快照」来源。
+- **关联**：core 67 个 Vitest 用例全绿（changes.test.ts 原 5 用例保留不动；新增 gitChanges.test.ts 11 用例 = FakeGitClient 算法层 + 真实 git 集成层，git 不可用自动 skip；storage/generate 补迁移幂等、旧数据回落 snapshot、watermark 读写、非 git 目录降级）；core/server/web typecheck 与 `eslint ai.ts` 均 0 报错；除 simple-git 外未引入新依赖。
+- **风险/回滚点**：新列/新表以幂等 `ALTER` + `IF NOT EXISTS` 升级，对既有 autodoc.db / prism-samples-wpf.db 安全；变更记录只追加不删除，重命名走 `migrateTarget` 迁移；Git 回填为后台异步、失败降级，不阻塞首次生成与 API 可用性；未接入 Git 的项目行为与之前完全一致。
+
 ## [未发布] 2026-09-17
 
 ### feat: 核心函数改由 AI 按功能重要性判定（替代纯调用次数）

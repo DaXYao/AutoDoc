@@ -27,7 +27,8 @@ export const DEFAULT_EXPAND: Required<DefaultExpandConfig> = {
   callGraph: false,
   codeBlocks: false,
   changes: false,
-  annotations: true
+  annotations: true,
+  flowAutoExpandDepth: 2
 }
 
 const configSchema = {
@@ -77,9 +78,16 @@ const configSchema = {
         defaultExpand: {
           type: 'object',
           additionalProperties: false,
-          properties: Object.fromEntries(
-            Object.keys(DEFAULT_EXPAND).map((key) => [key, { type: 'boolean' }])
-          )
+          properties: {
+            // 除 flowAutoExpandDepth（整数）外均为布尔开关
+            ...Object.fromEntries(
+              Object.keys(DEFAULT_EXPAND)
+                .filter((key) => key !== 'flowAutoExpandDepth')
+                .map((key) => [key, { type: 'boolean' }])
+            ),
+            // 脉络树自动展开深度：非负整数、[0, 10]（上界防呆，避免一次性展开超大树）
+            flowAutoExpandDepth: { type: 'integer', minimum: 0, maximum: 10 }
+          }
         }
       }
     },
@@ -105,6 +113,22 @@ const configSchema = {
       properties: {
         // 正整数、[1, 10000]：下界避免 0/负数/小数被误当成「不限制」；上界避免 1e9 等超大值使首次回填退化为全量历史，均在 loadConfig 阶段即报错
         maxBackfillCommits: { type: 'integer', minimum: 1, maximum: 10000 }
+      }
+    },
+    insight: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        flow: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            // 正整数：下界 1 避免 0/负数/小数使脉络树退化；上界防呆，避免超大值耗尽 AI/token
+            maxDepth: { type: 'integer', minimum: 1, maximum: 20 },
+            maxChildrenPerNode: { type: 'integer', minimum: 1, maximum: 50 },
+            maxNodesTotal: { type: 'integer', minimum: 1, maximum: 2000 }
+          }
+        }
       }
     }
   }
