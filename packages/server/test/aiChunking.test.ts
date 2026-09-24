@@ -1,6 +1,7 @@
 import { describe, beforeEach, expect, it, vi } from 'vitest'
 import type { FileDoc, FunctionDoc } from '@autodoc/shared-types'
 import { buildGraph, type ProjectGraph } from '../src/graph.js'
+import type { ChatReply } from '../src/ai.js'
 
 // 仅 mock deepseekChat（保留真实 extractJson，验证「可被稳定解析」这一目标本身）
 vi.mock('../src/ai.js', async (importActual) => {
@@ -89,6 +90,11 @@ function parseUser(content: string): { lineCount: number; firstIdx: number } {
   return { lineCount: lineMatches.length, firstIdx: first ? Number(first[1]) : -1 }
 }
 
+/** 伪 chat 回复（默认未截断）；truncated=true 模拟 finish_reason=length */
+function reply(content: string, truncated = false): ChatReply {
+  return { content, finishReason: truncated ? 'length' : 'stop', truncated }
+}
+
 /** 记录每次调用并按 responder 生成回复 */
 function mockChat(responder: (info: CallInfo) => string): void {
   vi.mocked(deepseekChat).mockImplementation(async (messages, opts) => {
@@ -96,7 +102,7 @@ function mockChat(responder: (info: CallInfo) => string): void {
     const { lineCount, firstIdx } = parseUser(user)
     const info: CallInfo = { maxTokens: opts?.maxTokens, lineCount, firstIdx }
     calls.push(info)
-    return responder(info)
+    return reply(responder(info))
   })
 }
 
@@ -192,7 +198,7 @@ describe('aiCoreJudgment 分批', () => {
       const user = messages[messages.length - 1].content
       const first = Number((user.match(/(\d+)\|f\d{4}\|/) ?? [])[1])
       calls.push({ lineCount: 1, firstIdx: first, maxTokens: undefined })
-      return attempt === 1 ? 'oops malformed no json' : JSON.stringify({ core: [{ idx: first, reason: 'r' }] })
+      return reply(attempt === 1 ? 'oops malformed no json' : JSON.stringify({ core: [{ idx: first, reason: 'r' }] }))
     })
     const res = await aiCoreJudgment(graph)
     expect(attempt).toBe(2)
@@ -284,7 +290,7 @@ describe('aiCategories 分批', () => {
       attempt++
       const user = messages[messages.length - 1].content
       const first = Number((user.match(/(\d+)\|f\d{4}\|/) ?? [])[1])
-      return attempt === 1 ? 'oops' : JSON.stringify({ [first]: { category: 'business', reason: 'r' } })
+      return reply(attempt === 1 ? 'oops' : JSON.stringify({ [first]: { category: 'business', reason: 'r' } }))
     })
     const res = await aiCategories(graph)
     expect(attempt).toBe(2)

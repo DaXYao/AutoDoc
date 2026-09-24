@@ -211,13 +211,16 @@ export interface GitConfig {
   maxBackfillCommits?: number
 }
 
-/** 递归脉络架构树的规模上限（缺省 maxDepth=5 / maxChildrenPerNode=8 / maxNodesTotal=80） */
+/**
+ * 递归脉络架构树的规模上限（缺省 maxDepth=5 / maxChildrenPerNode=8 / maxNodesTotal=120）。
+ * maxNodesTotal 会被后端按主线根数拆成每根配额（避免单根吃满全局而使其它根成为空壳）。
+ */
 export interface FlowConfig {
   /** 脉络树最大递归深度（根为 0） */
   maxDepth?: number
   /** 单个节点最大子节点数，超限分支合并为「其它」叶子 */
   maxChildrenPerNode?: number
-  /** 整棵脉络树最大节点总数 */
+  /** 整棵脉络树最大节点总数（按根均分为配额） */
   maxNodesTotal?: number
 }
 
@@ -389,8 +392,11 @@ export interface FlowNode {
   children: FlowNode[]
 }
 
-/** 各 AI 段的执行状态（可观测性：区分成功/失败/空返回） */
-export type AiPassStatus = 'ok' | 'failed' | 'skipped'
+/**
+ * 各 AI 段的执行状态（可观测性：区分成功/部分成功/失败/空返回）。
+ * partial：主干结果可用但存在明显降级（如脉络树根为 AI 而部分子树回退静态兜底）。
+ */
+export type AiPassStatus = 'ok' | 'partial' | 'failed' | 'skipped'
 
 export type AiPassKey =
   | 'partition'

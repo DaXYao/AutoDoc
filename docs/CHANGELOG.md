@@ -12,6 +12,85 @@
 
 ## [未发布] 2026-09-24
 
+### fix(server): 脉络树最后一轮精修——basis 身份 + 原子替换（M-R1/A）+ 反重复下钻（B）+ 空壳根治（m-R1/R2）+ 降级可观测（m-R3）+ Nit
+- **背景**：任务 #37。Mark 复审 M-R1（Major，整树快照无划分身份、loadInsight 用旧划分模块配新树 → mod:i 跳错）与 task35 实测问题 A（`clearByPrefix('flows:')` 在 pass6 开头清整树 → 重生成 5-20min 窗口内 GET 返回空）、问题 B（102 节点仅 78 不同 label，flow:1 用 24 节点只覆盖 3 函数，全树仅 36% 函数覆盖）。合并 m-R1/m-R2/m-R3/n-R1/n-R2/n-R5 一并修复。
+- **内容**：
+  - **M-R1 + A（basis 身份 + 原子替换）**（[insight.ts](../packages/server/src/insight.ts)）：`FlowTreeCache` 新增 `basis?: string`（存 `flowsBasis(graph)`）、`rootBackfills?`、`salvagedCount?`；loadInsight 与 pass6 命中分支均在 `applyPartition` 之后重算当前 `flowsBasis(graph)` 与快照 basis 比对——不符则忽略（不展示矛盾树）；pass6 生成路径不再 `clearByPrefix(fp,'flows:')` 一把清，改为只清 `flows:roots:` + `flows:node:` 两个子缓存，**整树快照全程保留可读**，新树 `applyFlows` 成功后才 `cache.set(fp,'flows:tree',…)` 原子覆盖。划分未变 → 旧 basis 仍匹配 → 重生成期间前端持续展示旧树；划分变了(forcePartition) → basis 不匹配 → 前端 flows 为空数组 → 既有 `v-if` 降级（不崩溃）。
+  - **问题 B（反重复下钻，提升覆盖率）**（[flow.ts](../packages/server/src/flow.ts)）：(b) 主手段——子节点构建循环加 `(label.toLowerCase() + '|' + sorted fnIds)` 组合键去重（`seenNodeKeys`），同根子树内跨兄弟跨层生效，被去重节点的函数推入 overflow 由「其它」叶子兜住；(a) 辅助——同 label 且函数集是已下钻兄弟的子集时不再对其下钻（转 leaf），避免冗余递归。每根独立 `rootSeenKeys`，不跨根去重（同函数在不同根的子树中合法复用）。去重发生在 keepLimit/budget 判定之前 ⇒ 总数仍 ≤ maxNodesTotal，order 在后续 m-R2 清扫后统一重编。
+  - **m-R1（根空壳根治）**（flow.ts）：`fallbackMod = graph.modules[roots.length % graph.modules.length]?.id`（取模兜底）；`ensureRootNotEmpty` 当 `topCoreFunctions` 为空时再降级取**全图 coreScore Top-N**，确保「任何根非空壳」全覆盖。
+  - **m-R2（中层空壳根治）**（flow.ts）：递归返回后倒序扫描 children，`children=[] && relatedFunctionIds=[]` 的空壳先尝试 `topCoreFunctions` 回填转 leaf（不新增节点），无法回填则 splice 并归还预算；最后重编 order/id。全树不再有 `children=[] && relatedFunctionIds=[]` 的节点。
+  - **m-R3（降级可观测）**（insight.ts）：`FlowGenStats` 新增 `salvagedCount`，aiFlowRoots/aiFlowChildren 的 salvaged 分支累加；`flowsStatusOf` 签名扩展 `rootBackfills?/salvagedCount?`，`ratio===0 && !hasDegrade` 才报 ok，否则至少 partial；三条读路径（loadInsight / pass6 命中 / pass6 生成）均传入降级计数。
+  - **n-R1**（[ai.ts](../packages/server/src/ai.ts)）：`salvageJsonList(raw, keys?)` 新增白名单键参数，先用正则 `"${k}"\s*:\s*\[` 定位目标列表起始 `[` 再扫描，避免把 `examples` 等前置数组误当 roots/children。
+  - **n-R2**（flow.ts）：`if (!env.salvaged) cacheSet(deps, cacheKey, resolved)`——抢救出的不完整信封不写 basis 缓存，给下次重生成拿完整输出的机会。
+  - **n-R5**（flow.ts）：reason 文案「因函数索引无效被丢弃」→「因无有效函数被丢弃（模型未回填 X 个、索引越界 Y 个）」消除自相矛盾；`perRootQuota` 删除恒传 0 的死参数 `index`。
+  - **测试**（[flow.test.ts](../packages/server/test/flow.test.ts) 47→**60** 用例，+13）：M-R1 basis 不符忽略 / A 生成期间旧树可读 / force 正确触发重算；问题 B 去重 + 不误伤合理多路径；m-R1 全无效 moduleIds 无空壳根；m-R2 紧配额/浅深度无中层空壳；m-R3 回填/抢救 → partial；n-R1 白名单键定位；n-R2 抢救不入缓存。
+- **影响范围**：packages/server（flow.ts / insight.ts / ai.ts + test/flow.test.ts）。未改 shared-types/web/README/classify.ts/role.ts；未引入新依赖。**未提交、未 git add**（Leader 统一提交）；**本任务未做实时重生成**（task39 在验证后进行）。
+- **实证**：`pnpm --filter @autodoc/server run test` **72 用例全绿**（flow 60 + aiChunking 12）、`@autodoc/core` **97 全绿**；core/server/shared-types **typecheck 0 error**；4 个改动文件定向 **eslint 0 error**。
+- **风险/回滚点**：
+  - **问题 B 去重可能误伤「同 label 同函数但语义不同的合理多路径」**：当前缓解——去重键含 label 全文（大小写无关）+ 完整函数集，且不同根之间不共享去重集；若出现误伤，可将 `seenNodeKeys` 改为仅限同父直接兄弟。
+  - **问题 B(a) 收窄**：从「候选集与父相同则不下钻」收窄为「同 label 且函数子集才不下钻」，比任务原文更保守，可能漏掉部分冗余下钻（但避免误伤多级树）。
+  - **原子替换与并发读**：AiCache set 即 flush 到磁盘；重生成期间并发 GET 读到的是旧快照（一致但陈旧）；若两个 force 请求并发则后写覆盖前写（无锁），概率极低（手动触发）。
+  - **旧快照无 basis 字段**：按「匹配」处理（向后兼容），首轮升级后仍可能短暂展示与新划分不符的旧树，直到下次重生成写入带 basis 的快照。
+  - 回滚只需还原上述 4 个文件并删除新增用例。
+
+---
+
+### fix(server): 脉络树收尾修复——根级预算饥饿（空壳根）+ 截断分层抢救 + forcePartition 陈旧整树短路 + aiStatus 判定统一 + kind-aware 丢弃
+- **背景**：任务 #28 对 reply-boost 强制重生成（17min）后核验发现两类实测缺陷，叠加代码复审的 Major-1/Minor-1/Minor-2。实测数据：5 根中 `flow:0` 独占 **76/80** 节点预算，`flow:1~4` 从未被处理 ⇒ `children=[]` 且 `relatedFunctionIds=[]`，前端 4/5 主线渲染成「只有标题、展开无内容、无函数可平铺」的空壳；同一次重生成中 **12 次 `finish_reason=length`**，其中 6 次耗尽重试后降级 heuristic，全树 heuristic 占比 **24/80=30%** 全部来自截断（`FLOW_MAX_TOKENS=8000` 对深层节点不够）。
+- **根因**：
+  - **空壳根**：`generateFlows` 用**全局共享** `FlowBudget` 逐根递归，首个根把 `caps.maxNodesTotal` 吃满后 `if (budget.used>=caps.maxNodesTotal) break` 直接跳出循环 ⇒ 后续根既不下钻也不回填，且无「任何根都非空壳」的兜底不变量。
+  - **截断降级**：上条 m1 策略把「截断即不完整」一律不写缓存 + 重试 + 降级；但截断响应的**前缀元素往往结构完整且语义正确**，整棵降级为 heuristic 反而丢掉了可用的 AI 子节点（30% heuristic 全由此而来）。
+  - **Major-1**：`flows:tree` 键只含 `graph.fingerprint`（`buildGraph` 时定死，`applyPartition` 不改），未 basis 化；「提交划分建议」走 `forcePartition:true`（不带 `force`），pass6 命中**陈旧整树**短路 ⇒ 树按旧划分归组、`mod:i` 深链跳错。
+  - **Minor-1**：refresh 命中分支 `status ?? (aiOk?'ok':'failed')` 与 `loadInsight` 的 `?? flowsStatusOf(tree,{quiet:true})` 判定不一致；旧快照（无 `status`）会在「重新生成 vs 刷新页面」之间翻转，并把错误的 `ok` 固化进缓存。
+  - **Minor-2**：`resolveChildrenEnvelope` 对「`relatedFunctionIds` 全无效」一律丢弃子节点，误伤**纯阶段** branch/mainline（其函数集允许为空、承载阶段语义），进而触发整棵子树 heuristic 降级。
+- **内容**：
+  - **①根级配额 + 非空壳不变量**（[flow.ts](../packages/server/src/flow.ts)）：新增导出 `perRootQuota(maxNodesTotal, rootCount, used, index)`（余数分给靠前的根，**可返回 0**）；`generateFlows` 改为逐根计算剩余配额、构造**局部 `caps.maxNodesTotal=quota` + 局部 `budget`**，递归结束后把局部消耗累加回全局，杜绝单根吃满；`quota<=0` 时不下钻（不浪费 AI 调用）直接走回填。新增 `topCoreFunctions`（模块 `coreFunctionIds||functionIds` ∪ 根已带函数，按 `coreScore` 降序取前 `ROOT_BACKFILL_FUNCTIONS=5`）与 `ensureRootNotEmpty`：根仍为空壳时回填到 `relatedFunctionIds`（**不新增节点**，故「总数 ≤ maxNodesTotal」与「任何根都非空壳」两个不变量可同时成立）、重算 `contentHash`、reason 追加「配额/生成受限，已静态回填 N 个核心函数」、计入新增的 `FlowGenStats.rootBackfills`。
+  - **②`maxNodesTotal` 默认 80→120**（`DEFAULT_FLOW_CAPS`；[shared-types](../packages/shared-types/src/index.ts) `FlowConfig` 注释同步说明「按根均分为配额」）：仍经 `config.insight.flow.maxNodesTotal` 可配，core schema 允许 1~2000 无需改动。取 120 的理由：5 根场景下每根配额 24（≈3 层 × 8 子节点的合理骨架），足以消除饥饿；较 80 增加约 **50%** 的 AI 调用与重生成耗时（预计 17min→25min 量级），故未再上抬。
+  - **③截断分层缓解**（[ai.ts](../packages/server/src/ai.ts) + flow.ts）：`FLOW_MAX_TOKENS` 8000→**16000** 并新增导出 `flowMaxTokens(itemCount)`（每条目 +150、封顶 **24000**；roots 按模块数、children 按候选函数数动态取值）；`MAX_CHILDREN_CANDIDATES` 30→**24** + requestChildren prompt 新增【精简输出】段（`label<=12字`/`summary<=30字`/`reason<=20字`、`relatedFunctionIds<=6`、`relatedChainIds<=3`、子节点数不超 `caps.maxChildrenPerNode`，并明示「输出过长会被 max_tokens 截断而丢失尾部子节点」）从源头压缩长度；ai.ts 导出 `repairJsonSlice`、抽出 `stripJsonFence`，新增 `salvageJsonList`（引号/转义/括号深度感知扫描，**仅收能独立 `JSON.parse` 成功的完整对象元素**，半截尾元素静默丢弃）；flow.ts 新增 `salvageRoots`/`salvageChildren`（经 `normRoot`/`normChild` 归一并要求 label||summary 非空），三个信封类型加 `salvaged?: boolean`；`requestRoots`/`requestChildren` 循环重构为「**未截断→常规解析；截断→先抢救，抢救到 ≥1 个完整元素即返回并标 `salvaged`，抢救为空才计入 lastErr 走重试→兜底**」；`aiFlowRoots`/`aiFlowChildren` 在 `salvaged` 时给节点 reason 追加「AI 输出被截断，…由抢救出的结构完整片段构成」（缓存命中路径同样标注）。「真正畸形/无法解析」的重试（`FLOW_PARSE_RETRIES=2`）与 heuristic 降级完整保留。
+  - **④Major-1**（[insight.ts](../packages/server/src/insight.ts) pass6）：`const invalidateFlows = opts.force===true || opts.forcePartition===true`，为真时不读 `flows:tree` 并 `cache.clearByPrefix(fp,'flows:')`（一次清掉 tree/roots/node 全部前缀条目）+ warn 清除条数。**刻意不改 `flows:tree` 键名**（不 basis 化），避免使 task35 即将重生成的整树额外失效；划分变化的正确性由「forcePartition 必清 + `flows:roots`/`flows:node` 本身已带 basis」共同保证。
+  - **⑤Minor-1**（insight.ts）：refresh 命中分支与 `loadInsight` 双双统一为 `aiOk ? flowsStatusOf(tree,{quiet:true}) : 'failed'`，不再读取快照里的 `status`；`FlowTreeCache.status` 注释改为「仅写入时快照，供排查；回读一律重算」。
+  - **⑥Minor-2**（flow.ts `resolveChildrenEnvelope`）：返回值改为 `{children, droppedNoFns, droppedInvalid}`；`fns.length===0` 时按 kind 分流——**非 leaf 且 label||summary 有效 ⇒ 保留为纯阶段节点**（`relatedFunctionIds: []`，继承父 `relatedModuleIds`，可继续下钻），**leaf ⇒ 丢弃**；丢弃原因分桶（`rawIdx.length===0` 计「模型未回填」，否则计「索引越界」），父节点 reason 明示两类计数。配套在 `aiFlowChildren` 子节点循环新增 `skippedShells` 防御：非 leaf 但父节点无 `relatedModuleIds`（候选必为空 ⇒ 会变成新空壳）时跳过并 warn + reason 标注。
+  - **测试**（[flow.test.ts](../packages/server/test/flow.test.ts) 47→**59** 用例）：**根级配额** describe 4 例（4 根 + `maxNodesTotal=6` 紧预算断言每根 `children.length>0 || relatedFunctionIds.length>0` 且总数 ≤ 上限；3 根 + 12 断言配额公平——最大子树 ≤ `perRootQuota(12,3,3,0)` 且各根规模极差 ≤1，不再单根独占；4 根 + 4 断言配额全 0 时**只发生 1 次 AI 调用**、总节点数仍为 4、每根 children 为空但 `relatedFunctionIds>0`、reason 含「回填」、`stats.rootBackfills=4`；`perRootQuota` 纯函数 6 个断言 + 逐根累加 ≤13）；**m1 分层** 3 例（数组中途断掉的 children 响应抢救出前 2 个完整子节点、`everySource==='ai'`、不含半截的 `c2`、`hasEmptyLeaf===false`、reason 含「截断」「抢救」、且**未额外重试**；截断且无任何完整元素 ⇒ 重试后回退 heuristic、`subtreeFailures=1`；roots 层对称抢救）；**Major-1** 集成例（划分变化 + `forcePartition` ⇒ flows 调用数增加且根 label 变为「新主线」，对照第三次无 force ⇒ 调用数不变、仍命中整树缓存）；**Minor-1** 集成例（手工 `delete snap.status` 造旧快照 ⇒ `refreshInsightAI({})` 与 `loadInsight` 的 `aiStatus.flows` 相同且非 `ok`）；**Minor-2** 2 例（纯阶段 branch 保留、`source==='ai'`、`relatedFunctionIds=[]`、继承 `relatedModuleIds`、可继续下钻；leaf 空/越界被丢弃且 reason 含「无效」「模型未回填 1 个」「索引越界 1 个」）；**`salvageJsonList`/`flowMaxTokens`** 2 例。
+- **影响范围**：packages/server（ai.ts / flow.ts / insight.ts + test/flow.test.ts）、packages/shared-types（仅 `FlowConfig` 注释，已重新 build dist）。未改 aiCache.ts/classify.ts/role.ts/README；未引入新依赖；未改路由与请求/响应结构（`FlowNode.reason` 文案与 `FlowGenStats.rootBackfills` 为增量字段）。**未提交、未 git add**（Leader 统一提交）；**本任务未做实时重生成**（避免又一次 17min+，重生成留待 task35），全部以单测证明不变量。
+- **实证**：`pnpm --filter @autodoc/server run test` **59 用例全绿**（flow 47 + aiChunking 12；修复前 47）、`pnpm --filter @autodoc/core run test` **97 全绿**（无回归）；shared-types / core / server / web **typecheck 全 0 error**；5 个改动文件定向 eslint **0 error**；`git status --porcelain` 仅 ` M` 条目（无 staged、无临时文件残留）；dev 服务未中断（`GET /api/insight` 返回 409「无活动项目」，未触发任何 AI 调用）。
+- **风险/回滚点**：
+  - `maxNodesTotal=120` + `FLOW_MAX_TOKENS` 16000~24000 会**增加 AI 调用次数与单次输出长度** ⇒ task35 重生成耗时预计由 17min 升至 25min 量级；如需压缩可经 `config.insight.flow.maxNodesTotal` 下调（配额随之收紧，回填兜底仍保证无空壳）。
+  - **存疑：模型服务端可能 clamp `max_tokens`**（默认 model 为 `deepseek-flash`，其服务端硬上限未确证）；若请求值被下调，则由②精简输出与③截断抢救兜住，表现为 `salvaged` 节点占比上升而非整棵降级。
+  - **存疑：配额与深度/广度相互作用**——每根配额固定后，深根（maxDepth=5）可能在配额耗尽时提前停止下钻，浅根则可能剩余配额；当前按根顺序消耗（余数给靠前的根），未做跨根配额回收，故靠后的根在极端场景下仍可能只拿到回填函数。
+  - **存疑：抢救边界**——`salvageJsonList` 只接受能独立 `JSON.parse` 的对象元素，因此「结构完整但语义错误」（如 `relatedFunctionIds` 指向无关函数）的内容仍会被当成功；语义下限由 Minor-2 的 kind-aware 校验（leaf 必须有有效函数）与既有 Major-C 约束兜住，不做额外语义推断。
+  - `perRootQuota` 允许返回 0 是刻意取舍：早期实现用 `Math.max(1,…)` 下限，在极紧预算下会突破硬上限（单测 `expected 4 ≤ 3` 失败），改为 0 + 免费回填后两个不变量并存。
+  - Major-1 使 `forcePartition` 触发 `flows:` 全前缀失效 ⇒ 「提交划分建议」后首次读取会重算整树（耗时增加），这是修复陈旧短路的必要代价；普通刷新（不带 force/forcePartition）仍秒回缓存整树。
+  - 回滚只需还原上述文件并删除新增用例；`maxNodesTotal`/`FLOW_MAX_TOKENS` 均为文件顶部常量，可单独回退。
+
+---
+
+### fix(server): 递归脉络树后端复审修复——3 个 Major（回退清空子树 / 子缓存张冠李戴 / 空结果被当成功）+ 5 个 Minor
+- **背景**：代码复审在脉络树后端发现三类会造成「树看起来生成成功、实际是空壳或指向错误函数」的缺陷。reply-boost 的现存缓存树即复现：80 节点（正好等于 maxNodesTotal）中 **3/5 条主线根 `children=[]` 且 `relatedFunctionIds=[]`**（只有标题没叶子的空壳），却仍报 `aiStatus.flows=ok`。
+- **根因**：
+  - **Major-A**：`applyFlows` 把 `budget.used` 初始化为 `countNodes(roots)`，而 `generateFlows` 本就「填满上限即停」⇒ 大树常态停在 80；此时 `reconcileOrder` 一旦判定顺序矛盾就调 `heuristicChildren`，而后者与 `pushOverflowLeaf` 在预算耗尽时直接返回 `[]` ⇒ **把有内容的子树清空**，reason 还追加「已回退静态兜底」；AI 全挂走 `heuristicFlows` 兜底时同样填满 80，最后防线也被清成空壳。
+  - **Major-B**：flows 子缓存键只含静态 `graph.fingerprint`，但 `flows:node:*` 存的是**候选数组下标信封**，下标基准由 pass1 划分 + pass2 核心判定派生（coreScore 降序）；且 `opts.force` 只绕过 `flows:tree`，pass1~5 全部重算而两个子缓存照旧命中 ⇒ 旧下标映射到**另一个函数**（叶子张冠李戴仍显示为 AI）、`mod:i` 位置化深链跳错、`force` 无法修复坏树。
+  - **Major-C**：`requestChildren` 只要求 `parsed.ok`，`{"children":[]}` 被当成功并**永久缓存**（与 roots 层要求 length>0 不对称）；`relatedFunctionIds` 下标全无效时仍产出**无任何函数的空叶子**（前端渲染空白行且不报错）；`aiCategories`/`aiCoreJudgment` 中 `parsed.ok` 即 `done=true`，批内 items 为空也静默贡献 0 核心、不计 failedBatches。
+- **内容**：
+  - **Major-A 非破坏性回退**（[flow.ts](../packages/server/src/flow.ts) `reconcileOrder`）：(a) 子节点全部可定位时**优先按 path index 稳定重排**（不丢弃 AI 内容）；(b) 需回退时预算按「当前树规模 − 被替换子树规模」构造局部 `FlowBudget`，使回退是**等量替换而非净增**；(c) 兜底结果为空则**保留原 AI 子树**，仅在 reason 追加「顺序可疑但静态兜底为空，保留原子树未回退」。任何节点都不会因回退而 `children` 变空。
+  - **Major-B 缓存根治**（flow.ts + [aiCache.ts](../packages/server/src/aiCache.ts) + [insight.ts](../packages/server/src/insight.ts)）：`flows:node:*` 改存 **`ResolvedChildrenEnvelope`（已解析的真实函数 id）**，彻底摆脱下标基准；键纳入 basis 摘要——roots 用 `flows:roots:${flowsBasis(graph)}`（模块划分 + coreFunctionIds），node 用 `flows:node:${id}:${nodeBasis(parent,candidateIds)}`，划分/核心判定一变即自然失效；新增 `AiCache.clearByPrefix(fingerprint, keyPrefix)`，`opts.force` 时一并清除 `flows:roots`/`flows:node:` 两个子缓存并打印清除条数。
+  - **Major-C**：C1 `requestChildren` 要求 `children.length>0`，空视为解析失败走重试→兜底且**不写缓存**（区分「返回空 children」与「无法解析」两种 lastErr）；C2 新增 `resolveChildrenEnvelope`，下标越界/函数不存在的子节点**直接丢弃**，全无效则抛错（计入 `stats.emptyResponses`）不落空叶子，部分丢弃时 warn + reason 标注「N 个子节点因函数索引无效被丢弃」；C3 `aiCategories` 统计 `accepted`、`aiCoreJudgment` 判 `parsed.items.length===0`，候选明显非空却零有效条目时**视为该批失败并重试**，耗尽计入 `failedBatches`。
+  - **m1 截断可观测**（[ai.ts](../packages/server/src/ai.ts)）：`deepseekChat` 返回 `ChatReply{content,finishReason,truncated}`（解析 `choices[0].finish_reason`），`truncated` 时各 pass 一律按「不完整」处理——不写缓存、触发重试、耗尽降级；新增 `asChatReply` 归一使 `ChatFn` 兼容旧的纯字符串注入（测试零改造）；`repairJsonSlice` 三档策略命中时 `console.warn` 原文长度/策略编号/丢弃尾部字符数。
+  - **m5 顺序判定收敛**：`isInverted`（严格递减即判倒序）替换为 `pathPositions` + `inversionRatio` + `hasOrderConflict`：仅在 **≥3 个可定位子节点**时判定，用**逆序对比例 ≥0.75**（等价 Kendall tau ≤ −0.5）替代严格递减，命中后优先重排（与 Major-A 协同）。
+  - **m6 pass6 兜底**：`applyFlows` + `cache.set` 包 try/catch，失败时 `status.flows='failed'` 并 warn「保留前 5 段成果」，不再让整段 `refreshInsightAI` 穿透丢失 partition/coreJudgment 等已成功的结果。
+  - **m7 partial 语义**：新增 `flowSourceStats` + `FlowGenStats{subtreeFailures,emptyResponses}`，递归 catch 不再静默吞（计数 + warn）；`flowsStatusOf` 按 heuristic 占比给 `ok`/`partial`/`failed`（阈值 0.6）；`loadInsight` 回读时用当前快照重算值**覆盖陈旧的 `aiStatus.flows`**，避免退化树仍显示 ok。
+  - **类型/前端联动**：[shared-types](../packages/shared-types/src/index.ts) `AiPassStatus` 扩展 `'partial'`（已 build dist，否则 server typecheck 报 TS2322）；[web/src/utils/format.ts](../packages/web/src/utils/format.ts) `AI_STATUS_META` 补 `partial: { label: '部分成功', type: 'info' }`（唯一穷举 `Record<AiPassStatus,…>` 处，避免 web typecheck 破）。
+  - **n5**：flow.ts 两处日志错别字「兖底」→「兜底」。
+  - **测试**（[flow.test.ts](../packages/server/test/flow.test.ts) 20→35 用例、[aiChunking.test.ts](../packages/server/test/aiChunking.test.ts) mock 适配）：Major-A 补强——`countNodes(roots)===maxNodesTotal` 且含不可定位子节点的冲突用例断言回退后 `children.length>0` 且总数不超上限、`heuristicFlows` 树经 `applyFlows` 后「曾有子节点则仍非空」+ 叶子数 >0、全可定位时按 path 顺序重排且 `everySource==='ai'`、仅 2 个可定位不判矛盾；Major-B——basis 键断言、改 `coreScore` 致候选顺序变化后必须重算且新叶子指向正确函数（张冠李戴回归）、`force` 时 flows 相关调用数增加；Major-C——空 children 触发 3 次重试并走 heuristic 兜底且不写缓存、越界/全无效索引不产出空叶子（`hasEmptyLeaf===false`）、reason 含「无效」、m1 截断按不完整处理；m7——子树抛错时 `aiStatus.flows` 不为 ok、`flowsStatusOf` 五例（含 quiet）。
+- **影响范围**：packages/server（ai.ts / aiCache.ts / flow.ts / insight.ts + 两个测试文件）、packages/shared-types（`AiPassStatus`）、packages/web（format.ts 单行映射）。未改 README/classify.ts/role.ts；未引入新依赖；未改路由与请求/响应结构（仅 `aiStatus.flows` 可能取新值 `partial`）。**未提交**（前端代理并行改 web，提交由 Leader 统一协调）。
+- **实证**：`pnpm --filter @autodoc/server run test` **47 用例全绿**（flow 35 + aiChunking 12，修复前 32）、`@autodoc/core` **97 全绿**（无回归）；shared-types/core/server typecheck 0 error、web typecheck 0 error；8 个改动文件定向 eslint 0 error。reply-boost sanity（`GET /api/insight`，不触发网络/不重生成）：**200，结构完好**，5 根 80 节点 59 叶子、maxDepth 6、ai 58 / heuristic 22，`aiStatus.flows` 由陈旧的 `ok` 修正为 **`partial`**（27.5% 兜底占比）；同一份缓存树中 3 个 `children=[]` 的空壳根与 1 个空叶子正是 Major-A/C2 的历史产物，需一次 `force` 重生成才会被新逻辑修复（本次按要求未触发 15-25min 的实时重生成，改以单测覆盖）。
+- **风险/回滚点**：
+  - 缓存键变更（`flows:roots:*` / `flows:node:*` 带 basis）会使**旧子缓存自然失效**，下次生成按新键重算一次（`flows:tree` 键未变，故非 force 的读取仍秒回旧树）；旧键条目残留在 ai-cache.json 中不影响正确性，可手动删除文件清理。
+  - m1 按规范把截断响应视为「不完整」⇒ **不再用 `repairJsonSlice` 抢救被 max_tokens 截断的响应**（仍处理尾逗号/杂文等非截断畸形）；FLOW_MAX_TOKENS=8000 下截断已罕见，代价可接受。
+  - Major-C3 使「该批确实无核心/无有效分类」的合法空返回也会被重试并计入 failedBatches（规范明确要求「不静默 ok」），表现为 AI 调用次数略增。
+  - 回滚只需还原上述文件并删除新增用例；`AiPassStatus` 去掉 `'partial'` 需同步还原 web/format.ts 并重新 build shared-types。
+
+---
+
 ### fix(server): aiFlowChildren/aiFlowRoots 健壮性修复——JSON 截断修复 + 容错解析 + 重试 + 多层 prompt
 - **背景**：上条 fix 解决了 coreJudgment/categories 的解析失败问题，但 flows 生成（aiFlowRoots/aiFlowChildren）仍用同样脆弱的 `extractJson`，导致脉络树间歇降级——前端实测 reply-boost 的直接子节点几乎全是 leaf/heuristic（单函数），缺 mainline/branch 中间层，树被压扁成“根→叶子”。
 - **根因**：模型输出截断（响应命中 maxTokens 上限致 JSON 不完整）+ 偶发语法畸形（尾逗号、未闭合括号），旧 `extractJson` 仅做 `JSON.parse` 失败即返回 null，无修复能力；加上 FLOW_MAX_TOKENS=4000 偏小、无重试、prompt 未要求多层，导致 children 高频失败降级 heuristicChildren（只产 leaf）。
@@ -42,6 +121,39 @@
 - **实证**：`pnpm --filter @autodoc/server run test` **26 用例全绿**（aiChunking 12 + flow 14）、`@autodoc/core` **97 全绿**（无回归）；shared-types/core/server typecheck 均 0 error；改动文件定向 eslint 0 error。对 reply-boost `POST /api/insight/ai {force:true}`（249s）后 `GET /api/insight`：**`aiStatus.coreJudgment=ok`**（修复前 failed）、`categories=skipped`（pending=0，合理）、其余 ok；**`isCore` 18 个全部 `src=ai`** 且带业务理由（App 主入口、useDesktopIntegration 桌面集成编排器、chunkText 文本切块主引擎、makeAnchor 锚点生成、validateRulePack/loadPacks/persistPacks 规则包、listSessions/saveSession 会话持久化等），**`formatDateTime`/`downloadFile`/`isTauri` 已不在核心集合**；脉络叶子共 62 条，匹配上述工具函数者 **0 条**，叶子变为 types/segmentText/renderFeedback/键盘标记与收笔/校验规则包 等业务节点。
 - **Prism 规模**：以单测证明 414 函数分 4 批、每批 ≤120 行、单批响应体量有界不截断（未实际触发 Prism force 以省 API 成本/耗时）。
 - **风险/回滚点**：分批/重试仅增加 AI 调用次数（大项目），小项目单批行为不变；解析容错为纯增强，误判风险低（仅接受本批 idx、非法值过滤）；回滚只需还原 insight.ts 并删除 aiChunking.test.ts。
+
+---
+
+### fix(web): FlowTree 合成叶子限量可折叠（Minor-3）+ AI partial 徽标显眼（Nit-4）
+- **内容**（改 [FlowTree.vue](../packages/web/src/components/FlowTree.vue)、[InsightHome.vue](../packages/web/src/views/InsightHome.vue)，FunctionCard 零改动）：
+  - **Minor-3 合成叶子无上限/不可折叠**：上轮 `syntheticLeaves` 平铺分支无数量上限与折叠态；branch/mainline 的 relatedFunctionIds 上限可达 30（MAX_CHILDREN_CANDIDATES）且被 maxDepth 截断的节点往往候选最多，每行又是一个自递归实例（各带 detailOpen/watch/取数），会一次性撑爆视图。新增 `SYNTHETIC_LEAF_LIMIT=8`、`visibleSyntheticLeaves`（未展开时 `slice(0,8)`）、`hiddenSyntheticCount` 与折叠开关（复用 store/expand.ts，key=`flowsyn:${projectId}:${node.id}`，文案「还有 N 个函数 ▸ / 收起 ▾」）；默认只渲染前 8 个，超出按需展开。开关按钮为同行父级的兄弟元素（不嵌套在 role=button 行内），无 n2 回退。
+  - **Nit-4 partial 徽标不显眼**：`AI_STATUS_META` 已含 partial（info/蓝、「部分成功」），但顶部徽标强调条件只含 failed/skipped，partial 未加粗。把 `:class` 条件改为 `p.status && p.status !== 'ok'`（所有非 ok 状态均加粗，含 partial/failed/skipped，且未来新增状态自动涵盖），并为 partial 加 `◐` 图标；partial 保持 info/蓝，与 ok 绿、failed 红、skipped 橙 区分，一眼看出“AI 部分生效、部分回退启发式”。
+- **影响范围**：packages/web 两文件。未改 format.ts（partial 映射已存在）/后端/README/依赖；dev 未重启（HMR）。
+- **实证**：`pnpm --filter @autodoc/web run typecheck`（vue-tsc）**exit 0**；`pnpm --filter @autodoc/web run build`（vite build）**exit 0，2902 modules**；两改动文件定向 eslint exit 0。对 reply-boost（后端代理刚重生成）`GET /api/insight` 实测：`aiStatus.flows=partial`、`categories=skipped`（Nit-4 场景真实存在，现均加粗显眼）；当前树 13 个截断非叶子节点中 relatedFunctionIds 最大仅 2（无 >8），故 Minor-3 折叠开关当前不显现——为防御性上限（后端 cap 允许到 30），大节点时自动生效。
+- **风险/回滚点**：纯前端渲染/样式加固，无数据模型变更；回滚只需还原两文件。
+
+---
+
+### fix(web): FlowTree.vue 加固 children=[] 的非叶子节点（maxDepth 停钻/空壳）
+- **内容**（仅改 [packages/web/src/components/FlowTree.vue](../packages/web/src/components/FlowTree.vue)，FunctionCard 零改动）：处理后端实测发现的“达到 maxDepth(=5) 停止下钻”的 `kind:'mainline'/'branch'` 节点（`children=[]` 但 `relatedFunctionIds` 非空），以及历史遗留的空壳节点：
+  - 新增 `syntheticLeaves` computed：非 leaf 且 `children=[]` 且 `relatedFunctionIds` 非空时，把每个关联函数合成为一个 `kind:'leaf'` 的 FlowNode（id=`${node.id}#fn${i}`），**复用现有 FlowTree leaf 渲染与取数链路**（findFunctionEntry→getFileView→find），在节点下平铺呈现，各自可就地展开 FunctionCard（实现最简、与真 leaf 交互一致）。
+  - 非叶子分支重构为三态：`v-if=hasChildren`（真实子节点，`v-show=expanded` 可折叠）/ `v-else-if=syntheticLeaves.length>0`（平铺函数叶子，同层插 ↓ 箭头）/ `v-else`（异常空壳：低调占位“已达深度上限 / 无下钻内容”，不报错）。
+  - 保持上轮修复不回退：无 children 时行仍无 ▸/▾ 展开控件、`toggleNode` 不响应、`role`/`tabindex` 仍条件于 `hasChildren`（n2）；`nodeFallback` 仍为 computed（n3）；label/summary/reason 仍走 `{{}}`/`:title`，无 v-html（XSS 安全）。
+- **影响范围**：packages/web/FlowTree.vue 单文件。未改后端/README/依赖；dev 服务未重启（vite HMR）。
+- **实证**：`pnpm --filter @autodoc/web run typecheck`（vue-tsc）**exit 0**；`pnpm --filter @autodoc/web run build`（vite build）**exit 0，2902 modules**；FlowTree.vue 定向 eslint exit 0。对 reply-boost `GET /api/insight`（未触发 AI 重生）实测：当前树共 **20 个 `children=[]` 非叶子节点**，其中 **17 个 relatedFunctionIds 非空**（多为 depth-5 mainline/branch，现平铺为函数叶子）、**3 个空壳**（现显示占位）；抽查 `flow:0.2.4.0.0.0` 的 2 个关联函数（segmentText/chunkText）均能被索引解析，叶子取名与详情取数链路正常。
+- **风险/回滚点**：纯前端渲染健壮性加固，无数据模型变更；回滚只需还原 FlowTree.vue。
+
+---
+
+### fix(web): 修复 FlowTree.vue 代码复审发现的 4 个前端问题（m2/m3/n2/n3）
+- **内容**（仅改 [packages/web/src/components/FlowTree.vue](../packages/web/src/components/FlowTree.vue)，FunctionCard 零改动）：
+  - **m2 持久化展开的叶子刷新后详情空白**：`loadFn()` 原先只在 `toggleDetail()` 里调用；`detailOpen` 来自 localStorage（`flowleaf:` 键），刷新后为 true 但 fnView/fnLoading/fnError 均未命中 ⇒ 详情区渲染成空 div。新增 `watch(detailOpen, v => { if (v) void loadFn() }, { immediate: true })`，确保已展开叶子挂载时自动取数。
+  - **m3 叶子内批注不联动刷新**：`<FunctionCard>` 未监听 `changed` 事件，本地 `fnView` 快照不更新。新增 `handleFnChanged()` 绑定 `@changed`：`invalidateFileView(fileId)` → 置空 fnView/fnError → `loadFn()`，与 FilePage.vue/CategorySection.vue 既有约定一致。
+  - **n2 非法 HTML 嵌套 button**：外层节点行 `<button @click=toggleNode>` 内嵌模块深链 `<button @click.stop>` 违反规范。外层改为 `div` + 条件 `role="button"`/`tabindex=0`（仅有子节点时），新增 `onRowKeydown`（Enter/Space 触发，且用 `event.target !== event.currentTarget` 过滤内部深链冒泡）；深链仍保留 `@click.stop` 不触发展开。
+  - **n3 nodeFallback 非响应式**：`const nodeFallback = props.depth < props.autoExpandDepth` 改为 `computed(() => props.depth < props.autoExpandDepth)`，`expanded`/`toggleNode` 相应使用 `.value`，使异步加载的 `autoExpandDepth`（meta 配置）变化后默认展开态可更新。
+- **影响范围**：packages/web/FlowTree.vue 单文件。未改后端/README/依赖；dev 服务未重启（vite HMR 自动热更）。
+- **实证**：`pnpm --filter @autodoc/web run typecheck`（vue-tsc）**exit 0**；`pnpm --filter @autodoc/web run build`（vite build）**exit 0，2902 modules**；FlowTree.vue 定向 eslint exit 0（.vue 被 flat config ignore，靠 vue-tsc 兜底）。m2/m3 为逻辑修复：m2 靠 immediate watch 保证挂载即加载；m3 复用 FilePage 的 invalidate+重取模式，未触发 AI 重生成。
+- **风险/回滚点**：均为局部交互/取数修正，无数据模型变更；回滚只需还原 FlowTree.vue。
 
 ---
 

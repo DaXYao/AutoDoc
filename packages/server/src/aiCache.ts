@@ -52,4 +52,22 @@ export class AiCache {
     }
     this.flush()
   }
+
+  /**
+   * 按 key 前缀清除某指纹下的子缓存，返回清除条数。
+   * 用于 force 重生成时让派生态子缓存（如 flows:roots / flows:node:*）一并失效：
+   * 它们的语义依赖 pass1/2 的划分与核心判定，图指纹不变也会因重算而错配。
+   */
+  clearByPrefix(fingerprint: string, keyPrefix: string): number {
+    const full = `${fingerprint}:${keyPrefix}`
+    let removed = 0
+    for (const k of Object.keys(this.data)) {
+      if (k.startsWith(full)) {
+        delete this.data[k]
+        removed++
+      }
+    }
+    if (removed > 0) this.flush()
+    return removed
+  }
 }

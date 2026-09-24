@@ -17,10 +17,13 @@ import { getDeepSeekConfig } from './env.js'
 import {
   DEFAULT_FLOW_CAPS,
   applyFlows,
+  flowSourceStats,
+  flowsBasis,
   generateFlows,
   heuristicFlows,
   type FlowCaps,
-  type FlowDeps
+  type FlowDeps,
+  type FlowGenStats
 } from './flow.js'
 import { applyCoreJudgment, applyPartition, buildGraph, type CoreJudgment, type Partition, type ProjectGraph } from './graph.js'
 
@@ -43,6 +46,14 @@ interface FlowTreeCache {
   generatedAt: string
   /** true=AI 生成；false=静态兜底降级 */
   aiOk: boolean
+  /** 写入时的细化状态快照（ok/partial/failed），仅供排查；回读时一律用 flowsStatusOf 重算，保证两条路径判定一致 */
+  status?: AiPassStatus
+  /** M-R1：生成时的划分身份（flowsBasis），回读时与当前 graph 比对，不符则忽略 */
+  basis?: string
+  /** m-R3：根级回填次数（降级信号） */
+  rootBackfills?: number
+  /** m-R3：抢救出的子节点次数（降级信号） */
+  salvagedCount?: number
 }
 
 const MAX_AI_MODULES = 6
@@ -65,6 +76,50 @@ const AI_PARSE_RETRIES = 2
 /** 结构化分析 pass（核心判定/分类）用较低 temperature，降低格式与结果波动 */
 const AI_STRUCTURE_TEMPERATURE = 0.1
 const CATEGORIES: FunctionCategory[] = ['business', 'implementation', 'utility']
+/**
+ * AI 根下 heuristic 子树占比阈值：达阈则 aiStatus.flows 记 failed（未达阈但 >0 记 partial）。
+ * 修正旧逻辑「roots.length>0 即 ok」：子树大面积兜底仍报 ok 会掩盖退化。
+ */
+const FLOWS_HEURISTIC_FAILED_RATIO = 0.6
+
+/**
+ * AI 根 + 子树来源占比 → ok/partial/failed（全 AI=ok；部分 heuristic=partial；占比超阈=failed）。
+ * m-R3：回填根（rootBackfills>0）或抢救节点（salvagedCount>0）也视为降级信号，
+ * 即便全树 source='ai' 也不能报 ok。
+ * quiet=true 用于缓存回读路径（每次页面加载都会走），只判定不打日志。
+ */
+export function flowsStatusOf(
+  roots: FlowNode[],
+  opts: { quiet?: boolean; rootBackfills?: number; salvagedCount?: number } = {}
+): AiPassStatus {
+  const s = flowSourceStats(roots)
+  if (s.total === 0) return 'failed'
+  const ratio = s.heuristic / s.total
+  const backfills = opts.rootBackfills ?? 0
+  const salvaged = opts.salvagedCount ?? 0
+  // m-R3：降级信号纳入判定
+  const hasDegrade = backfills > 0 || salvaged > 0
+  if (ratio === 0 && !hasDegrade) return 'ok'
+  if (ratio >= FLOWS_HEURISTIC_FAILED_RATIO) {
+    if (!opts.quiet) {
+      console.warn(
+        `[autodoc] AI 脉络树 heuristic 占比 ${(ratio * 100).toFixed(0)}%（${s.heuristic}/${s.total}），降级为 failed`
+      )
+    }
+    return 'failed'
+  }
+  if (!opts.quiet) {
+    const detail = [
+      ratio > 0 ? `heuristic ${s.heuristic}/${s.total}` : '',
+      backfills > 0 ? `回填根 ${backfills}` : '',
+      salvaged > 0 ? `抢救 ${salvaged}` : ''
+    ].filter(Boolean).join('、')
+    console.warn(
+      `[autodoc] AI 脉络树存在降级（${detail}），记为 partial`
+    )
+  }
+  return 'partial'
+}
 
 /** 核心判定分批结果：judgment 为各成功批的并集；failedBatches>0 表示部分批降级（不整体失败） */
 export interface CoreJudgmentResult {
@@ -192,10 +247,15 @@ async function aiPartition(
     `要求：覆盖全部索引、模块间职责不重叠、数量适中(4-10个)。` +
     `另给 summary(项目一句话概述)。` +
     `输出 JSON: {"summary":"...","modules":[{"name":"...","description":"...","members":[0,3,7]}]}`
-  const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+  const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
     maxTokens: PARTITION_MAX_TOKENS
   })
-  const parsed = extractJson<Omit<PartitionEnvelope, 'feedback'>>(text)
+  // 截断（finish_reason=length）= 划分成员列表可能缺尾：不采纳、不写缓存，回退目录划分
+  if (reply.truncated) {
+    console.warn('[autodoc] AI 划分输出被截断(finish_reason=length)，视为不完整，回退目录划分')
+    return null
+  }
+  const parsed = extractJson<Omit<PartitionEnvelope, 'feedback'>>(reply.content)
   if (!parsed || !Array.isArray(parsed.modules) || parsed.modules.length === 0) {
     console.warn('[autodoc] AI 划分返回无法解析，回退目录划分')
     return null
@@ -231,23 +291,38 @@ export async function aiCategories(graph: ProjectGraph): Promise<CategoriesResul
     let done = false
     for (let attempt = 1; attempt <= AI_PARSE_RETRIES && !done; attempt++) {
       try {
-        const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+        const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
           maxTokens: CATEGORIES_MAX_TOKENS,
           temperature: AI_STRUCTURE_TEMPERATURE
         })
-        const raw = extractJson<Record<string, { category?: string; reason?: string }>>(text)
+        if (reply.truncated) {
+          console.warn(
+            `[autodoc] AI 分类第 ${b + 1}/${batches.length} 批第 ${attempt} 次输出被截断(finish_reason=length)，视为不完整${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+          )
+          continue
+        }
+        const raw = extractJson<Record<string, { category?: string; reason?: string }>>(reply.content)
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
           console.warn(
             `[autodoc] AI 分类第 ${b + 1}/${batches.length} 批第 ${attempt} 次返回无法解析${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批（pending 保持未分类）'}`
           )
           continue
         }
+        let accepted = 0
         for (const [key, v] of Object.entries(raw)) {
           const idx = Number(key)
           if (!batchIdx.has(idx)) continue
           const item = byIdx.get(idx)
           if (!item || !v || !CATEGORIES.includes(v.category as FunctionCategory)) continue
           out[item.id] = { category: v.category as FunctionCategory, reason: v.reason ?? '' }
+          accepted++
+        }
+        // 结构可解析但零有效条目（idx 全被过滤/category 全非法）：不得静默当成功，重试耗尽计入 failedBatches
+        if (accepted === 0) {
+          console.warn(
+            `[autodoc] AI 分类第 ${b + 1}/${batches.length} 批第 ${attempt} 次零有效条目（候选 ${batch.length} 个）${attempt < AI_PARSE_RETRIES ? '，重试' : '，计入降级批'}`
+          )
+          continue
         }
         done = true
       } catch (e) {
@@ -292,14 +367,27 @@ export async function aiCoreJudgment(graph: ProjectGraph): Promise<CoreJudgmentR
     let done = false
     for (let attempt = 1; attempt <= AI_PARSE_RETRIES && !done; attempt++) {
       try {
-        const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+        const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
           maxTokens: CORE_JUDGMENT_MAX_TOKENS,
           temperature: AI_STRUCTURE_TEMPERATURE
         })
-        const parsed = parseCoreResponse(text, batchIdx)
+        if (reply.truncated) {
+          console.warn(
+            `[autodoc] AI 核心判定第 ${b + 1}/${batches.length} 批第 ${attempt} 次输出被截断(finish_reason=length)，视为不完整${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+          )
+          continue
+        }
+        const parsed = parseCoreResponse(reply.content, batchIdx)
         if (!parsed.ok) {
           console.warn(
             `[autodoc] AI 核心判定第 ${b + 1}/${batches.length} 批第 ${attempt} 次返回无法解析${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+          )
+          continue
+        }
+        // 结构可解析但零核心（idx 全被 valid 过滤）：候选明显非空时视为退化返回，不静默贡献 0 核心
+        if (parsed.items.length === 0) {
+          console.warn(
+            `[autodoc] AI 核心判定第 ${b + 1}/${batches.length} 批第 ${attempt} 次返回空核心（候选 ${batch.length} 个）${attempt < AI_PARSE_RETRIES ? '，重试' : '，计入降级批'}`
           )
           continue
         }
@@ -335,10 +423,14 @@ async function aiCoreRoles(graph: ProjectGraph): Promise<Record<string, string>>
   const user =
     `以下是被多条调用链路依赖的核心函数(id|签名|静态用途|被调用次数|链路数)：\n${lines}\n` +
     `输出 JSON: {"<函数id>":"该函数在整个系统中的角色(一句话)"}`
-  const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+  const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
     maxTokens: AI_MAX_TOKENS
   })
-  const parsed = extractJson<Record<string, string>>(text)
+  if (reply.truncated) {
+    console.warn('[autodoc] AI 核心角色输出被截断(finish_reason=length)，视为不完整，已忽略')
+    return {}
+  }
+  const parsed = extractJson<Record<string, string>>(reply.content)
   if (!parsed) {
     console.warn('[autodoc] AI 核心角色返回无法解析，已忽略')
     return {}
@@ -376,10 +468,16 @@ async function aiNarratives(graph: ProjectGraph): Promise<NarrativeEnvelope> {
       `函数信息：\n${[...fnInfo.values()].join('\n')}\n` +
       `输出 JSON: {"<链路id>":{"narrative":"这条链路完成了什么(一句话)","stepRoles":{"<函数id>":"该函数在本链路里的职责(一句话)"}}}`
     try {
-      const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+      const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
         maxTokens: AI_MAX_TOKENS
       })
-      const parsed = extractJson<NarrativeEnvelope>(text)
+      if (reply.truncated) {
+        console.warn(
+          `[autodoc] AI 链路叙事(模块 ${mod.name}) 输出被截断(finish_reason=length)，视为不完整，已忽略`
+        )
+        continue
+      }
+      const parsed = extractJson<NarrativeEnvelope>(reply.content)
       if (parsed) Object.assign(out, parsed)
       else console.warn(`[autodoc] AI 链路叙事(模块 ${mod.name}) 返回无法解析，已忽略`)
     } catch (e) {
@@ -537,15 +635,28 @@ export function loadInsight(service: DocService, feedback = ''): InsightBundle {
   }
   // 脉络树整树快照回读（免网络）：仅 AI 生成的树计入 aiGenerated
   const flowsTree = cache.get<FlowTreeCache>(fp, 'flows:tree')
-  if (flowsTree && flowsTree.tree.length > 0) {
+  /**
+   * 以整树快照为准的 flows 状态：与 pass6 命中分支统一走 flowsStatusOf(tree,{quiet:true})，
+   * 不直读快照里的 status 字段，避免旧快照（无 status）在「重新生成 vs 刷新页面」之间翻转
+   */
+  let flowsStatus: AiPassStatus | undefined
+  // M-R1：applyPartition 之后计算当前 basis，与快照 basis 比对——不符则忽略（不展示矛盾树）
+  const currentBasis = flowsBasis(graph)
+  const basisMatch = !flowsTree?.basis || flowsTree.basis === currentBasis
+  if (flowsTree && flowsTree.tree.length > 0 && basisMatch) {
     insight.flows = flowsTree.tree
     insight.flowsGeneratedAt = flowsTree.generatedAt
     insight.flowsFingerprint = fp
     if (flowsTree.aiOk) touched = true
+    flowsStatus = flowsTree.aiOk
+      ? flowsStatusOf(flowsTree.tree, { quiet: true, rootBackfills: flowsTree.rootBackfills, salvagedCount: flowsTree.salvagedCount })
+      : 'failed'
   }
   // 各 AI 段状态回读（可观测性，独立于 aiGenerated）
   const cachedStatus = cache.get<Partial<Record<AiPassKey, AiPassStatus>>>(fp, 'aiStatus')
   if (cachedStatus) insight.aiStatus = cachedStatus
+  // flows 状态以当前快照重算值覆盖陈旧缓存，避免退化树仍显示 ok
+  if (flowsStatus) insight.aiStatus = { ...insight.aiStatus, flows: flowsStatus }
   insight.aiGenerated = touched
   return { insight, graph }
 }
@@ -702,20 +813,57 @@ export async function refreshInsightAI(
     maxNodesTotal: flowCfg.maxNodesTotal ?? DEFAULT_FLOW_CAPS.maxNodesTotal
   }
   let flowsAiOk = false
-  const cachedTree = opts.force ? undefined : cache.get<FlowTreeCache>(fp, 'flows:tree')
+  let flowsStatus: AiPassStatus = 'failed'
+  let flowsWriteFailed = false
+  // Major-1：forcePartition（「提交划分建议」主流程）会让 pass1 重算划分 → 模块变成新的 mod:i，
+  // 若仍复用陈旧 flows:tree，树会按旧划分归组、mod:i 深链跳错模块 ⇒ 与 force 同样绕过整树缓存。
+  const invalidateFlows = opts.force === true || opts.forcePartition === true
+  // M-R1：cache-hit 分支也需验证 basis 一致性（划分可能在前面的 pass 被 force 重算过）
+  const rawCachedTree = invalidateFlows ? undefined : cache.get<FlowTreeCache>(fp, 'flows:tree')
+  const pass6Basis = flowsBasis(graph)
+  const cachedTree = rawCachedTree && (!rawCachedTree.basis || rawCachedTree.basis === pass6Basis)
+    ? rawCachedTree
+    : undefined
   if (cachedTree && cachedTree.tree.length > 0) {
     insight.flows = cachedTree.tree
     insight.flowsGeneratedAt = cachedTree.generatedAt
     insight.flowsFingerprint = fp
     flowsAiOk = cachedTree.aiOk
+    // Minor-1：与 loadInsight 统一走 flowsStatusOf(tree,{quiet:true})，避免旧快照（无 status 字段）
+    // 在「重新生成 vs 刷新页面」之间翻转，并把错误的 ok 固化进 aiStatus 缓存
+    flowsStatus = cachedTree.aiOk
+      ? flowsStatusOf(cachedTree.tree, { quiet: true, rootBackfills: cachedTree.rootBackfills, salvagedCount: cachedTree.salvagedCount })
+      : 'failed'
   } else {
+    if (invalidateFlows) {
+      // flows 的派生态子缓存必须一并失效：pass1/2 重算后候选函数集/顺序会变，
+      // 旧信封会把下标映射到另一个函数（张冠李戴），使 force/forcePartition 无法修复坏树。
+      // M-R1+A（原子替换）：只清 flows:roots: 和 flows:node: 子缓存，**不提前清 flows:tree**。
+      // 旧整树保留可读（生成期间 GET 仍返回旧树而非空树）；新树算好后在下方原子替换。
+      const n1 = cache.clearByPrefix(fp, 'flows:roots:')
+      const n2 = cache.clearByPrefix(fp, 'flows:node:')
+      const n = n1 + n2
+      if (n > 0) {
+        console.warn(
+          `[autodoc] ${opts.force ? 'force' : 'forcePartition'}：已失效 flows 子缓存 ${n} 条（roots/node）`
+        )
+      }
+    }
     let roots: FlowNode[] = []
-    const flowDeps: FlowDeps = { cache, fingerprint: fp, caps }
+    const stats: FlowGenStats = { subtreeFailures: 0, emptyResponses: 0 }
+    const flowDeps: FlowDeps = { cache, fingerprint: fp, caps, stats }
     try {
       roots = await generateFlows(graph, insight, flowDeps)
       flowsAiOk = roots.length > 0
     } catch (e) {
       console.warn(`[autodoc] AI 脉络生成失败，回退静态兜底：${e instanceof Error ? e.message : String(e)}`)
+    }
+    // 子树级失败不再静默吞掉：计数入日志，供定位「看似 ok 但大面积兜底」
+    if (stats.subtreeFailures > 0 || stats.emptyResponses > 0 || (stats.rootBackfills ?? 0) > 0) {
+      console.warn(
+        `[autodoc] AI 脉络生成：子树失败回退 ${stats.subtreeFailures} 次、空/无效返回 ${stats.emptyResponses} 次、` +
+          `空壳根回填 ${stats.rootBackfills ?? 0} 次`
+      )
     }
     // 任一步失败走 heuristicFlows（不抛、不崩、不影响已生成的其它段）
     if (!flowsAiOk) {
@@ -726,16 +874,32 @@ export async function refreshInsightAI(
       }
     }
     if (roots.length > 0) {
-      applyFlows(insight, graph, roots, { caps })
-      cache.set(fp, 'flows:tree', {
-        tree: insight.flows ?? [],
-        generatedAt: insight.flowsGeneratedAt ?? '',
-        aiOk: flowsAiOk
-      })
+      // 写回失败不得穿透 refreshInsightAI（否则会连带丢失前 5 段成果与 aiStatus）
+      try {
+        applyFlows(insight, graph, roots, { caps })
+        flowsStatus = flowsAiOk ? flowsStatusOf(insight.flows ?? roots, { rootBackfills: stats.rootBackfills, salvagedCount: stats.salvagedCount }) : 'failed'
+        const treeCache: FlowTreeCache = {
+          tree: insight.flows ?? [],
+          generatedAt: insight.flowsGeneratedAt ?? '',
+          aiOk: flowsAiOk,
+          status: flowsStatus,
+          basis: pass6Basis,
+          rootBackfills: stats.rootBackfills ?? 0,
+          salvagedCount: stats.salvagedCount ?? 0
+        }
+        // M-R1+A（原子替换）：新树完全算好后才写入，覆盖旧快照
+        cache.set(fp, 'flows:tree', treeCache)
+      } catch (e) {
+        flowsWriteFailed = true
+        flowsStatus = 'failed'
+        console.warn(
+          `[autodoc] AI 脉络树写回失败（保留前 5 段成果）：${e instanceof Error ? e.message : String(e)}`
+        )
+      }
     }
   }
   const flowsProduced = !!insight.flows && insight.flows.length > 0
-  status.flows = flowsProduced ? (flowsAiOk ? 'ok' : 'failed') : 'skipped'
+  status.flows = !flowsProduced ? 'skipped' : flowsWriteFailed ? 'failed' : flowsStatus
 
   insight.aiGenerated = !!(
     p ||
