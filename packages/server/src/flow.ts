@@ -47,7 +47,15 @@ export interface FlowDeps {
   budget?: FlowBudget
 }
 
-const FLOW_MAX_TOKENS = 4000
+/**
+ * flows 相关调用（roots/children）输出含 label/summary/reason 多字段，函数多时 4000 tokens
+ * 易被截断致 JSON 不完整、extractJson 解析失败并降级 heuristicChildren（树被压扁）。给更大上限。
+ */
+const FLOW_MAX_TOKENS = 8000
+/** 单次解析失败/畸形的重试次数（模型输出非确定、偶发畸形 JSON，重试显著降低降级 heuristic 的概率） */
+const FLOW_PARSE_RETRIES = 2
+/** 结构化分析 pass 用较低 temperature，降低格式/结果波动 */
+const FLOW_TEMPERATURE = 0.1
 /** 单个父节点喂给 AI 的候选函数上限（分层裁剪） */
 const MAX_CHILDREN_CANDIDATES = 30
 /** 触发「链路入口静态子聚类」的候选函数阈值 */
@@ -84,6 +92,109 @@ interface ChildrenEnvelope {
     relatedChainIds?: string[]
     reason?: string
   }[]
+}
+
+/* ------------------------- 容错解析（格式变体归一） ------------------------- */
+
+/** 模型输出格式非确定：按候选键名取首个字符串值（容忍 label/name/title 等命名差异） */
+function pickStr(o: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = o[k]
+    if (typeof v === 'string' && v.trim()) return v
+    if (typeof v === 'number') return String(v)
+  }
+  return undefined
+}
+
+function pickNum(o: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const k of keys) {
+    const v = o[k]
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v)
+  }
+  return undefined
+}
+
+function pickArr(o: Record<string, unknown>, keys: string[]): unknown[] | undefined {
+  for (const k of keys) {
+    const v = o[k]
+    if (Array.isArray(v)) return v
+  }
+  return undefined
+}
+
+/** 取顶层列表：模型可能直接返回 [...]，或包在 children/nodes/steps/items 等键下 */
+function pickList(parsed: unknown, keys: string[]): unknown[] | null {
+  if (Array.isArray(parsed)) return parsed
+  if (parsed && typeof parsed === 'object') {
+    const o = parsed as Record<string, unknown>
+    for (const k of keys) if (Array.isArray(o[k])) return o[k] as unknown[]
+  }
+  return null
+}
+
+/** 归一单条主线根（容忍字段名差异；元素为字符串时当作 label） */
+function normRoot(raw: unknown): RootsEnvelope['roots'][number] | null {
+  if (typeof raw === 'string') return raw.trim() ? { label: raw } : null
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const mods = (pickArr(o, ['relatedModuleIds', 'moduleIds', 'modules', 'relatedModules']) ?? [])
+    .map((x) => (typeof x === 'number' ? x : typeof x === 'string' ? x : Number(x)))
+    .filter((x) => (typeof x === 'string' && x.trim() !== '') || Number.isInteger(x))
+  return {
+    label: pickStr(o, ['label', 'name', 'title']),
+    summary: pickStr(o, ['summary', 'description', 'desc']),
+    order: pickNum(o, ['order', 'index', 'idx', 'seq']),
+    relatedModuleIds: mods as (string | number)[],
+    reason: pickStr(o, ['reason', 'why'])
+  }
+}
+
+/** 归一单个子节点（容忍 kind/type、relatedFunctionIds/functionIds 等命名差异） */
+function normChild(raw: unknown): ChildrenEnvelope['children'][number] | null {
+  if (typeof raw === 'string') return raw.trim() ? { label: raw } : null
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const fns = (pickArr(o, ['relatedFunctionIds', 'functionIds', 'functions', 'fns', 'relatedFunctions']) ?? [])
+    .map((x) => (typeof x === 'number' ? x : Number(x)))
+    .filter((n) => Number.isInteger(n))
+  const chains = (pickArr(o, ['relatedChainIds', 'chainIds', 'chains', 'relatedChains']) ?? [])
+    .filter((x): x is string => typeof x === 'string')
+  return {
+    label: pickStr(o, ['label', 'name', 'title']),
+    summary: pickStr(o, ['summary', 'description', 'desc']),
+    order: pickNum(o, ['order', 'index', 'idx', 'seq']),
+    kind: pickStr(o, ['kind', 'type', 'nodeType']),
+    relatedFunctionIds: fns,
+    relatedChainIds: chains,
+    reason: pickStr(o, ['reason', 'why'])
+  }
+}
+
+const ROOT_LIST_KEYS = ['roots', 'mainlines', 'lines', 'nodes', 'items']
+const CHILD_LIST_KEYS = ['children', 'nodes', 'steps', 'items', 'subNodes']
+
+/**
+ * 鲁棒解析主线根回复：归一 {roots:[...]} / 顶层数组 / 键名变体（mainlines/nodes/items）。
+ * ok=false 仅在 extractJson 返回 null 或无可识别列表时；识别出列表（即使空）即 ok=true。
+ */
+export function parseRootsResponse(text: string): { ok: boolean; roots: RootsEnvelope['roots'] } {
+  const parsed = extractJson<unknown>(text)
+  if (parsed === null) return { ok: false, roots: [] }
+  const arr = pickList(parsed, ROOT_LIST_KEYS)
+  if (!arr) return { ok: false, roots: [] }
+  const roots = arr.map(normRoot).filter((x): x is RootsEnvelope['roots'][number] => x !== null)
+  return { ok: true, roots }
+}
+
+/** 鲁棒解析子节点回复：归一 {children:[...]} / 顶层数组 / 键名变体（nodes/steps/items） */
+export function parseChildrenResponse(text: string): { ok: boolean; children: ChildrenEnvelope['children'] } {
+  const parsed = extractJson<unknown>(text)
+  if (parsed === null) return { ok: false, children: [] }
+  const arr = pickList(parsed, CHILD_LIST_KEYS)
+  if (!arr) return { ok: false, children: [] }
+  const children = arr.map(normChild).filter((x): x is ChildrenEnvelope['children'][number] => x !== null)
+  return { ok: true, children }
 }
 
 function resolveCaps(deps?: FlowDeps): FlowCaps {
@@ -214,16 +325,28 @@ async function requestRoots(
     `请识别 1~N 条"业务主线根"（每条代表一个核心业务方向，可跨多个模块归组）。` +
     `为每条主线给出：label(<=14字)、summary(一句话业务目标)、order(从0递增，体现业务主次先后)、` +
     `relatedModuleIds(该主线涉及的模块 id 数组，取自上表)、reason(归组理由)。` +
-    `要求：主线之间职责清晰、覆盖项目核心业务。\n` +
+    `要求：主线之间职责清晰、覆盖项目核心业务。仅输出严格 JSON、字段完整、勿截断。\n` +
     `输出 JSON: {"roots":[{"label":"...","summary":"...","order":0,"relatedModuleIds":["mod:0"],"reason":"..."}]}`
-  const text = await chat([systemPrompt(), { role: 'user', content: user }], {
-    maxTokens: FLOW_MAX_TOKENS
-  })
-  const parsed = extractJson<RootsEnvelope>(text)
-  if (!parsed || !Array.isArray(parsed.roots) || parsed.roots.length === 0) {
-    throw new Error('AI 脉络主线返回无法解析')
+  let lastErr = 'AI 脉络主线返回无法解析'
+  for (let attempt = 1; attempt <= FLOW_PARSE_RETRIES; attempt++) {
+    try {
+      const text = await chat([systemPrompt(), { role: 'user', content: user }], {
+        maxTokens: FLOW_MAX_TOKENS,
+        temperature: FLOW_TEMPERATURE
+      })
+      const parsed = parseRootsResponse(text)
+      if (parsed.ok && parsed.roots.length > 0) return { roots: parsed.roots }
+      console.warn(
+        `[autodoc] AI 脉络主线第 ${attempt}/${FLOW_PARSE_RETRIES} 次返回无法解析${attempt < FLOW_PARSE_RETRIES ? '，重试' : '，将回退静态兖底'}（raw[0..200]: ${text.slice(0, 200).replace(/\n/g, '\\n')}）`
+      )
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e)
+      console.warn(
+        `[autodoc] AI 脉络主线第 ${attempt}/${FLOW_PARSE_RETRIES} 次调用失败：${lastErr}${attempt < FLOW_PARSE_RETRIES ? '，重试' : ''}`
+      )
+    }
   }
-  return parsed
+  throw new Error(lastErr)
 }
 
 /** 识别 1~N 条主线根（核心功能模块）；缓存键 flows:roots */
@@ -302,16 +425,31 @@ async function requestChildren(
     `kind(mainline=主线阶段/branch=分支/leaf=收敛到单个核心函数的叶子)、` +
     `relatedFunctionIds(该子节点覆盖的候选函数索引数组；leaf 只放 1 个核心函数索引)、` +
     `relatedChainIds(相关链路 id 数组，取自上表)、reason(拆分理由)。\n` +
-    `要求：子节点顺序不得与链路 path 的执行顺序矛盾；覆盖父节点核心业务。\n` +
+    `【多层要求】把父节点拆成沿使用流程有序、地位对等的若干子步骤；若某子步骤本身仍是一个可继续细分的阶段，` +
+    `务必标为 mainline 或 branch（系统会对其继续下钻），不要直接落到单个函数叶子；` +
+    `只有当某子步骤就是单个具体功能函数时才用 leaf（其 relatedFunctionIds 只放 1 个索引）。优先产出中间层，避免一步到叶子。\n` +
+    `要求：子节点顺序不得与链路 path 的执行顺序矛盾；覆盖父节点核心业务。仅输出严格 JSON、字段完整、勿截断。\n` +
     `输出 JSON: {"children":[{"label":"...","summary":"...","order":0,"kind":"branch","relatedFunctionIds":[0,1],"relatedChainIds":["chain:0"],"reason":"..."}]}`
-  const text = await chat([systemPrompt(), { role: 'user', content: user }], {
-    maxTokens: FLOW_MAX_TOKENS
-  })
-  const parsed = extractJson<ChildrenEnvelope>(text)
-  if (!parsed || !Array.isArray(parsed.children)) {
-    throw new Error('AI 脉络子节点返回无法解析')
+  let lastErr = 'AI 脉络子节点返回无法解析'
+  for (let attempt = 1; attempt <= FLOW_PARSE_RETRIES; attempt++) {
+    try {
+      const text = await chat([systemPrompt(), { role: 'user', content: user }], {
+        maxTokens: FLOW_MAX_TOKENS,
+        temperature: FLOW_TEMPERATURE
+      })
+      const parsed = parseChildrenResponse(text)
+      if (parsed.ok) return { children: parsed.children }
+      console.warn(
+        `[autodoc] AI 脉络子节点(${parentNode.label})第 ${attempt}/${FLOW_PARSE_RETRIES} 次返回无法解析${attempt < FLOW_PARSE_RETRIES ? '，重试' : '，将回退静态兖底'}（raw[0..200]: ${text.slice(0, 200).replace(/\n/g, '\\n')}）`
+      )
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e)
+      console.warn(
+        `[autodoc] AI 脉络子节点(${parentNode.label})第 ${attempt}/${FLOW_PARSE_RETRIES} 次调用失败：${lastErr}${attempt < FLOW_PARSE_RETRIES ? '，重试' : ''}`
+      )
+    }
   }
-  return parsed
+  throw new Error(lastErr)
 }
 
 /**

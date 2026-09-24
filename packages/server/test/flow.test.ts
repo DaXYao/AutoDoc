@@ -20,6 +20,8 @@ import {
   applyFlows,
   generateFlows,
   heuristicFlows,
+  parseChildrenResponse,
+  parseRootsResponse,
   type ChatFn,
   type FlowCaps
 } from '../src/flow.js'
@@ -565,5 +567,125 @@ describe('refreshInsightAI：aiStatus 可观测性 + flows 写回', () => {
     expect(insight.flowsFingerprint).toBe(insight.graphFingerprint)
     expect(insight.aiGenerated).toBe(true)
     service.storage.close()
+  })
+})
+
+/* ------------------------- 容错解析：格式变体归一 ------------------------- */
+
+describe('parseChildrenResponse / parseRootsResponse 格式变体归一', () => {
+  it('children：标准 / 顶层数组+字段名变体 / 键名变体 / 字符串元素 / idx 字符串', () => {
+    expect(parseChildrenResponse(JSON.stringify({ children: [{ label: 'a', order: 0, kind: 'leaf', relatedFunctionIds: [0] }] })).ok).toBe(true)
+    // 顶层数组 + name/index/type/functions 变体
+    const r2 = parseChildrenResponse(JSON.stringify([{ name: 'x', index: 1, type: 'branch', functions: [2, 3] }]))
+    expect(r2.ok).toBe(true)
+    expect(r2.children[0].label).toBe('x')
+    expect(r2.children[0].order).toBe(1)
+    expect(r2.children[0].kind).toBe('branch')
+    expect(r2.children[0].relatedFunctionIds).toEqual([2, 3])
+    // 键名变体 steps / nodes / items
+    expect(parseChildrenResponse(JSON.stringify({ steps: [{ label: 's' }] })).children[0].label).toBe('s')
+    expect(parseChildrenResponse(JSON.stringify({ nodes: [{ label: 'n' }] })).children[0].label).toBe('n')
+    // 字符串元素当作 label
+    expect(parseChildrenResponse(JSON.stringify({ children: ['p', 'q'] })).children.map((c) => c.label)).toEqual(['p', 'q'])
+    // relatedFunctionIds 为字符串数字 → 归一为 number
+    expect(parseChildrenResponse(JSON.stringify({ children: [{ label: 'z', relatedFunctionIds: ['1', '2'] }] })).children[0].relatedFunctionIds).toEqual([1, 2])
+  })
+
+  it('children：完全无法归一 → ok=false', () => {
+    expect(parseChildrenResponse('oops no json').ok).toBe(false)
+    expect(parseChildrenResponse(JSON.stringify({ foo: 'bar' })).ok).toBe(false)
+  })
+
+  it('roots：标准 / mainlines 键+modules 变体 / 顶层数组+title / garbage', () => {
+    expect(parseRootsResponse(JSON.stringify({ roots: [{ label: 'r' }] })).ok).toBe(true)
+    expect(parseRootsResponse(JSON.stringify({ mainlines: [{ name: 'm', modules: ['mod:0'] }] })).roots[0].relatedModuleIds).toEqual(['mod:0'])
+    expect(parseRootsResponse(JSON.stringify([{ title: 't' }])).roots[0].label).toBe('t')
+    expect(parseRootsResponse('garbage').ok).toBe(false)
+  })
+})
+
+/* ------------------------- 健壮性：重试 / 多层中间层 / 单子树降级 ------------------------- */
+
+describe('aiFlowChildren 健壮性', () => {
+  it('子节点首次畸形、重试后成功 → 产出 ai 子节点（不降级 heuristic）', async () => {
+    const graph = fixtureGraph()
+    const insight = makeInsight(graph)
+    const [mA] = graph.modules.map((m) => m.id)
+    let childCalls = 0
+    const chat: ChatFn = async (messages) => {
+      const user = messages[messages.length - 1].content
+      if (user.includes('业务主线根')) {
+        return JSON.stringify({ roots: [{ label: '主线', order: 0, relatedModuleIds: [mA], reason: 'r' }] })
+      }
+      if (user.includes('拆成有序')) {
+        childCalls++
+        return childCalls === 1
+          ? 'oops malformed no json'
+          : JSON.stringify({ children: [{ label: 'c0', order: 0, kind: 'leaf', relatedFunctionIds: [0], reason: '' }] })
+      }
+      return '{}'
+    }
+    const tree = await generateFlows(graph, insight, { chat })
+    expect(childCalls).toBe(2) // 首次畸形 + 重试
+    expect(tree[0].children.length).toBeGreaterThan(0)
+    expect(tree[0].children[0].source).toBe('ai')
+  })
+
+  it('产出含 mainline 中间层的多级树（不一步到叶子）', async () => {
+    const graph = fixtureGraph()
+    const insight = makeInsight(graph)
+    const [mA] = graph.modules.map((m) => m.id)
+    const chat: ChatFn = async (messages) => {
+      const user = messages[messages.length - 1].content
+      if (user.includes('业务主线根')) {
+        return JSON.stringify({ roots: [{ label: '主线', order: 0, relatedModuleIds: [mA], reason: 'r' }] })
+      }
+      if (user.includes('拆成有序')) {
+        if (user.includes('「主线」')) {
+          return JSON.stringify({ children: [{ label: '阶段A', order: 0, kind: 'mainline', relatedFunctionIds: [0, 1], reason: '' }] })
+        }
+        return JSON.stringify({ children: [{ label: '叶', order: 0, kind: 'leaf', relatedFunctionIds: [0], reason: '' }] })
+      }
+      return '{}'
+    }
+    const tree = await generateFlows(graph, insight, { chat })
+    const mid = tree[0].children[0]
+    expect(mid.kind).toBe('mainline')
+    expect(mid.source).toBe('ai')
+    expect(mid.children.length).toBeGreaterThan(0) // 中间层被继续下钻
+    expect(mid.children[0].depth).toBe(2)
+  })
+
+  it('单个子树 AI 失败只降级该子树，兄弟仍为 ai', async () => {
+    const graph = fixtureGraph()
+    const insight = makeInsight(graph)
+    const [mA] = graph.modules.map((m) => m.id)
+    const chat: ChatFn = async (messages) => {
+      const user = messages[messages.length - 1].content
+      if (user.includes('业务主线根')) {
+        return JSON.stringify({ roots: [{ label: '主线', order: 0, relatedModuleIds: [mA], reason: 'r' }] })
+      }
+      if (user.includes('拆成有序')) {
+        if (user.includes('「主线」')) {
+          return JSON.stringify({
+            children: [
+              { label: 'A', order: 0, kind: 'mainline', relatedFunctionIds: [0, 1], reason: '' },
+              { label: 'B', order: 1, kind: 'mainline', relatedFunctionIds: [1], reason: '' }
+            ]
+          })
+        }
+        if (user.includes('「A」')) throw new Error('boom-A')
+        return JSON.stringify({ children: [{ label: 'b-leaf', order: 0, kind: 'leaf', relatedFunctionIds: [1], reason: '' }] })
+      }
+      return '{}'
+    }
+    const tree = await generateFlows(graph, insight, { chat })
+    const [A, B] = tree[0].children
+    expect(A.source).toBe('ai')
+    // A 子树递归失败（重试仍抛）→ heuristic 兜底或空，绝不为 ai
+    expect(A.children.every((c) => c.source === 'heuristic')).toBe(true)
+    // B 正常 → ai 叶子
+    expect(B.children.length).toBeGreaterThan(0)
+    expect(B.children[0].source).toBe('ai')
   })
 })

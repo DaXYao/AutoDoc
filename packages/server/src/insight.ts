@@ -51,7 +51,94 @@ const MAX_AI_CORES = 25
 const AI_MAX_TOKENS = 4000
 /** 划分输出含全部成员索引，体量最大，单独给更高上限防截断 */
 const PARTITION_MAX_TOKENS = 8000
+/**
+ * 核心判定/分类的输出随函数数线性增长，函数多时（reply-boost ~200+、Prism 414）
+ * 4000 tokens 会被截断致 JSON 不完整、extractJson 解析失败并静默回退静态中心度。
+ * 故单独给更大上限，并配合下方分批：单批函数数受控 → 单批响应体量有界 → 不截断。
+ */
+const CORE_JUDGMENT_MAX_TOKENS = 8000
+const CATEGORIES_MAX_TOKENS = 8000
+/** 单批喂给 AI 的函数数上限；超过则分批多次调用后合并（避免单次响应超 maxTokens 被截断） */
+const AI_CHUNK_SIZE = 120
+/** 单批解析失败/畸形的重试次数（模型输出非确定，偶发畸形 JSON，重试可显著降低整批降级概率） */
+const AI_PARSE_RETRIES = 2
+/** 结构化分析 pass（核心判定/分类）用较低 temperature，降低格式与结果波动 */
+const AI_STRUCTURE_TEMPERATURE = 0.1
 const CATEGORIES: FunctionCategory[] = ['business', 'implementation', 'utility']
+
+/** 核心判定分批结果：judgment 为各成功批的并集；failedBatches>0 表示部分批降级（不整体失败） */
+export interface CoreJudgmentResult {
+  judgment: CoreJudgment
+  batches: number
+  failedBatches: number
+}
+/** pending 分类分批结果：categories 为各成功批按 fnId 的合并 */
+export interface CategoriesResult {
+  categories: CategoryEnvelope
+  batches: number
+  failedBatches: number
+}
+
+/** 把数组切成每段至多 size 个的连续分批（保持顺序，便于全局 idx 稳定映射） */
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out
+}
+
+/**
+ * 鲁棒解析核心判定回复。模型输出格式非确定：时而 {"core":[{idx,reason}]}、时而顶层数组、
+ * 时而 idx 为字符串或键名为 index/i、时而对象键控 {"0":{reason}}。统一归一为 {idx,reason} 列表。
+ * ok=false 表示结构完全无法识别（extractJson 返回 null 或既非数组也非可识别对象），据此触发重试/降级。
+ * 仅接受 valid（本批全局 idx 集合）内的索引，过滤越批幻觉。
+ */
+function parseCoreResponse(
+  text: string,
+  valid: Set<number>
+): { ok: boolean; items: { idx: number; reason: string }[] } {
+  const parsed = extractJson<unknown>(text)
+  if (parsed === null) return { ok: false, items: [] }
+  const items: { idx: number; reason: string }[] = []
+  const push = (rawIdx: unknown, reason: unknown): void => {
+    const idx = typeof rawIdx === 'number' ? rawIdx : Number(rawIdx)
+    if (!Number.isInteger(idx) || !valid.has(idx)) return
+    items.push({ idx, reason: typeof reason === 'string' ? reason : '' })
+  }
+  if (Array.isArray(parsed)) {
+    for (const item of parsed) {
+      if (typeof item === 'number') push(item, '')
+      else if (item && typeof item === 'object') {
+        const o = item as Record<string, unknown>
+        push(o.idx ?? o.index ?? o.i, o.reason)
+      }
+    }
+    return { ok: true, items }
+  }
+  if (parsed && typeof parsed === 'object') {
+    const o = parsed as Record<string, unknown>
+    if (Array.isArray(o.core)) {
+      for (const item of o.core) {
+        if (typeof item === 'number') push(item, '')
+        else if (item && typeof item === 'object') {
+          const it = item as Record<string, unknown>
+          push(it.idx ?? it.index ?? it.i, it.reason)
+        }
+      }
+      return { ok: true, items }
+    }
+    // 对象键控：{"0":{"reason":..}} 或 {"0":".."}
+    const digitKeys = Object.keys(o).filter((k) => /^\d+$/.test(k))
+    if (digitKeys.length > 0) {
+      for (const k of digitKeys) {
+        const v = o[k]
+        const reason = v && typeof v === 'object' ? (v as Record<string, unknown>).reason : v
+        push(Number(k), reason)
+      }
+      return { ok: true, items }
+    }
+  }
+  return { ok: false, items: [] }
+}
 
 const hash8 = (s: string): string => createHash('sha256').update(s).digest('hex').slice(0, 8)
 
@@ -116,70 +203,120 @@ async function aiPartition(
   return { summary: parsed.summary ?? '', feedback, modules: parsed.modules }
 }
 
-/** AI 判定原本 pending（规则无法分类）的函数三分类 */
-async function aiCategories(graph: ProjectGraph): Promise<CategoryEnvelope> {
+/** AI 判定原本 pending（规则无法分类）的函数三分类；函数多时分批调用后按 fnId 合并 */
+export async function aiCategories(graph: ProjectGraph): Promise<CategoriesResult> {
   const ids = indexTable(graph)
   const pending = ids
     .map((id, i) => ({ id, i, fn: graph.nodes.get(id)! }))
     .filter((x) => x.fn.category === 'pending')
-  if (pending.length === 0) return {}
-  const lines = pending
-    .map((x) => `${x.i}|${fnLabel(x.fn)}|${graph.fileOf.get(x.id)}|${x.fn.purpose.slice(0, 50)}`)
-    .join('\n')
-  const user =
-    `以下函数未能被规则分类（索引|名称|文件|用途）：\n${lines}\n` +
-    `请为每个函数判定最合适的类别：business(对外入口/业务接口)、implementation(业务背后的具体实现)、utility(无业务状态的通用工具)。` +
-    `输出 JSON: {"<索引>":{"category":"business|implementation|utility","reason":"一句话理由"}}`
-  const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
-    maxTokens: AI_MAX_TOKENS
-  })
-  const raw = extractJson<Record<string, { category?: string; reason?: string }>>(text)
-  if (!raw) {
-    console.warn('[autodoc] AI 分类返回无法解析，pending 保持未分类')
-    return {}
-  }
+  if (pending.length === 0) return { categories: {}, batches: 0, failedBatches: 0 }
+  const batches = chunkArray(pending, AI_CHUNK_SIZE)
+  const multi = batches.length > 1
   const out: CategoryEnvelope = {}
-  for (const [key, v] of Object.entries(raw)) {
-    const idx = Number(key)
-    const item = pending.find((p) => p.i === idx)
-    if (!item || !v || !CATEGORIES.includes(v.category as FunctionCategory)) continue
-    out[item.id] = { category: v.category as FunctionCategory, reason: v.reason ?? '' }
+  let failedBatches = 0
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b]
+    // 仅接受本批范围内的 idx，避免 AI 幻觉越批污染
+    const batchIdx = new Set(batch.map((x) => x.i))
+    const byIdx = new Map(batch.map((x) => [x.i, x]))
+    const lines = batch
+      .map((x) => `${x.i}|${fnLabel(x.fn)}|${graph.fileOf.get(x.id)}|${x.fn.purpose.slice(0, 40)}`)
+      .join('\n')
+    const scope = multi ? `（第 ${b + 1}/${batches.length} 批）` : ''
+    const user =
+      `以下函数未能被规则分类${scope}（索引|名称|文件|用途）：\n${lines}\n` +
+      `请为每个函数判定最合适的类别：business(对外入口/业务接口)、implementation(业务背后的具体实现)、utility(无业务状态的通用工具)。` +
+      `键必须原样回填上面给出的索引数字。\n` +
+      `输出 JSON: {"<索引>":{"category":"business|implementation|utility","reason":"一句话理由"}}`
+    let done = false
+    for (let attempt = 1; attempt <= AI_PARSE_RETRIES && !done; attempt++) {
+      try {
+        const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+          maxTokens: CATEGORIES_MAX_TOKENS,
+          temperature: AI_STRUCTURE_TEMPERATURE
+        })
+        const raw = extractJson<Record<string, { category?: string; reason?: string }>>(text)
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          console.warn(
+            `[autodoc] AI 分类第 ${b + 1}/${batches.length} 批第 ${attempt} 次返回无法解析${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批（pending 保持未分类）'}`
+          )
+          continue
+        }
+        for (const [key, v] of Object.entries(raw)) {
+          const idx = Number(key)
+          if (!batchIdx.has(idx)) continue
+          const item = byIdx.get(idx)
+          if (!item || !v || !CATEGORIES.includes(v.category as FunctionCategory)) continue
+          out[item.id] = { category: v.category as FunctionCategory, reason: v.reason ?? '' }
+        }
+        done = true
+      } catch (e) {
+        console.warn(
+          `[autodoc] AI 分类第 ${b + 1}/${batches.length} 批第 ${attempt} 次失败${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}：${e instanceof Error ? e.message : String(e)}`
+        )
+      }
+    }
+    if (!done) failedBatches++
   }
-  return out
+  return { categories: out, batches: batches.length, failedBatches }
 }
 
-/** AI 按功能重要性判核心（而非调用次数）；返回 fnId → {core,reason} */
-async function aiCoreJudgment(graph: ProjectGraph): Promise<CoreJudgment> {
+/** AI 按功能重要性判核心（而非调用次数）；函数多时分批，各批 core idx 取并集合并 */
+export async function aiCoreJudgment(graph: ProjectGraph): Promise<CoreJudgmentResult> {
   const ids = indexTable(graph)
   const modName = new Map(graph.modules.map((m) => [m.id, m.name]))
-  const lines = ids
-    .map((id, i) => {
-      const fn = graph.nodes.get(id)!
-      const mid = graph.moduleIdsOf.get(id)?.[0]
-      const chains = graph.chainIdsOf.get(id)?.length ?? 0
-      const isIn = graph.inDegree.get(id) ?? 0
-      return `${i}|${fnLabel(fn)}|${modName.get(mid ?? '') ?? ''}|${fn.category}|${fn.purpose.slice(0, 40)}|入${isIn}/出${graph.outDegree.get(id) ?? 0}|${chains}链路|${isIn === 0 ? '入口' : '-'}`
-    })
-    .join('\n')
-  const user =
-    `以下是项目全部函数（索引|名称|模块|分类|用途|入度/出度|链路数|是否入口）：\n${lines}\n` +
-    `请选出「核心函数」：对系统功能起关键支撑/编排作用者（主流程入口、关键编排器、核心解析/生成/存储引擎）。` +
-    `判断依据是功能重要性而非调用次数；被频繁调用的琐碎工具/辅助函数不算核心。\n` +
-    `输出 JSON: {"core":[{"idx":0,"reason":"一句话为何核心"}]}`
-  const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
-    maxTokens: AI_MAX_TOKENS
-  })
-  const parsed = extractJson<{ core?: { idx?: number; reason?: string }[] }>(text)
-  if (!parsed || !Array.isArray(parsed.core)) {
-    console.warn('[autodoc] AI 核心判定返回无法解析，回退静态中心度')
-    return {}
+  // 精简索引行：只留判定必需字段（idx|名|模块|分类|用途截断|入/出度|链路数|是否入口）；全局 idx 保证分批后 ids[idx] 映射稳定
+  const rowOf = (id: string, i: number): string => {
+    const fn = graph.nodes.get(id)!
+    const mid = graph.moduleIdsOf.get(id)?.[0]
+    const chains = graph.chainIdsOf.get(id)?.length ?? 0
+    const isIn = graph.inDegree.get(id) ?? 0
+    const outD = graph.outDegree.get(id) ?? 0
+    return `${i}|${fnLabel(fn)}|${modName.get(mid ?? '') ?? ''}|${fn.category}|${fn.purpose.slice(0, 30)}|入${isIn}/出${outD}|${chains}链|${isIn === 0 ? '入口' : '-'}`
   }
+  const indexed = ids.map((id, i) => ({ id, i }))
+  const batches = chunkArray(indexed, AI_CHUNK_SIZE)
+  const multi = batches.length > 1
   const out: CoreJudgment = {}
-  for (const item of parsed.core) {
-    const id = ids[item.idx ?? -1]
-    if (id) out[id] = { core: true, reason: item.reason ?? '' }
+  let failedBatches = 0
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b]
+    const batchIdx = new Set(batch.map((x) => x.i))
+    const lines = batch.map((x) => rowOf(x.id, x.i)).join('\n')
+    const scope = multi ? `（第 ${b + 1}/${batches.length} 批，仅需在本批范围内判定）` : ''
+    const user =
+      `以下是项目函数${scope}（索引|名称|模块|分类|用途|入度/出度|链路数|是否入口）：\n${lines}\n` +
+      `请选出「核心函数」：对系统功能起关键支撑/编排作用者（主流程入口、关键编排器、核心解析/生成/存储引擎）。` +
+      `判断依据是功能重要性而非调用次数；被频繁调用的琐碎工具/辅助函数不算核心。idx 必须原样回填上面给出的索引。\n` +
+      `输出 JSON: {"core":[{"idx":0,"reason":"一句话为何核心"}]}`
+    let done = false
+    for (let attempt = 1; attempt <= AI_PARSE_RETRIES && !done; attempt++) {
+      try {
+        const text = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+          maxTokens: CORE_JUDGMENT_MAX_TOKENS,
+          temperature: AI_STRUCTURE_TEMPERATURE
+        })
+        const parsed = parseCoreResponse(text, batchIdx)
+        if (!parsed.ok) {
+          console.warn(
+            `[autodoc] AI 核心判定第 ${b + 1}/${batches.length} 批第 ${attempt} 次返回无法解析${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+          )
+          continue
+        }
+        for (const item of parsed.items) {
+          const id = ids[item.idx]
+          if (id) out[id] = { core: true, reason: item.reason }
+        }
+        done = true
+      } catch (e) {
+        console.warn(
+          `[autodoc] AI 核心判定第 ${b + 1}/${batches.length} 批第 ${attempt} 次失败${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}：${e instanceof Error ? e.message : String(e)}`
+        )
+      }
+    }
+    if (!done) failedBatches++
   }
-  return out
+  return { judgment: out, batches: batches.length, failedBatches }
 }
 
 /** 核心函数系统级角色 */
@@ -474,13 +611,18 @@ export async function refreshInsightAI(
     insight.partitionFeedback = ''
   }
 
-  // 2) AI 核心判定（按功能重要性，覆盖静态中心度）
+  // 2) AI 核心判定（按功能重要性，覆盖静态中心度；函数多时内部分批合并）
   let cj = opts.force ? undefined : cache.get<CoreJudgment>(fp, 'coreJudgment')
   if (!cj) {
     try {
-      cj = await aiCoreJudgment(graph)
+      const res = await aiCoreJudgment(graph)
+      cj = res.judgment
       if (Object.keys(cj).length > 0) cache.set(fp, 'coreJudgment', cj)
+      // 全部批次失败且无核心 → failed；否则 ok（含部分批降级，仍有有效核心）
       status.coreJudgment = Object.keys(cj).length > 0 ? 'ok' : 'failed'
+      if (res.failedBatches > 0) {
+        console.warn(`[autodoc] AI 核心判定 ${res.failedBatches}/${res.batches} 批降级（其余批已合并）`)
+      }
     } catch (e) {
       status.coreJudgment = 'failed'
       console.warn(`[autodoc] AI 核心判定失败，回退静态中心度：${e instanceof Error ? e.message : String(e)}`)
@@ -494,14 +636,18 @@ export async function refreshInsightAI(
     syncCore(insight, graph)
   }
 
-  // 3) pending 函数 AI 分类
+  // 3) pending 函数 AI 分类（函数多时内部分批按 fnId 合并）
   const hadPending = [...graph.nodes.values()].some((f) => f.category === 'pending')
   let cats = opts.force ? undefined : cache.get<CategoryEnvelope>(fp, 'categories')
   if (!cats) {
     try {
-      cats = await aiCategories(graph)
+      const res = await aiCategories(graph)
+      cats = res.categories
       if (Object.keys(cats).length > 0) cache.set(fp, 'categories', cats)
       status.categories = Object.keys(cats).length > 0 ? 'ok' : hadPending ? 'failed' : 'skipped'
+      if (res.failedBatches > 0) {
+        console.warn(`[autodoc] AI 分类 ${res.failedBatches}/${res.batches} 批降级（其余批已合并）`)
+      }
     } catch (e) {
       status.categories = 'failed'
       console.warn(`[autodoc] AI 分类失败：${e instanceof Error ? e.message : String(e)}`)

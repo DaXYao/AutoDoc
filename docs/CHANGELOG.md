@@ -12,6 +12,50 @@
 
 ## [未发布] 2026-09-24
 
+### fix(server): aiFlowChildren/aiFlowRoots 健壮性修复——JSON 截断修复 + 容错解析 + 重试 + 多层 prompt
+- **背景**：上条 fix 解决了 coreJudgment/categories 的解析失败问题，但 flows 生成（aiFlowRoots/aiFlowChildren）仍用同样脆弱的 `extractJson`，导致脉络树间歇降级——前端实测 reply-boost 的直接子节点几乎全是 leaf/heuristic（单函数），缺 mainline/branch 中间层，树被压扁成“根→叶子”。
+- **根因**：模型输出截断（响应命中 maxTokens 上限致 JSON 不完整）+ 偶发语法畸形（尾逗号、未闭合括号），旧 `extractJson` 仅做 `JSON.parse` 失败即返回 null，无修复能力；加上 FLOW_MAX_TOKENS=4000 偏小、无重试、prompt 未要求多层，导致 children 高频失败降级 heuristicChildren（只产 leaf）。
+- **内容**：
+  - **JSON 截断修复 `repairJsonSlice`**（[packages/server/src/ai.ts](../packages/server/src/ai.ts)）：去尾逗号 → 括号栈分析补缺闭合符 → 回退到最后完整元素再补缺；集成到 `extractJson` 作为 fallback，所有 AI pass 自动受益。
+  - **容错解析器 `parseRootsResponse` / `parseChildrenResponse`**（[packages/server/src/flow.ts](../packages/server/src/flow.ts)）：归一格式变体（顶层数组 / `{children:[...]}` / 键名差异 nodes/steps/items / 字段名 label↔name/title、order↔index/idx/seq、kind↔type/nodeType、字符串数字自动转换），只有完全无法归一才判 ok=false。
+  - **重试机制 `FLOW_PARSE_RETRIES=2`**：解析失败先重试（提示强调“仅输出严格 JSON、字段完整、勿截断”），两次均失败才降级 heuristicChildren。
+  - **更大 token 上限 `FLOW_MAX_TOKENS=8000`**：子节点含 label/summary/reason/kind/relatedFunctionIds/relatedChainIds 多字段，4000 不够。
+  - **多层 prompt**：requestChildren 提示新增【多层要求】段，明确要求“子步骤若仍是阶段应标 mainline/branch，不要直接落到单函数叶子；优先产出中间层”。
+  - **低温度 `FLOW_TEMPERATURE=0.1`** + `AI_STRUCTURE_TEMPERATURE=0.1`（insight.ts）：结构化分析 pass 统一用低温度降低格式波动。
+  - **诊断日志**：解析失败时打印 raw text 前 200 字符，便于定位残余失败原因。
+  - **测试**（[packages/server/test/flow.test.ts](../packages/server/test/flow.test.ts)，新增 6 用例）：parseChildrenResponse/parseRootsResponse 格式变体归一、子节点首次畸形重试后成功、产出含 mainline/branch 中间层的多级树、单子树失败只降级该子树。
+- **影响范围**：packages/server（ai.ts + flow.ts + insight.ts + test/flow.test.ts）。未改 classify.ts/role.ts；未引入新依赖；未改路由。
+- **实证**：`pnpm --filter @autodoc/server run test` **32 用例全绿**（aiChunking 12 + flow 20）、`@autodoc/core` **97 全绿**；shared-types/core/server typecheck 0 error；eslint 0 error。对 reply-boost 清缓存 + `POST /api/insight/ai {force:true}` 后：**aiStatus 全段 ok**（含 coreJudgment 恢复 ok）；树 80 节点，AI 中间层节点 **41**（修复前 ~18）、AI 叶子 17、启发式叶子 22（修复前 37）；depth 1-2 **100% AI**（修复前 depth 1 即有 heuristic 叶子）；主线展开示例：根“文本切块与反馈生成”→“文本切分与块识别”(mainline/ai)→“文本切分”(mainline/ai)→叶子、“块收敛与锚点生成”(mainline/ai)→“锚点生成与净化”(branch/ai)→“生成并净化锚点”(mainline/ai)→叶子，多层可下钻业务主线。
+- **风险/回滚点**：repairJsonSlice 为纯增强（原 JSON.parse 成功则不走修复），误判风险极低；多层 prompt + 低温度使每次 force 耗时增加（更多 AI 调用）但结果质量显著提升；回滚只需还原 ai.ts/flow.ts/insight.ts 并删除新增测试。
+
+---
+
+### fix(server): 修复 aiCoreJudgment/aiCategories 响应解析失败致核心函数回退静态中心度
+- **背景**：上一条 feat 记录的已知局限——`coreJudgment` 对 reply-boost 持续 `failed`，使 `isCore` 回退静态中心度、脉络叶子指向 `formatDateTime`/`downloadFile`/`isTauri` 这类高入度工具函数（即「核心函数不满意」根因）。本次定位并修复。
+- **根因（实测修正）**：reply-boost 实际仅 **55 函数**（非预估 ~200+），coreJudgment 单批、maxTokens 已足；对同一 prompt 连跑 6 次全部可解析（coreCount 在 9~22 间波动）——证明**并非 token 截断，而是模型输出格式非确定 + 偶发畸形 JSON**：`extractJson` 期望 `{"core":[{idx,reason}]}`，但模型时而又返回顶层数组 / `idx` 为字符串 / 键名 `index` / 对象键控 `{"0":{reason}}`，旧解析对这些变体一律判 null → 静默降级。categories 同因（pending 有值却返回空）。
+- **内容**（[packages/server/src/insight.ts](../packages/server/src/insight.ts)）：
+  - **分批 + 精简 + 更大上限**（防未来大项目截断）：新增 `CORE_JUDGMENT_MAX_TOKENS=8000`、`CATEGORIES_MAX_TOKENS=8000`、`AI_CHUNK_SIZE=120`；coreJudgment 每函数只喂判定必需字段（idx|名|模块|分类|用途截断|入/出度|链路数|是否入口）；函数数超 120 按批多次调用后合并（core idx 取并集、categories 按 fnId 合并），全局 idx 稳定映射 + `batchIdx` 过滤越批幻觉。
+  - **鲁棒解析 `parseCoreResponse`**：归一 5 种格式变体（`{core:[{idx}]}` / 顶层数组 / idx 字符串 / `index`·`i` 键 / 对象键控），`ok=false` 才判失败。
+  - **失败重试 `AI_PARSE_RETRIES=2`**：单批解析失败/畸形先重试再降级，显著降低偶发畸形导致的整批丢失；单批失败只降级该批（记 aiStatus/日志），不整体失败，保留「绝不崩溃、失败降级」语义。
+  - **测试**（[packages/server/test/aiChunking.test.ts](../packages/server/test/aiChunking.test.ts)，新增 12 用例）：mock deepseekChat 覆盖 250→3 批并集、单批失败只降级该批、过滤幻觉 idx、**Prism 414→4 批每批 ≤120 行（证明大规模不截断）**、格式变体容错、间歇畸形重试成功；categories 同理。
+- **影响范围**：packages/server（insight.ts + 新增 test/aiChunking.test.ts）。未改 classify.ts/role.ts；未引入新依赖；未改路由。
+- **实证**：`pnpm --filter @autodoc/server run test` **26 用例全绿**（aiChunking 12 + flow 14）、`@autodoc/core` **97 全绿**（无回归）；shared-types/core/server typecheck 均 0 error；改动文件定向 eslint 0 error。对 reply-boost `POST /api/insight/ai {force:true}`（249s）后 `GET /api/insight`：**`aiStatus.coreJudgment=ok`**（修复前 failed）、`categories=skipped`（pending=0，合理）、其余 ok；**`isCore` 18 个全部 `src=ai`** 且带业务理由（App 主入口、useDesktopIntegration 桌面集成编排器、chunkText 文本切块主引擎、makeAnchor 锚点生成、validateRulePack/loadPacks/persistPacks 规则包、listSessions/saveSession 会话持久化等），**`formatDateTime`/`downloadFile`/`isTauri` 已不在核心集合**；脉络叶子共 62 条，匹配上述工具函数者 **0 条**，叶子变为 types/segmentText/renderFeedback/键盘标记与收笔/校验规则包 等业务节点。
+- **Prism 规模**：以单测证明 414 函数分 4 批、每批 ≤120 行、单批响应体量有界不截断（未实际触发 Prism force 以省 API 成本/耗时）。
+- **风险/回滚点**：分批/重试仅增加 AI 调用次数（大项目），小项目单批行为不变；解析容错为纯增强，误判风险低（仅接受本批 idx、非法值过滤）；回滚只需还原 insight.ts 并删除 aiChunking.test.ts。
+
+---
+
+### feat(web): 洞察首页重构为「可展开的递归脉络树」+ AI 段状态徽标
+- **内容**：消费阶段一后端下发的 `insight.flows`（递归 FlowNode 树）与 `insight.aiStatus`（六段执行状态），把首页从「核心函数 pills + 模块 grid」的扁平呈现升级为可下钻的业务脉络树：
+  - **FlowTree.vue**（新增 [packages/web/src/components/FlowTree.vue](../packages/web/src/components/FlowTree.vue)）：递归组件，骨架照搬 FileTree.vue（props `{node,depth,autoExpandDepth,projectId}`、缩进 `depth*16+8`、▾/▸、`<FlowTree v-for child :depth=depth+1>` 自递归）；展开态用 `store/expand.ts` 的 `isExpanded/toggle` 持久化，key=`flow:${projectId}:${node.id}`（叶子详情 key=`flowleaf:...`）；四种 kind 分渲染——mainline/branch/module 显示序号徽标(order+1)+label+kind tag+source 徽标(ai/启发式)+summary+reason(title 悬浮)+关联模块深链，**同层有序兄弟间插入 `↓` 箭头**（复用 ModuleDetail/FunctionCard 的箭头 `<li>` 模式）；leaf 显示函数名(relatedFunctionIds[0] 经 findFunctionEntry 反查)+核心徽标+「展开详情」开关，展开时惰性取数 `findFunctionEntry→fileId→getFileView(Map 缓存)→view.functions.find(id)` 并**就地零改动渲染 `<FunctionCard :fn>`**，含 loading/未找到降级。
+  - **InsightHome.vue**（[packages/web/src/views/InsightHome.vue](../packages/web/src/views/InsightHome.vue)）：主区改为逐条渲染 `insight.flows` 根（多条主线间也用 `↓` 分隔）；**顶部新增 AI 段状态徽标**（六段固定顺序，ok=绿/failed=红加粗/skipped=橙，缺失=灰「未执行」，一眼看出哪段 AI 没成功）；保留 summary、「重新生成 AI」、「文件列表」入口、模块划分建议 textarea；**降级**：`insight?.flows` 缺失（旧缓存/静态导出/未生成）时 `v-if="!hasFlows"` 回退到原扁平呈现（核心函数 pills + 模块 grid 旧 markup 保留），不白屏/不报错。
+  - **utils/format.ts**（[packages/web/src/utils/format.ts](../packages/web/src/utils/format.ts)）：新增 `FLOW_KIND_LABELS`（主线/分支/模块/核心函数）、`FLOW_KIND_COLORS`、`AI_PASS_ORDER`/`AI_PASS_LABELS`/`AI_STATUS_META` 与 `TagType`/`FlowKind` 类型；默认展开深度读 `meta.ui.defaultExpand.flowAutoExpandDepth ?? 2`（可配置不写死）。
+- **影响范围**：packages/web（FlowTree.vue 新增、InsightHome.vue 重构、format.ts 扩展）。路由不变（`/`→InsightHome，保留 `/module/:id`）；FunctionCard.vue 零改动；未扩展 ExportData（静态模式 insight 为 null，自然降级）；未引入图形库/重型依赖。
+- **实证**：`pnpm --filter @autodoc/web run typecheck`（vue-tsc）**EXIT=0**；`pnpm --filter @autodoc/web run build`（vite build）**EXIT=0，2902 modules transformed**；改动文件定向 eslint 0 error（.vue 被 flat config ignore，靠 vue-tsc 兜底）。对 reply-boost `GET /api/insight` 实测：flows 6 条主线根（mainline/ai，各含 leaf/heuristic 子节点，relatedFunctionIds=1），aiStatus=`{partition:ok,coreJudgment:failed,categories:failed,coreRoles:ok,narratives:ok,flows:ok}`，徽标可正确高亮 failed 段。
+- **风险/回滚点**：flows/aiStatus 为可选字段，缺失即回退旧扁平 UI；回滚只需删除 FlowTree.vue 并还原 InsightHome.vue/format.ts。
+
+---
+
 ### feat: 递归脉络架构树后端（FlowNode 数据模型 + AI 多轮编排 + heuristic 兜底 + aiStatus 可观测性）
 - **内容**：把扁平的 modules/chains 组织成一条可递归下钻的业务主线（项目→核心功能模块→有序脉络节点→递归子节点→核心函数叶子）：
   - **shared-types**（[packages/shared-types/src/index.ts](../packages/shared-types/src/index.ts)）：新增 `FlowNode`（只存 id 引用，不复制函数/模块/链路数据；`kind: 'module'|'mainline'|'branch'|'leaf'`；`contentHash?: string` = sha256(relatedFunctionIds.sort().join())[:8]，子树增量用）；`ProjectInsight` 追加可选字段 `flows?: FlowNode[]`、`flowsGeneratedAt?`、`flowsFingerprint?`、`aiStatus?: Partial<Record<AiPassKey, AiPassStatus>>`（向后兼容）；`DefaultExpandConfig` 追加 `flowAutoExpandDepth?: number`；新增 `FlowConfig`/`InsightConfig`，`AutodocConfig` 追加 `insight?: InsightConfig`；
