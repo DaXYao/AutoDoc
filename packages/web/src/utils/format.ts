@@ -1,4 +1,17 @@
-import type { CallRole, ChangeType, FunctionCategory } from '@autodoc/shared-types'
+import type {
+  AiPassKey,
+  AiPassStatus,
+  CallRole,
+  ChangeType,
+  FlowNode,
+  FunctionCategory
+} from '@autodoc/shared-types'
+
+/** naive-ui n-tag 的 type 取值（避免各处重复字面量联合） */
+export type TagType = 'default' | 'error' | 'info' | 'success' | 'warning' | 'primary'
+
+/** 脉络树节点类型 */
+export type FlowKind = FlowNode['kind']
 
 export const CATEGORY_LABELS: Record<FunctionCategory, string> = {
   business: '业务接口',
@@ -33,6 +46,49 @@ export const ROLE_COLORS: Record<CallRole, { dot: string; text: string; border: 
   core: { dot: 'bg-green-500', text: 'text-green-700', border: 'border-green-300' },
   validation: { dot: 'bg-gray-500', text: 'text-gray-700', border: 'border-gray-300' },
   exception: { dot: 'bg-red-500', text: 'text-red-600', border: 'border-red-300' }
+}
+
+/** 脉络树节点 kind → 中文标签 */
+export const FLOW_KIND_LABELS: Record<FlowKind, string> = {
+  mainline: '主线',
+  branch: '分支',
+  module: '模块',
+  leaf: '核心函数'
+}
+
+/** 脉络树节点 kind → n-tag 配色（主线绿 / 分支橙 / 模块蓝 / 叶子灰） */
+export const FLOW_KIND_COLORS: Record<FlowKind, TagType> = {
+  mainline: 'success',
+  branch: 'warning',
+  module: 'info',
+  leaf: 'default'
+}
+
+/** AI 各段执行状态的展示顺序 */
+export const AI_PASS_ORDER: AiPassKey[] = [
+  'partition',
+  'coreJudgment',
+  'categories',
+  'coreRoles',
+  'narratives',
+  'flows'
+]
+
+/** AI 各段中文标签 */
+export const AI_PASS_LABELS: Record<AiPassKey, string> = {
+  partition: '模块划分',
+  coreJudgment: '核心判定',
+  categories: '三分类',
+  coreRoles: '核心角色',
+  narratives: '链路叙事',
+  flows: '脉络树'
+}
+
+/** AI 段状态 → 标签文案与配色（failed 显眼红 / skipped 橙 / ok 绿） */
+export const AI_STATUS_META: Record<AiPassStatus, { label: string; type: TagType }> = {
+  ok: { label: '成功', type: 'success' },
+  failed: { label: '失败', type: 'error' },
+  skipped: { label: '跳过', type: 'warning' }
 }
 
 /** ISO 时间 → 本地「年-月-日 时:分」 */

@@ -3,6 +3,8 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { appState, ensureInsightAI, findFunctionEntry, regenerateInsightAI, repartitionInsight } from '../store/app'
+import { AI_PASS_LABELS, AI_PASS_ORDER, AI_STATUS_META } from '../utils/format'
+import FlowTree from '../components/FlowTree.vue'
 
 const router = useRouter()
 const message = useMessage()
@@ -52,6 +54,29 @@ async function handleRepartition(): Promise<void> {
 }
 
 const insight = computed(() => appState.insight)
+
+/** 递归脉络树：有多条主线根时逐条渲染；缺失则回退扁平呈现 */
+const flows = computed(() => insight.value?.flows ?? [])
+const hasFlows = computed(() => flows.value.length > 0)
+
+/** 脉络树默认自动展开深度（可配置，不写死） */
+const flowAutoExpandDepth = computed(
+  () => appState.meta?.ui?.defaultExpand?.flowAutoExpandDepth ?? 2
+)
+
+/** 展开态持久化命名空间：区分不同项目 */
+const flowProjectId = computed(() => appState.activeProjectId ?? 'static')
+
+/** AI 各段执行状态（可观测性）：六段固定顺序，status 缺失视为未执行 */
+const aiPasses = computed(() => {
+  const st = insight.value?.aiStatus
+  if (!st) return []
+  return AI_PASS_ORDER.map((key) => ({
+    key,
+    label: AI_PASS_LABELS[key],
+    status: st[key]
+  }))
+})
 
 /** 全项目核心函数（按 coreScore 降序） */
 const coreFunctions = computed(() => {
@@ -139,6 +164,26 @@ function goModule(id: string): void {
       <!-- 项目概述 -->
       <p v-if="insight.summary" class="text-sm text-gray-600 mb-4">{{ insight.summary }}</p>
 
+      <!-- AI 各段执行状态徽标：一眼看出哪段 AI 没成功（failed/skipped 显眼） -->
+      <section v-if="aiPasses.length" class="mb-4">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-xs text-gray-400 mr-1">AI 段状态：</span>
+          <n-tag
+            v-for="p in aiPasses"
+            :key="p.key"
+            size="small"
+            :bordered="false"
+            :type="p.status ? AI_STATUS_META[p.status].type : 'default'"
+            :class="p.status === 'failed' || p.status === 'skipped' ? 'font-semibold' : ''"
+            :title="p.status ? `${p.label}：${AI_STATUS_META[p.status].label}` : `${p.label}：未执行`"
+          >
+            {{ p.label }}
+            <span class="opacity-70">·</span>
+            {{ p.status ? AI_STATUS_META[p.status].label : '未执行' }}
+          </n-tag>
+        </div>
+      </section>
+
       <!-- 模块划分反馈（AI 主导划分 + 用户建议迭代） -->
       <section v-if="insight.aiEnabled" class="mb-5 rounded-lg border border-gray-200 bg-white px-4 py-3">
         <div class="flex items-center gap-2 mb-2">
@@ -163,6 +208,33 @@ function goModule(id: string): void {
         </div>
       </section>
 
+      <!-- ============ 递归脉络架构树（flows 就绪时的主区） ============ -->
+      <section v-if="hasFlows" class="mb-5">
+        <h3 class="text-sm font-semibold text-gray-700 mb-2">
+          业务脉络（{{ flows.length }} 条主线）
+        </h3>
+        <div class="rounded-lg border border-gray-200 bg-white py-2">
+          <template v-for="(root, i) in flows" :key="root.id">
+            <FlowTree
+              :node="root"
+              :depth="0"
+              :auto-expand-depth="flowAutoExpandDepth"
+              :project-id="flowProjectId"
+            />
+            <div
+              v-if="i < flows.length - 1"
+              class="flex items-center py-1 my-1 border-t border-dashed border-gray-100"
+              :style="{ paddingLeft: '8px' }"
+              aria-hidden="true"
+            >
+              <span class="w-3 flex justify-center text-gray-300 text-xs leading-none">↓</span>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- ============ 降级：flows 缺失（旧缓存/静态导出/未生成）时回退扁平呈现 ============ -->
+      <template v-if="!hasFlows">
       <!-- 核心函数 -->
       <section v-if="coreFunctions.length" class="mb-5">
         <h3 class="text-sm font-semibold text-gray-700 mb-2">
@@ -213,6 +285,7 @@ function goModule(id: string): void {
           </button>
         </div>
       </section>
+      </template>
     </template>
   </div>
 </template>
