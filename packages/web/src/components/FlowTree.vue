@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import type { FlowNode, FunctionDocView } from '@autodoc/shared-types'
-import { appState, findFunctionEntry, getFileView } from '../store/app'
+import { appState, findFunctionEntry, getFileView, invalidateFileView } from '../store/app'
 import { isExpanded, toggle } from '../store/expand'
 import { FLOW_KIND_COLORS, FLOW_KIND_LABELS } from '../utils/format'
 import FunctionCard from './FunctionCard.vue'
@@ -26,16 +26,67 @@ const router = useRouter()
 const isLeaf = computed(() => props.node.kind === 'leaf')
 const hasChildren = computed(() => props.node.children.length > 0)
 
+/**
+ * 非 leaf kind 但 children=[] 且 relatedFunctionIds 非空（如达到 maxDepth 停止下钻的 mainline）：
+ * 把关联函数合成为 leaf 节点，复用现有 leaf 渲染与取数链路，在其下平铺呈现（非空叶子）。
+ */
+const syntheticLeaves = computed<FlowNode[]>(() => {
+  if (isLeaf.value || props.node.children.length > 0) return []
+  return props.node.relatedFunctionIds.map((fnId, i) => ({
+    id: `${props.node.id}#fn${i}`,
+    parentId: props.node.id,
+    label: '',
+    summary: '',
+    order: i,
+    kind: 'leaf' as const,
+    depth: props.node.depth + 1,
+    relatedModuleIds: [],
+    relatedFunctionIds: [fnId],
+    relatedChainIds: [],
+    source: props.node.source,
+    reason: '',
+    children: []
+  }))
+})
+
+/**
+ * 合成叶子平铺上限：branch/mainline 的 relatedFunctionIds 可达 30，且被 maxDepth 截断的节点往往候选最多；
+ * 每行是一个自递归实例（各带 detailOpen/watch/取数），一次性平铺会撑爆视图并放大 mount 成本。
+ * 默认只显前 8 个，超出部分用「还有 N 个函数」开关按需展开（持久化到 store/expand.ts）。
+ */
+const SYNTHETIC_LEAF_LIMIT = 8
+const synKey = computed(() => `flowsyn:${props.projectId}:${props.node.id}`)
+const synExpanded = computed(() => isExpanded(synKey.value, false))
+const visibleSyntheticLeaves = computed(() =>
+  synExpanded.value ? syntheticLeaves.value : syntheticLeaves.value.slice(0, SYNTHETIC_LEAF_LIMIT)
+)
+const hiddenSyntheticCount = computed(() =>
+  Math.max(0, syntheticLeaves.value.length - SYNTHETIC_LEAF_LIMIT)
+)
+
+function toggleSyn(): void {
+  toggle(synKey.value, false)
+}
+
 /** 缩进：depth*16+8（比 FileTree 略宽，容纳序号徽标） */
 const indent = computed(() => `${props.depth * 16 + 8}px`)
 
 /* ------------------------- 展开态（子节点）持久化 ------------------------- */
 const nodeKey = computed(() => `flow:${props.projectId}:${props.node.id}`)
-const nodeFallback = props.depth < props.autoExpandDepth
-const expanded = computed(() => isExpanded(nodeKey.value, nodeFallback))
+/** autoExpandDepth 来自异步加载的 meta 配置，必须响应式；否则后续变化不更新默认展开态 */
+const nodeFallback = computed(() => props.depth < props.autoExpandDepth)
+const expanded = computed(() => isExpanded(nodeKey.value, nodeFallback.value))
 
 function toggleNode(): void {
-  if (hasChildren.value) toggle(nodeKey.value, nodeFallback)
+  if (hasChildren.value) toggle(nodeKey.value, nodeFallback.value)
+}
+
+/** 行键盘可访问：仅当焦点在行本身（非内部深链按钮）时用 Enter/Space 触发展开 */
+function onRowKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  if (event.target !== event.currentTarget) return
+  event.preventDefault()
+  toggleNode()
 }
 
 /* ------------------------- 叶子：函数详情就地展开 ------------------------- */
@@ -87,6 +138,28 @@ function toggleDetail(): void {
   if (isExpanded(detailKey.value, false)) void loadFn()
 }
 
+/**
+ * m2 修复：刷新后 detailOpen 可能来自 localStorage 为 true，但 fnView 尚未加载，
+ * 三个渲染分支（loading/error/view）全不命中 ⇒ 详情区渲染成空白。
+ * 监听 detailOpen（immediate）确保已展开的叶子在挂载时自动取数。
+ */
+watch(
+  detailOpen,
+  (open) => {
+    if (open) void loadFn()
+  },
+  { immediate: true }
+)
+
+/** m3 修复：叶子内 FunctionCard 批注增删改后，失效文件视图缓存并重新取数，保持联动刷新 */
+function handleFnChanged(): void {
+  const e = entry.value
+  if (e) invalidateFileView(e.fileId)
+  fnView.value = null
+  fnError.value = null
+  void loadFn()
+}
+
 function goFunction(): void {
   const e = entry.value
   if (!e) return
@@ -107,11 +180,14 @@ function truncate(text: string, max = 90): string {
   <div class="select-none">
     <!-- ============ 非叶子节点行：mainline / branch / module ============ -->
     <template v-if="!isLeaf">
-      <button
+      <div
         class="group w-full flex items-start gap-2 rounded px-2 py-1.5 text-left transition hover:bg-gray-50"
         :class="hasChildren ? 'cursor-pointer' : 'cursor-default'"
         :style="{ paddingLeft: indent }"
+        :role="hasChildren ? 'button' : undefined"
+        :tabindex="hasChildren ? 0 : undefined"
         @click="toggleNode"
+        @keydown="onRowKeydown"
       >
         <span class="text-gray-400 text-xs w-3 shrink-0 leading-5">
           {{ hasChildren ? (expanded ? '▾' : '▸') : '·' }}
@@ -162,10 +238,10 @@ function truncate(text: string, max = 90): string {
             依据：{{ truncate(node.reason) }}
           </p>
         </div>
-      </button>
+      </div>
 
-      <!-- 子节点：同层有序兄弟之间插入 ↓ 箭头，体现「沿使用流程有序」 -->
-      <div v-show="expanded">
+      <!-- 真实子节点：同层有序兄弟之间插入 ↓ 箭头，体现「沿使用流程有序」 -->
+      <div v-if="hasChildren" v-show="expanded">
         <template v-for="(child, i) in node.children" :key="child.id">
           <FlowTree
             :node="child"
@@ -182,6 +258,44 @@ function truncate(text: string, max = 90): string {
             <span class="w-3 flex justify-center text-gray-300 text-xs leading-none">↓</span>
           </div>
         </template>
+      </div>
+
+      <!-- 无子节点但有关联函数（达到 maxDepth 停止下钻）：限量平铺为 leaf，超出可折叠 -->
+      <div v-else-if="syntheticLeaves.length > 0">
+        <template v-for="(leaf, i) in visibleSyntheticLeaves" :key="leaf.id">
+          <FlowTree
+            :node="leaf"
+            :depth="depth + 1"
+            :auto-expand-depth="autoExpandDepth"
+            :project-id="projectId"
+          />
+          <div
+            v-if="i < visibleSyntheticLeaves.length - 1"
+            class="flex items-center py-0.5"
+            :style="{ paddingLeft: `${(depth + 1) * 16 + 8}px` }"
+            aria-hidden="true"
+          >
+            <span class="w-3 flex justify-center text-gray-300 text-xs leading-none">↓</span>
+          </div>
+        </template>
+        <!-- 超上限：折叠开关，避免大节点一次性平铺上百行不可收起内容 -->
+        <button
+          v-if="hiddenSyntheticCount > 0"
+          class="mt-0.5 text-[11px] text-blue-600 hover:underline"
+          :style="{ marginLeft: `${(depth + 1) * 16 + 8}px` }"
+          @click="toggleSyn"
+        >
+          {{ synExpanded ? '收起' : `还有 ${hiddenSyntheticCount} 个函数` }} {{ synExpanded ? '▾' : '▸' }}
+        </button>
+      </div>
+
+      <!-- 异常空壳节点（children=[] 且 relatedFunctionIds=[]）：低调占位，不报错 -->
+      <div
+        v-else
+        class="flex items-center py-1 text-[11px] text-gray-400 italic"
+        :style="{ paddingLeft: `${(depth + 1) * 16 + 8}px` }"
+      >
+        已达深度上限 / 无下钻内容
       </div>
     </template>
 
@@ -226,7 +340,7 @@ function truncate(text: string, max = 90): string {
       <div v-if="detailOpen" class="my-1" :style="{ marginLeft: indent }">
         <n-spin v-if="fnLoading" size="small" />
         <n-alert v-else-if="fnError" type="warning" size="small" :title="fnError" class="mr-2" />
-        <FunctionCard v-else-if="fnView" :fn="fnView" class="mr-2" />
+        <FunctionCard v-else-if="fnView" :fn="fnView" class="mr-2" @changed="handleFnChanged" />
       </div>
     </template>
   </div>

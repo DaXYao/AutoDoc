@@ -84,9 +84,10 @@ export const AI_PASS_LABELS: Record<AiPassKey, string> = {
   flows: '脉络树'
 }
 
-/** AI 段状态 → 标签文案与配色（failed 显眼红 / skipped 橙 / ok 绿） */
+/** AI 段状态 → 标签文案与配色（failed 显眼红 / partial 蓝 / skipped 橙 / ok 绿） */
 export const AI_STATUS_META: Record<AiPassStatus, { label: string; type: TagType }> = {
   ok: { label: '成功', type: 'success' },
+  partial: { label: '部分成功', type: 'info' },
   failed: { label: '失败', type: 'error' },
   skipped: { label: '跳过', type: 'warning' }
 }

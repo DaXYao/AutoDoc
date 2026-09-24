@@ -164,7 +164,7 @@ function goModule(id: string): void {
       <!-- 项目概述 -->
       <p v-if="insight.summary" class="text-sm text-gray-600 mb-4">{{ insight.summary }}</p>
 
-      <!-- AI 各段执行状态徽标：一眼看出哪段 AI 没成功（failed/skipped 显眼） -->
+      <!-- AI 各段执行状态徽标：一眼看出哪段 AI 未完全生效（failed/skipped/partial 显眼） -->
       <section v-if="aiPasses.length" class="mb-4">
         <div class="flex flex-wrap items-center gap-2">
           <span class="text-xs text-gray-400 mr-1">AI 段状态：</span>
@@ -174,9 +174,10 @@ function goModule(id: string): void {
             size="small"
             :bordered="false"
             :type="p.status ? AI_STATUS_META[p.status].type : 'default'"
-            :class="p.status === 'failed' || p.status === 'skipped' ? 'font-semibold' : ''"
+            :class="p.status && p.status !== 'ok' ? 'font-semibold' : ''"
             :title="p.status ? `${p.label}：${AI_STATUS_META[p.status].label}` : `${p.label}：未执行`"
           >
+            <span v-if="p.status === 'partial'" class="mr-0.5" aria-hidden="true">◐</span>
             {{ p.label }}
             <span class="opacity-70">·</span>
             {{ p.status ? AI_STATUS_META[p.status].label : '未执行' }}
