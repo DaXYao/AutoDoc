@@ -1264,7 +1264,7 @@ describe('根级配额：任何根都非空壳且总数不超上限', () => {
     // 每根都得到子树（不再出现 roots 1~N 从未被处理）
     expect(sizes.every((s) => s > 0)).toBe(true)
     // 公平：最大子树不超单根配额（12-3 根后均分 = 3）
-    expect(Math.max(...sizes)).toBeLessThanOrEqual(perRootQuota(12, 3, 3, 0))
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(perRootQuota(12, 3, 3))
     expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThanOrEqual(1)
     expect(countNodes(tree)).toBeLessThanOrEqual(caps.maxNodesTotal)
   })
@@ -1293,16 +1293,16 @@ describe('根级配额：任何根都非空壳且总数不超上限', () => {
     expect(stats.rootBackfills).toBe(4)
   })
 
-  it('perRootQuota：均分剩余额度、余数给靠前的根、累加不超发', () => {
+  it('perRootQuota：均分剩余额度、余数给当前根、累加不超发', () => {
     expect(perRootQuota(120, 5)).toBe(24)
-    expect(perRootQuota(10, 3, 0, 0)).toBe(4) // floor(10/3)=3 + 余数给靠前根
-    expect(perRootQuota(10, 3, 0, 1)).toBe(3)
-    expect(perRootQuota(10, 3, 0, 2)).toBe(3)
-    expect(perRootQuota(10, 2, 4)).toBe(3) // 已用额度参与计算
+    expect(perRootQuota(10, 3, 0)).toBe(4) // ceil(10/3)=4
+    expect(perRootQuota(10, 3, 4)).toBe(2) // ceil(6/3)=2
+    expect(perRootQuota(10, 3, 8)).toBe(1) // ceil(2/3)=1
+    expect(perRootQuota(10, 2, 4)).toBe(3) // ceil(6/2)=3
     expect(perRootQuota(4, 4, 4)).toBe(0) // 额度耗尽 → 该根走回填（不新增节点）
     // 逐根重算（未用完的配额流向后续根）：总和仍 ≤ maxNodesTotal
     let used = 0
-    for (let i = 0; i < 5; i++) used += perRootQuota(13, 5 - i, used, 0)
+    for (let i = 0; i < 5; i++) used += perRootQuota(13, 5 - i, used)
     expect(used).toBeLessThanOrEqual(13)
   })
 })
@@ -1753,5 +1753,160 @@ describe('n-R2：抢救出的信封不写缓存', () => {
     const before = childCalls
     await generateFlows(graph, insight, deps)
     expect(childCalls).toBeGreaterThan(before)
+  })
+})
+
+/* ------------------------- M1：forcePartition 后 loadInsight('') 树仍可见 ------------------------- */
+
+describe('M1：采纳划分建议后 loadInsight(\'\') 树仍可见且同源', () => {
+  beforeEach(() => {
+    vi.mocked(deepseekChat).mockReset()
+  })
+
+  it('forcePartition(feedback) 生成新树后，loadInsight(\'\') 返回非空 flows 且模块与树同源', async () => {
+    process.env.DEEPSEEK_API_KEY = 'test-key-not-real'
+    vi.mocked(deepseekChat).mockImplementation(async (messages) => reply(routerFake(messages)))
+    const tmp = freshDir('autodoc-flow-m1-')
+    const service = await makeService(tmp)
+
+    // 先生成一次基线树（无 feedback）
+    const base = await refreshInsightAI(service, { force: true })
+    expect(base.insight.flows!.length).toBeGreaterThan(0)
+
+    // 模拟用户“采纳建议”：forcePartition + feedback
+    const feedback = '把回复获取和文本生成合并为一个模块'
+    const afterPartition = await refreshInsightAI(service, { forcePartition: true, feedback })
+    expect(afterPartition.insight.flows!.length).toBeGreaterThan(0)
+    expect(afterPartition.insight.partitionFeedback).toBe(feedback)
+    const newModules = afterPartition.insight.modules
+
+    // 关键断言：默认页面加载（无 feedback）仍能看到树
+    const loaded = loadInsight(service, '')
+    expect(loaded.insight.flows).toBeDefined()
+    expect(loaded.insight.flows!.length).toBeGreaterThan(0)
+    // 模块列表与树同源（采纳建议后的划分）
+    expect(loaded.insight.partitionFeedback).toBe(feedback)
+    expect(loaded.insight.modules.map(m => m.id)).toEqual(newModules.map(m => m.id))
+    // aiStatus.flows 不应为 skipped（basis 匹配）
+    expect(loaded.insight.aiStatus?.flows).not.toBe('skipped')
+    service.storage.close()
+  })
+
+  it('树存在但 basis 不符时 aiStatus.flows=skipped（stale 信号）', async () => {
+    process.env.DEEPSEEK_API_KEY = 'test-key-not-real'
+    vi.mocked(deepseekChat).mockImplementation(async (messages) => reply(routerFake(messages)))
+    const tmp = freshDir('autodoc-flow-m1-stale-')
+    const service = await makeService(tmp)
+    const first = await refreshInsightAI(service, { force: true })
+    const fp = first.insight.graphFingerprint
+    const cache = new AiCache(dirname(service.storage.dataPath))
+    // 篡改 basis 为不匹配值（模拟划分变更但树未重生成）
+    const snap = cache.get<Record<string, unknown>>(fp, 'flows:tree')!
+    cache.set(fp, 'flows:tree', { ...snap, basis: 'stale0000' })
+    const loaded = loadInsight(service, '')
+    expect(loaded.insight.flows ?? []).toHaveLength(0)
+    expect(loaded.insight.aiStatus?.flows).toBe('skipped')
+    service.storage.close()
+  })
+})
+
+/* ------------------------- m1：纯阶段节点不参与去重 ------------------------- */
+
+describe('m1：纯阶段节点(relFns=[])同名不同父不被去重', () => {
+  it('同根子树内、不同父下的同 label 纯阶段节点都保留', async () => {
+    const graph = fixtureGraph()
+    const insight = makeInsight(graph)
+    const [mA] = graph.modules.map((m) => m.id)
+    // 真实风险场景：同一根子树里 seenNodeKeys 是共享的（经 childDeps 递归传递），
+    // 两个不同分支各自拆出一个同名泛化阶段「初始化」（relFns=[]）——
+    // 修复前键退化为 "初始化|" 使第二个被误判重复 continue，且 overflow.push(空) 是 no-op（零补偿）
+    const chat: ChatFn = async (messages) => {
+      const user = messages[messages.length - 1].content
+      if (user.includes('业务主线根')) {
+        return JSON.stringify({ roots: [{ label: '主线A', order: 0, relatedModuleIds: [mA], reason: 'r' }] })
+      }
+      if (user.includes('「主线A」')) {
+        return JSON.stringify({
+          children: [
+            { label: '分支甲', summary: 's', order: 0, kind: 'branch', relatedFunctionIds: [0], relatedChainIds: [], reason: 'r' },
+            { label: '分支乙', summary: 's', order: 1, kind: 'branch', relatedFunctionIds: [1], relatedChainIds: [], reason: 'r' }
+          ]
+        })
+      }
+      // 分支甲 / 分支乙 各自都拆出一个同名纯阶段节点
+      return JSON.stringify({
+        children: [
+          { label: '初始化', summary: 's', order: 0, kind: 'branch', relatedFunctionIds: [], relatedChainIds: [], reason: '阶段' },
+          { label: '收尾', summary: 's', order: 1, kind: 'leaf', relatedFunctionIds: [0], relatedChainIds: [], reason: 'r' }
+        ]
+      })
+    }
+    const tree = await generateFlows(graph, insight, { chat })
+    expect(tree).toHaveLength(1)
+    const branches = tree[0].children.filter((c) => c.label === '分支甲' || c.label === '分支乙')
+    expect(branches).toHaveLength(2)
+    for (const b of branches) {
+      // 两个分支下的「初始化」纯阶段节点都应保留（不被跨父去重误伤）
+      expect(b.children.filter((c) => c.label === '初始化')).toHaveLength(1)
+    }
+  })
+
+  it('同一父下同 label 纯阶段节点也保留（不误删）', async () => {
+    const graph = fixtureGraph()
+    const insight = makeInsight(graph)
+    const [mA] = graph.modules.map((m) => m.id)
+    const chat: ChatFn = async (messages) => {
+      const user = messages[messages.length - 1].content
+      if (user.includes('业务主线根')) {
+        return JSON.stringify({ roots: [{ label: '主线', order: 0, relatedModuleIds: [mA], reason: 'r' }] })
+      }
+      // 同一父下两个同名纯阶段 branch
+      return JSON.stringify({
+        children: [
+          { label: '校验', summary: 's1', order: 0, kind: 'branch', relatedFunctionIds: [], relatedChainIds: [], reason: 'r' },
+          { label: '校验', summary: 's2', order: 1, kind: 'branch', relatedFunctionIds: [], relatedChainIds: [], reason: 'r' },
+          { label: '完成', summary: 's', order: 2, kind: 'leaf', relatedFunctionIds: [0], relatedChainIds: [], reason: 'r' }
+        ]
+      })
+    }
+    const tree = await generateFlows(graph, insight, { chat })
+    const stageNodes = tree[0].children.filter(c => c.label === '校验')
+    // 纯阶段节点不参与去重 → 同父下两个同名阶段都保留（修复前第二个会被 dedup continue 静默吞掉）
+    expect(stageNodes).toHaveLength(2)
+    // 且都不是空壳（m-R2 清扫会回填或递归出子树）
+    for (const s of stageNodes) {
+      expect(s.children.length > 0 || s.relatedFunctionIds.length > 0).toBe(true)
+    }
+  })
+})
+
+/* ------------------------- m4：roots 抢救信封不入缓存 ------------------------- */
+
+describe('m4：roots salvaged 信封不写缓存', () => {
+  it('截断抢救的 roots 不入缓存，下次重生成重新请求 AI', async () => {
+    const graph = fixtureGraph()
+    const insight = makeInsight(graph)
+    const dir = freshDir('autodoc-flow-roots-salvage-')
+    const cache = new AiCache(dir)
+    const [mA] = graph.modules.map((m) => m.id)
+    let rootsCalls = 0
+    const cutRoots =
+      '{"roots":[{"label":"主线A","order":0,"relatedModuleIds":["' + mA + '"],"reason":"r"},' +
+      '{"label":"主线B","order":1,"relatedModuleIds":["' + mA + '"],"rea'
+    const chat: ChatFn = async (messages) => {
+      const user = messages[messages.length - 1].content
+      if (user.includes('业务主线根')) {
+        rootsCalls++
+        return reply(cutRoots, true) // 截断
+      }
+      return JSON.stringify({ children: [{ label: 'c', order: 0, kind: 'leaf', relatedFunctionIds: [0], reason: 'r' }] })
+    }
+    const deps = { chat, cache, fingerprint: graph.fingerprint, caps: DEFAULT_FLOW_CAPS }
+    const tree1 = await generateFlows(graph, insight, deps)
+    expect(rootsCalls).toBe(1)
+    expect(tree1.length).toBeGreaterThanOrEqual(1) // 抢救出至少 1 个根
+    // 抢救信封不应写入缓存：再次生成应重新请求 AI
+    await generateFlows(graph, insight, deps)
+    expect(rootsCalls).toBeGreaterThan(1)
   })
 })

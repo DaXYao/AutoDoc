@@ -605,7 +605,12 @@ export function loadInsight(service: DocService, feedback = ''): InsightBundle {
   const cache = new AiCache(dirname(service.storage.dataPath))
   const fp = graph.fingerprint
   let touched = false
-  const p = cache.get<PartitionEnvelope>(fp, `partition:${hash8(feedback)}`)
+  // M1：feedback='' 时优先用 partition:latest（与 refresh 的 previous 语义对齐），
+  // 使"采纳建议后"的默认页面加载能读到最新划分，避免树因 basis 不符被永久忽略
+  const p = (feedback === ''
+    ? cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? cache.get<PartitionEnvelope>(fp, `partition:${hash8(feedback)}`)
+    : cache.get<PartitionEnvelope>(fp, `partition:${hash8(feedback)}`)
+  )
   if (p) {
     applyPartition(graph, toPartition(graph, p))
     rebuildInsightFromGraph(insight, graph, p.summary)
@@ -651,6 +656,9 @@ export function loadInsight(service: DocService, feedback = ''): InsightBundle {
     flowsStatus = flowsTree.aiOk
       ? flowsStatusOf(flowsTree.tree, { quiet: true, rootBackfills: flowsTree.rootBackfills, salvagedCount: flowsTree.salvagedCount })
       : 'failed'
+  } else if (flowsTree && flowsTree.tree.length > 0 && !basisMatch) {
+    // M1：树存在但 basis 不符（划分已变更）→ 显式 stale 信号，前端可据此提示"待重生成"
+    flowsStatus = 'skipped'
   }
   // 各 AI 段状态回读（可观测性，独立于 aiGenerated）
   const cachedStatus = cache.get<Partial<Record<AiPassKey, AiPassStatus>>>(fp, 'aiStatus')

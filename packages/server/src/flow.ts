@@ -528,7 +528,7 @@ export async function aiFlowRoots(
   const rootsKey = `flows:roots:${flowsBasis(graph)}`
   const cached = cacheGet<RootsEnvelope>(deps, rootsKey)
   const env = cached ?? (await requestRoots(graph, insight, deps))
-  if (!cached) cacheSet(deps, rootsKey, env)
+  if (!cached && !env.salvaged) cacheSet(deps, rootsKey, env) // m4：抢救信封不入缓存（与 children 对称）
 
   const validModuleIds = new Set(graph.modules.map((m) => m.id))
   const sorted = [...env.roots].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
@@ -793,8 +793,11 @@ export async function aiFlowChildren(
       }
     }
     // 问题B(b)：(label + sorted relatedFunctionIds) 去重，避免同函数在多兄弟/多层重复成节点
-    const dedupeKey = `${(c.label ?? '').trim().toLowerCase()}|${[...relFns].sort().join(',')}`
-    if (seenKeys.has(dedupeKey)) {
+    // m1：纯阶段节点(relFns=[])不参与去重——其键退化为 "label|" 会误伤同名不同父的阶段节点
+    const dedupeKey = relFns.length > 0
+      ? `${(c.label ?? '').trim().toLowerCase()}|${[...relFns].sort().join(',')}`
+      : undefined
+    if (dedupeKey && seenKeys.has(dedupeKey)) {
       skippedDupes++
       overflow.push(...relFns)
       continue
@@ -823,7 +826,7 @@ export async function aiFlowChildren(
       children: []
     }
     child.contentHash = contentHashOf(child.relatedFunctionIds)
-    seenKeys.add(dedupeKey)
+    if (dedupeKey) seenKeys.add(dedupeKey)
     children.push(child)
     budget.used++
   }
@@ -1179,14 +1182,12 @@ export function applyFlows(
 export function perRootQuota(
   maxNodesTotal: number,
   rootCount: number,
-  used = 0,
-  index = 0
+  used = 0
 ): number {
   const remaining = Math.max(0, maxNodesTotal - used)
   if (rootCount <= 0) return remaining
-  const base = Math.floor(remaining / rootCount)
-  const extra = index < remaining % rootCount ? 1 : 0
-  return base + extra
+  // 余数给当前根（生产调用每次只算“下一根”的配额，等价 index=0）
+  return Math.ceil(remaining / rootCount)
 }
 
 /** 根关联模块的核心函数（按核心度降序），用于配额不足/生成失败时的非空壳回填 */
@@ -1225,7 +1226,6 @@ function ensureRootNotEmpty(
   // m-R1：关联模块无函数时降级取全图 coreScore Top-N
   if (fns.length === 0) {
     fns = [...graph.nodes.keys()]
-      .filter((id) => graph.nodes.has(id))
       .sort((a, b) => coreScore(graph, b) - coreScore(graph, a))
       .slice(0, ROOT_BACKFILL_FUNCTIONS)
   }

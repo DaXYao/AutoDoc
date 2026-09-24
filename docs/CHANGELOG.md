@@ -12,6 +12,35 @@
 
 ## [未发布] 2026-09-24
 
+### fix(server): 采纳划分建议后脉络树在默认读取路径永久消失（task40 终审 M1）+ 纯阶段去重误伤（m1）+ roots 抢救信封入缓存（m4）+ n1/n2
+- **背景**：任务 #41，修复 task40 终审 Mark 提出的 1 Major + 2 minor + 1 nit。
+- **M1（Major）——采纳划分建议后脉络树在默认读取路径永久消失**（[insight.ts](../packages/server/src/insight.ts)）：
+  - **因果链**：用户「按建议重新划分」→ `POST /api/insight/partition`(forcePartition, feedback=F) → pass1 写 `partition:hash8(F)` + `partition:latest`、graph 变新划分 → pass6 basis=B(new)、新树快照 basis=B(new)，POST 响应正常。**但之后任何页面加载**走 `fetchInsight()`（**无 feedback**）→ `GET /api/insight` → `loadInsight(service,'')` 读 `partition:e3b0c442`（=hash8('')，即提建议**之前**的旧划分）→ currentBasis=B(old)≠快照 B(new) → M-R1 忽略快照 → `insight.flows` undefined → 前端 `hasFlows=false` → 整个「业务脉络」区块被 `v-if` 隐藏、**无提示**，且是**稳态**（非窗口暂态），直到有人用 feedback='' 再 force（又会把树退回旧划分、静默丢弃用户建议）。
+  - **修法（采纳方案 b）**：`loadInsight` 在 `feedback === ''` 时优先读 `partition:latest`，未命中再回退 `partition:${hash8('')}`；`feedback` 非空时行为完全不变（仍按 `hash8(feedback)` 精确取）。因 `insight.partitionFeedback = p.feedback ?? ''` 从同一信封带出，「模块列表 / 脉络树 / 已采纳建议文案」三者天然同源。
+  - **选择理由**：① 与 `refreshInsightAI` 里既有的 `const previous = cache.get(fp,'partition:latest')` 语义天然对齐（latest 本就是「当前生效划分」的权威键）；② 改动面最小、**shared-types 零改动**（方案 a 需给 `FlowTreeCache` 增记 partitionKey/feedback 并重写划分选择逻辑，还要处理旧快照无该字段的兼容）；③ 回退链保证旧缓存/未采纳建议的项目行为不变。
+  - **显式 stale 信号**：新增 else-if——树快照存在且非空但 basis 不符时置 `flowsStatus = 'skipped'`，经 `insight.aiStatus.flows` 暴露给前端（`AiPassStatus` 既有值，无需加 `flowsStale` 字段）。语义：`flows` 为空 + `aiStatus.flows==='skipped'` = 「划分已变更，脉络树待重生成」，区块不再「凭空消失」。当前前端仅按 flows 是否为空做 `v-if` 降级，读到 'skipped' 不会崩溃但也暂无提示文案——**文案改动留给前端代理**。
+- **m1（纯阶段节点被去重误伤，可级联整枝塌陷）**（[flow.ts](../packages/server/src/flow.ts) `aiFlowChildren`）：去重键 `label.toLowerCase()+'|'+sorted relFns` 对纯阶段节点(relFns=[])退化为 `"label|"` → 同根子树内任何同名阶段（不同父/不同层，`seenNodeKeys` 经 `childDeps` 递归共享）被判重复 `continue`，且 `overflow.push(空)` 是 no-op ⇒ **零补偿**，与上轮 Minor-2「保留纯阶段节点」直接冲突；泛化阶段名（初始化/校验/保存/异常处理）有真实风险。**修法（三选一中取最小且不误伤者）**：`relFns.length === 0` 时 `dedupeKey = undefined`，纯阶段节点**完全不参与去重**（`if (dedupeKey && seenKeys.has(...))` / `if (dedupeKey) seenKeys.add(...)`）。保留成本极低（其子树各不相同），且不影响问题 B 对「同 label + 同函数集」重复下钻的主手段。
+- **m4（roots 抢救信封仍入缓存）**（flow.ts `aiFlowRoots`）：children 层上轮已 `if (!env.salvaged) cacheSet`，但 roots 层仍无条件写。roots 决定整树主线条数/归组，一次截断抢救出的「少了尾部主线」的 roots 信封会被写进 `flows:roots:${basis}` 并在非 force 重算里**长期复用**。**修法**：改为 `if (!cached && !env.salvaged) cacheSet(deps, rootsKey, env)`，与 children 对称。
+- **n1（CHANGELOG 与代码不符）**：上一条 task37 记录称「n-R5：`perRootQuota` 删除恒传 0 的死参数 `index`」，但 flow.ts 仍保留 `index = 0` 形参（生产调用 3 参、测试调用 4 参）。**选择「真删」**（而非改 CHANGELOG）：删形参、`return Math.ceil(remaining / rootCount)`（原 `index===0` 分支即 ceil 语义，生产调用点 `perRootQuota(caps.maxNodesTotal, roots.length - i, budget.used)` 3 参不变），并同步更新测试调用点与断言。自此代码与 CHANGELOG 一致。
+- **n2（顺手，trivial 零风险）**：删 `ensureRootNotEmpty` 中恒真的 `[...graph.nodes.keys()].filter((id) => graph.nodes.has(id))` 死过滤。
+- **测试**（[flow.test.ts](../packages/server/test/flow.test.ts) 72→**77**，+5）：
+  - **M1 真实链路**（Mark 指出的缺失用例）：`refreshInsightAI(force)` 建基线 → `refreshInsightAI({forcePartition:true, feedback})` → 断言 `loadInsight(service,'')` 的 **flows 非空**、`partitionFeedback === feedback`、`modules.map(m=>m.id)` 与 forcePartition 结果**完全相同**（同源）、`aiStatus.flows !== 'skipped'`。原有「手工改 basis 成 deadbeef + 断言 flows 为空」的用例不足以覆盖该链路，现补齐。
+  - **M1 stale 信号**：篡改快照 basis 为不匹配值 → `loadInsight('')` 断言 flows 为空 **且** `aiStatus.flows === 'skipped'`。
+  - **m1 ×2**：①同根子树内两个不同分支各拆出同名纯阶段「初始化」→ 两个都保留（真实风险场景，修复前第二个被跨父去重吞掉）；②同一父下两个同 label 纯阶段「校验」→ `toHaveLength(2)` 且都非空壳。
+  - **m4**：roots 输出截断被抢救 → 首次 `rootsCalls===1`、树非空；二次 `generateFlows` 后 `rootsCalls > 1`（证明未落缓存）。
+  - **回归可捕获性已实证**：临时回退三处修复后重跑，**5 例全部转红**（M1 报 `expected '' to be '把回复获取…'` / `expected 'ok' to be 'skipped'`；m1 报 `expected [] to have a length of 1 but got 0` / `expected length 2 but got 1`；m4 报 `expected 1 to be greater than 1`），随后已完整恢复修复。
+- **影响范围**：packages/server（insight.ts / flow.ts + test/flow.test.ts）。**未改 ai.ts**；未改 shared-types/web/README/classify.ts/role.ts；未引入新依赖；未改路由。**未提交、未 git add**（Leader 统一提交）。**本轮未做实时重生成**：task39 已产出良好树（120 节点 / 0 空壳 / 0 heuristic / 函数覆盖 63.6%），本轮修复只改读路径与去重/缓存条件，不影响该快照的 basis 与内容。
+- **实证**：`pnpm --filter @autodoc/server run test` **77 用例全绿**（flow 65 + aiChunking 12）、`@autodoc/core` **97 全绿**；shared-types/core/server **typecheck 0 error**；3 个改动文件定向 **eslint 0 error**。
+- **风险/回滚点**：
+  - **`partition:latest` 成为 `loadInsight('')` 的首选键**：语义由「无建议基线划分」变为「最后一次成功划分」。若某次 forcePartition 失败（未写 latest），回退 `partition:hash8('')` 仍读旧划分 → 树可能 basis 不符 → 报 `aiStatus.flows='skipped'`（**有显式信号，不再静默消失**）。
+  - **多次采纳建议时 latest 指向最后一次**：用户先用 feedback=A、再用 feedback=B 生成，默认页面展示 B（符合「最新即当前」直觉），A 版本的树会因 basis 不符被忽略并显示 stale 信号。
+  - **「已采纳建议」显示**：`insight.partitionFeedback` 从 latest 信封带出，即最后一次建议文本，与树/模块同源；若前端需要区分「基线划分 vs 建议划分」，可再看 `partitionSource`。
+  - **m1 后纯阶段节点完全不去重**：理论上同父下可出现多个同名纯阶段节点。成本极低（不占函数覆盖），且 m-R2 清扫会对无下钻余地的空壳回填或丢弃，不会退化成空壳。
+  - **n1 改 ceil**：单根配额在有余额时略增（如 `perRootQuota(10,3,0)` 仍为 4、`perRootQuota(13,5,0)` 为 3），逐根累加仍 ≤ maxNodesTotal（测试已验证 used=13≤13）；极端场景下靠后的根可能拿到 0，由 `ensureRootNotEmpty` 回填兜底保证非空壳。
+  - 回滚只需还原 insight.ts / flow.ts 并删除新增 5 个用例。
+
+---
+
 ### fix(server): 脉络树最后一轮精修——basis 身份 + 原子替换（M-R1/A）+ 反重复下钻（B）+ 空壳根治（m-R1/R2）+ 降级可观测（m-R3）+ Nit
 - **背景**：任务 #37。Mark 复审 M-R1（Major，整树快照无划分身份、loadInsight 用旧划分模块配新树 → mod:i 跳错）与 task35 实测问题 A（`clearByPrefix('flows:')` 在 pass6 开头清整树 → 重生成 5-20min 窗口内 GET 返回空）、问题 B（102 节点仅 78 不同 label，flow:1 用 24 节点只覆盖 3 函数，全树仅 36% 函数覆盖）。合并 m-R1/m-R2/m-R3/n-R1/n-R2/n-R5 一并修复。
 - **内容**：
@@ -121,6 +150,17 @@
 - **实证**：`pnpm --filter @autodoc/server run test` **26 用例全绿**（aiChunking 12 + flow 14）、`@autodoc/core` **97 全绿**（无回归）；shared-types/core/server typecheck 均 0 error；改动文件定向 eslint 0 error。对 reply-boost `POST /api/insight/ai {force:true}`（249s）后 `GET /api/insight`：**`aiStatus.coreJudgment=ok`**（修复前 failed）、`categories=skipped`（pending=0，合理）、其余 ok；**`isCore` 18 个全部 `src=ai`** 且带业务理由（App 主入口、useDesktopIntegration 桌面集成编排器、chunkText 文本切块主引擎、makeAnchor 锚点生成、validateRulePack/loadPacks/persistPacks 规则包、listSessions/saveSession 会话持久化等），**`formatDateTime`/`downloadFile`/`isTauri` 已不在核心集合**；脉络叶子共 62 条，匹配上述工具函数者 **0 条**，叶子变为 types/segmentText/renderFeedback/键盘标记与收笔/校验规则包 等业务节点。
 - **Prism 规模**：以单测证明 414 函数分 4 批、每批 ≤120 行、单批响应体量有界不截断（未实际触发 Prism force 以省 API 成本/耗时）。
 - **风险/回滚点**：分批/重试仅增加 AI 调用次数（大项目），小项目单批行为不变；解析容错为纯增强，误判风险低（仅接受本批 idx、非法值过滤）；回滚只需还原 insight.ts 并删除 aiChunking.test.ts。
+
+---
+
+### fix(web): FlowTree 多函数 leaf 平铺全部关联函数（task40 终审 m2）
+- **内容**（仅改 [FlowTree.vue](../packages/web/src/components/FlowTree.vue)，FunctionCard 零改动）：被去重/overflow 转成的**多函数 leaf 节点**（如「其它」叶子携带 N 个函数、B(a) 转 leaf、m-R2 回填转 leaf）之前前端只渲染 `relatedFunctionIds[0]`（isLeaf 早退不走合成叶子平铺），导致 task39 数据层函数覆盖率升到 63.6% 但多函数 leaf 在 UI 只显 1 个、覆盖率提升在界面层落空。
+  - **修法（前端最小改动，复用现有机制）**：把 `syntheticLeaves` 的早退条件从「`isLeaf || children>0` 返回 []」改为「`children>0` 返回 []；`isLeaf && relatedFunctionIds<=1` 返回 []」——即**任何 children=[] 的节点（含 kind='leaf'）都按 relatedFunctionIds 平铺合成单函数叶子**；模板顶层分派条件由 `v-if="!isLeaf"` 改为 `v-if="!isLeaf || syntheticLeaves.length > 0"`，多函数 leaf 自动走已实现的结构行分支（表头 label/kind/source/summary/reason + 限量平铺 + 折叠）。
+  - **N=1 与现状一致**：单函数 leaf 的 `syntheticLeaves` 为 []，仍走既有 leaf 分支（单函数行 + 展开详情 FunctionCard），零变化；N>1 时平铺 N 个，受 `SYNTHETIC_LEAF_LIMIT=8` 限量与 `flowsyn:` 折叠保护。
+  - **保持**：合成叶子 id 唯一（沿用 `${node.id}#fn${i}`）、XSS 安全（无 v-html，走 `{{}}`/`:title`）、非叶子空壳节点仍低调占位、多函数 leaf 表头无 children 故无 role/tabindex（n2 不回退）；每个平铺函数叶子都是独立 FlowTree 实例，m2（detailOpen watch 加载）/m3（@changed 批注联动）逐个生效。
+- **影响范围**：packages/web/FlowTree.vue 单文件（2 处逻辑 + 注释）。未改后端/README/依赖/format.ts；dev 未重启（HMR）。
+- **实证**：`pnpm --filter @autodoc/web run typecheck`（vue-tsc）**exit 0**；`pnpm --filter @autodoc/web run build`（vite build）**exit 0，2902 modules**；FlowTree.vue 定向 eslint exit 0。逻辑走查：「其它」leaf（rf=5,children=[]）→ syntheticLeaves 生 5 个单函数叶子 → 分派入结构行 → 表头一次 + 5 个函数行各自可展开 FunctionCard；rf=12 时只显前 8 + 「还有 4 个函数」开关。**实时数据自测受限**：探测期间后端代理正在重生成 reply-boost，`/api/projects` activeId 持续为 null、`/api/insight` 返回 no active project；为不干扰后端未主动激活项目，浏览器对照待后端重生成完成、项目重新激活后补验。
+- **风险/回滚点**：纯前端渲染分派调整，无数据模型变更；回滚只需还原 FlowTree.vue。
 
 ---
 
