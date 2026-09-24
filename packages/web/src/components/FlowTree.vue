@@ -27,11 +27,14 @@ const isLeaf = computed(() => props.node.kind === 'leaf')
 const hasChildren = computed(() => props.node.children.length > 0)
 
 /**
- * 非 leaf kind 但 children=[] 且 relatedFunctionIds 非空（如达到 maxDepth 停止下钻的 mainline）：
- * 把关联函数合成为 leaf 节点，复用现有 leaf 渲染与取数链路，在其下平铺呈现（非空叶子）。
+ * children=[] 且携带关联函数的节点（达到 maxDepth 停止下钻的 mainline/branch，
+ * 或被去重/overflow 转成的多函数 leaf，如「其它」叶子），把每个关联函数合成为一个
+ * 单函数 leaf 节点，复用现有 leaf 渲染 + 取数链路 + 限量折叠，在其下平铺呈现。
+ * 单函数 leaf（relatedFunctionIds<=1）仍走既有 leaf 分支，与现状一致，不合成。
  */
 const syntheticLeaves = computed<FlowNode[]>(() => {
-  if (isLeaf.value || props.node.children.length > 0) return []
+  if (props.node.children.length > 0) return []
+  if (isLeaf.value && props.node.relatedFunctionIds.length <= 1) return []
   return props.node.relatedFunctionIds.map((fnId, i) => ({
     id: `${props.node.id}#fn${i}`,
     parentId: props.node.id,
@@ -178,8 +181,8 @@ function truncate(text: string, max = 90): string {
 
 <template>
   <div class="select-none">
-    <!-- ============ 非叶子节点行：mainline / branch / module ============ -->
-    <template v-if="!isLeaf">
+    <!-- ============ 结构节点行：mainline / branch / module，以及多函数 leaf（平铺其全部关联函数） ============ -->
+    <template v-if="!isLeaf || syntheticLeaves.length > 0">
       <div
         class="group w-full flex items-start gap-2 rounded px-2 py-1.5 text-left transition hover:bg-gray-50"
         :class="hasChildren ? 'cursor-pointer' : 'cursor-default'"
@@ -299,7 +302,7 @@ function truncate(text: string, max = 90): string {
       </div>
     </template>
 
-    <!-- ============ 叶子节点行：核心函数 + 就地展开 FunctionCard ============ -->
+    <!-- ============ 单函数叶子行：核心函数 + 就地展开 FunctionCard ============ -->
     <template v-else>
       <div
         class="flex items-start gap-2 rounded px-2 py-1.5"
