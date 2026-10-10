@@ -2,6 +2,17 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-11 · 轴 B2：就地追问前端闭环（CallNode 追问面板 + followup 回显）
+
+- **内容**：
+  1. `api.ts`：新增 `askCallStep(functionId, stepId, question)` 调 `POST /api/ask`（!ok 时解析 `{error}` 抛带信息 Error）；`addAnnotation` payload 加可选 `kind`（'annotation'|'followup'）透传后端。
+  2. `CallNode.vue`：调用节点上就地追问闭环——「追问」入口（只读模式隐藏）展开内联面板；textarea + 提问按钮（空问题禁用），加载态明确提示「AI 正在检索相关代码，可能需要数十秒…」；答案经 renderMarkdown（禁 HTML 防 XSS）渲染，元信息行「检索 N 轮 · 读取 M 个函数」+ degraded 醒目标注；「提炼为追问记录」进入保存子态（预填答案可编辑 + 作者照 AnnotationPanel 的 localStorage 'autodoc.author' 机制），保存为 `{targetType:'call', targetId:stepId, kind:'followup'}` 后 emit('changed') 触发刷新并清空关闭；新 prop `followups` 就地回显已保存追问记录（浅绿底 + 「追问记录」标签，n-popconfirm 删除，只读仅展示）。
+  3. `FunctionCard.vue`：主干/次要两处 CallNode 补传 `:followups="fn.callAnnotations?.[edge.stepId] ?? []"` 与 `@changed="emit('changed')"`（复用既有 changed → FilePage 强制重拉链路）。
+  4. 纯函数抽取：`utils/ask.ts` `formatAskMeta(rounds, usedCount, degraded)`（负数按 0、小数截断），新增 `test/ask.test.ts` 覆盖正常/degraded/零值/异常数据。
+- **影响范围**：仅 web 包（api.ts / CallNode.vue / FunctionCard.vue / utils/ask.ts / test/ask.test.ts）；不改后端、不改 README。
+- **动机**：让用户在调用链路节点上对不理解的步骤就地提问，AI agentic 检索作答，答案可提炼为持久化追问记录，与自动生成内容分离展示。
+- **测试**：`pnpm lint` 与 `pnpm test` 全绿（web 新增 ask.test.ts 4 例）。
+
 ## 2026-10-11 · 轴 B1 初审整改（ask.ts 兜底/计数一致性 + JsonStorage.updateAnnotation kind 归一）
 
 - **内容**：4 处精准小修，不改架构。

@@ -1,5 +1,7 @@
 import type {
   Annotation,
+  AnnotationKind,
+  AskResponse,
   ExportData,
   FileDocView,
   FileSummary,
@@ -174,6 +176,8 @@ export async function addAnnotation(payload: {
   targetId: string
   author: string
   content: string
+  /** 缺省为普通批注；'followup' = 调用步骤上的追问记录 */
+  kind?: AnnotationKind
 }): Promise<Annotation> {
   const res = await fetch('/api/annotations', {
     method: 'POST',
@@ -200,6 +204,29 @@ export async function updateAnnotation(
 export async function deleteAnnotation(id: string): Promise<void> {
   const res = await fetch(`/api/annotations/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`删除批注失败：${res.status}`)
+}
+
+/* ------------------------- 就地追问（轴 B） ------------------------- */
+
+/**
+ * 在某个调用步骤（stepId）上向 AI 就地提问。agentic 多轮检索，可能耗时数十秒。
+ * 400=参数缺失/函数或 stepId 不存在；409=无活动项目/未配 AI；500=内部错误。
+ */
+export async function askCallStep(
+  functionId: string,
+  stepId: string,
+  question: string
+): Promise<AskResponse> {
+  const res = await fetch('/api/ask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ functionId, stepId, question })
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error((detail as { error?: string }).error ?? `提问失败：${res.status}`)
+  }
+  return (await res.json()) as AskResponse
 }
 
 export async function refreshDocs(): Promise<void> {

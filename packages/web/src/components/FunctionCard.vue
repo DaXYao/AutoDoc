@@ -166,7 +166,11 @@ const annotationsKey = (): string => `card:${props.fn.id}:annotations`
         <!-- 主干调用：节点（着色点 + 名称 + 角色 + 分类 + 用途）之间用箭头连接 -->
         <ol class="flex flex-col">
           <template v-for="(edge, i) in mainChain" :key="chainKey(edge, i)">
-            <CallNode :edge="edge" />
+            <CallNode
+              :edge="edge"
+              :followups="fn.callAnnotations?.[edge.stepId] ?? []"
+              @changed="emit('changed')"
+            />
             <li v-if="i < mainChain.length - 1" class="flex gap-2 py-0.5" aria-hidden="true">
               <span class="w-2.5 flex justify-center text-gray-300 text-xs leading-none">↓</span>
               <span />
@@ -181,7 +185,11 @@ const annotationsKey = (): string => `card:${props.fn.id}:annotations`
           </button>
           <ol v-if="isExpanded(callsNoiseKey(), expandDefault('callChainNoise'))" class="mt-2 flex flex-col">
             <template v-for="(edge, i) in noiseChain" :key="chainKey(edge, i)">
-              <CallNode :edge="edge" />
+              <CallNode
+                :edge="edge"
+                :followups="fn.callAnnotations?.[edge.stepId] ?? []"
+                @changed="emit('changed')"
+              />
               <li v-if="i < noiseChain.length - 1" class="flex gap-2 py-0.5" aria-hidden="true">
                 <span class="w-2.5 flex justify-center text-gray-300 text-xs leading-none">↓</span>
                 <span />
