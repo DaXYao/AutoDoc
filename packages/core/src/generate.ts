@@ -174,6 +174,7 @@ function buildCallEdges(
       edges.push({
         callerId: fn.id,
         calleeName: calledName,
+        stepId: `${fn.id}>${calledName}`,
         calleeId: fn.id,
         calleeCategory: fn.category,
         role: site.role,
@@ -199,6 +200,7 @@ function buildCallEdges(
     edges.push({
       callerId: fn.id,
       calleeName: calledName,
+      stepId: `${fn.id}>${calledName}`,
       calleeId: resolved ? resolved.id : null,
       calleeCategory: resolved ? resolved.category : 'external',
       role: site.role,

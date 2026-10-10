@@ -65,6 +65,7 @@ function edge(callerId: string, calleeId: string, calleeCategory: FunctionDoc['c
   return {
     callerId,
     calleeName: calleeId,
+    stepId: `${callerId}>${calleeId}`,
     calleeId,
     calleeCategory,
     role: 'core',

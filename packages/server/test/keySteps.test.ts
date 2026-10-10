@@ -17,6 +17,7 @@ function mkCall(i: number): CallEdge {
   return {
     callerId: '',
     calleeName: `callee${i}`,
+    stepId: `>callee${i}`,
     calleeId: null,
     calleeCategory: 'external',
     role: i % 2 === 0 ? 'core' : 'validation',
@@ -237,6 +238,7 @@ describe('aiKeySteps', () => {
       calls: shuffled.map(([calleeName, line]) => ({
         callerId: '',
         calleeName,
+        stepId: `>${calleeName}`,
         calleeId: null,
         calleeCategory: 'external',
         role: 'core',

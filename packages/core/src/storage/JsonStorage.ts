@@ -124,15 +124,17 @@ export class JsonStorage implements StorageAdapter {
 
   listAnnotations(targetId?: string): Annotation[] {
     this.init()
-    const list = [...this.data.annotations].sort((a, b) =>
-      a.createdAt.localeCompare(b.createdAt)
-    )
+    // 旧数据无 kind 字段：读出时缺省补 'annotation'（与 SqliteStorage.rowToAnnotation 一致）
+    const list = [...this.data.annotations]
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .map((a) => (a.kind ? a : { ...a, kind: 'annotation' as const }))
     return targetId === undefined ? list : list.filter((a) => a.targetId === targetId)
   }
 
   getAnnotation(id: string): Annotation | null {
     this.init()
-    return this.data.annotations.find((a) => a.id === id) ?? null
+    const found = this.data.annotations.find((a) => a.id === id) ?? null
+    return found && !found.kind ? { ...found, kind: 'annotation' } : found
   }
 
   addAnnotation(input: NewAnnotationInput): Annotation {
@@ -145,7 +147,8 @@ export class JsonStorage implements StorageAdapter {
       author: input.author,
       content: input.content,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      kind: input.kind ?? 'annotation'
     }
     this.data.annotations.push(annotation)
     this.save()
@@ -160,7 +163,9 @@ export class JsonStorage implements StorageAdapter {
     if (patch.author !== undefined) target.author = patch.author
     target.updatedAt = new Date().toISOString()
     this.save()
-    return target
+    // 旧数据无 kind 字段：返回时缺省补 'annotation'（与 list/get 读归一、SqliteStorage 一致）；
+    // update 只改 content/author/updatedAt，已有 kind 原样保留不篡改
+    return target.kind ? target : { ...target, kind: 'annotation' as const }
   }
 
   deleteAnnotation(id: string): boolean {
@@ -174,8 +179,13 @@ export class JsonStorage implements StorageAdapter {
 
   migrateTarget(oldId: string, newId: string): void {
     this.mutate()
+    // call 级前缀迁移：stepId 形如 `${callerId}>${calleeName}`，caller 重命名时随之前缀替换
+    const prefix = `${oldId}>`
     for (const annotation of this.data.annotations) {
       if (annotation.targetId === oldId) annotation.targetId = newId
+      else if (annotation.targetId.startsWith(prefix)) {
+        annotation.targetId = `${newId}>${annotation.targetId.slice(prefix.length)}`
+      }
     }
     for (const change of this.data.changes) {
       if (change.targetId === oldId) change.targetId = newId

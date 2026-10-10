@@ -1,4 +1,5 @@
 import type {
+  Annotation,
   FileDoc,
   FileDocView,
   FileSummary,
@@ -29,12 +30,27 @@ export function toFileSummary(file: FileDoc): FileSummary {
 }
 
 export function toFileDocView(service: DocService, file: FileDoc): FileDocView {
+  // 调用步骤级批注/追问记录：一次性取出全部 call 级批注并按 targetId(stepId) 分组，
+  // 再按各函数的 edge.stepId 命中回填，避免逐 edge 查询的 N+1
+  const callAnnosByTarget = new Map<string, Annotation[]>()
+  for (const annotation of service.storage.listAnnotations()) {
+    if (annotation.targetType !== 'call') continue
+    const list = callAnnosByTarget.get(annotation.targetId) ?? []
+    list.push(annotation)
+    callAnnosByTarget.set(annotation.targetId, list)
+  }
   const functions: FunctionDocView[] = file.functions.map((fn) => {
     const changes = service.storage.listChanges(fn.id)
+    const callAnnotations: Record<string, Annotation[]> = {}
+    for (const call of fn.calls) {
+      const list = callAnnosByTarget.get(call.stepId)
+      if (list && list.length > 0) callAnnotations[call.stepId] = list
+    }
     return {
       ...fn,
       // 批注与自动生成内容分离下发
       annotations: service.storage.listAnnotations(fn.id),
+      callAnnotations,
       recentChanges: changes.slice(0, RECENT_CHANGE_LIMIT),
       archivedChangeCount: Math.max(changes.length - RECENT_CHANGE_LIMIT, 0)
     }

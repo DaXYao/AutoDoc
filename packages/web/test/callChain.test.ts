@@ -6,6 +6,7 @@ function edge(i: number): CallEdge {
   return {
     callerId: 'caller',
     calleeName: `callee${i}`,
+    stepId: `caller>callee${i}`,
     calleeId: null,
     calleeCategory: 'external',
     role: 'core',

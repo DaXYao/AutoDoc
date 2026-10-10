@@ -11,20 +11,28 @@ export type PendingCategory = 'pending'
 
 export type FunctionCategory = Category | PendingCategory
 
-/** 批注挂载层级 */
-export type AnnotationTargetType = 'function' | 'file' | 'module'
+/** 批注挂载层级（call=调用步骤，targetId 为 CallEdge.stepId） */
+export type AnnotationTargetType = 'function' | 'file' | 'module' | 'call'
+
+/** 批注种类：annotation=普通批注；followup=「就地追问」提炼出的追问记录 */
+export type AnnotationKind = 'annotation' | 'followup'
 
 /** 用户批注：手动添加，与自动生成内容严格分离 */
 export interface Annotation {
   id: string
   targetType: AnnotationTargetType
-  /** 关联目标：函数为稳定 ID；文件为相对路径 */
+  /** 关联目标：函数为稳定 ID；文件为相对路径；调用步骤为 CallEdge.stepId */
   targetId: string
   author: string
   /** Markdown 文本 */
   content: string
   createdAt: string
   updatedAt: string
+  /**
+   * 批注与追问记录分离展示、分离字段，但同表存储；都与自动生成的 FunctionDoc 分离。
+   * 缺省（旧数据无此字段）视为 'annotation'。
+   */
+  kind?: AnnotationKind
 }
 
 /** 注释块：方法体内「注释 + 紧随代码块」成对提取 */
@@ -71,6 +79,11 @@ export type CallRole = 'core' | 'validation' | 'exception'
 export interface CallEdge {
   callerId: string
   calleeName: string
+  /**
+   * 调用步骤稳定 ID，构造为 `${callerId}>${calleeName}`，用于「追问记录」关联；
+   * 因 buildCallEdges 已按 calleeName 去重，故在一个 caller 内唯一。
+   */
+  stepId: string
   calleeId: string | null
   calleeCategory: FunctionCategory | 'external'
   /** 调用点角色（由语法上下文静态判定） */
@@ -121,6 +134,11 @@ export interface FileDoc {
 /** 服务端聚合后下发给前端的函数视图（批注/变更与文档分离字段） */
 export interface FunctionDocView extends FunctionDoc {
   annotations: Annotation[]
+  /**
+   * 调用步骤级批注/追问记录：key=CallEdge.stepId，value=该调用步骤上的记录。
+   * 只包含非空分组，供前端在调用链路节点上就地回显（B2）。
+   */
+  callAnnotations: Record<string, Annotation[]>
   /** 最近三次变更 */
   recentChanges: ChangeRecord[]
   /** 已归档（更早）变更条数 */
@@ -437,4 +455,28 @@ export interface ProjectInsight {
   flowsFingerprint?: string
   /** 各 AI 段执行状态（可观测性） */
   aiStatus?: Partial<Record<AiPassKey, AiPassStatus>>
+}
+
+/* ------------------------- 就地追问（轴 B） ------------------------- */
+
+/** POST /api/ask 请求：在某个调用步骤（stepId）上就地提问 */
+export interface AskRequest {
+  /** 提问所在函数（caller）的稳定 ID */
+  functionId: string
+  /** 目标调用步骤 ID（CallEdge.stepId，形如 `${callerId}>${calleeName}`） */
+  stepId: string
+  /** 用户的中文问题 */
+  question: string
+}
+
+/** POST /api/ask 响应：agentic 检索后的解答 */
+export interface AskResponse {
+  /** 最终中文解答 */
+  answer: string
+  /** 实际读过源码的函数稳定 ID（含种子 caller/callee） */
+  usedFunctionIds: string[]
+  /** 消耗的模型调用轮数 */
+  rounds: number
+  /** true=触发安全天花板/协议失败后的兜底解答（质量可能下降） */
+  degraded: boolean
 }

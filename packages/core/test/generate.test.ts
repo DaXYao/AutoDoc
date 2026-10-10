@@ -90,6 +90,30 @@ describe('文档生成管线（fixture 集成测试）', () => {
     storage.close()
   })
 
+  it('调用边 stepId：构造为 `${fn.id}>${calleeName}` 且在同函数内唯一', async () => {
+    const root = prepare()
+    const normalized = await loadConfig(root)
+    const storage = createStorage(normalized.config.storage, root)
+    const { files } = await generateDocs({ rootDir: root, normalized, storage })
+
+    let multiCallFnCount = 0
+    for (const file of files) {
+      for (const fn of file.functions) {
+        const seen = new Set<string>()
+        for (const edge of fn.calls) {
+          // 构造规则：caller 稳定 ID + '>' + 被调名（buildCallEdges 按 calleeName 去重 → caller 内唯一）
+          expect(edge.stepId).toBe(`${fn.id}>${edge.calleeName}`)
+          expect(seen.has(edge.stepId)).toBe(false)
+          seen.add(edge.stepId)
+        }
+        if (fn.calls.length >= 2) multiCallFnCount++
+      }
+    }
+    // fixture 中确有多次调用的函数（否则唯一性断言形同虚设）
+    expect(multiCallFnCount).toBeGreaterThan(0)
+    storage.close()
+  })
+
   it('增量生成：检测修改/重命名/新增，批注随重命名迁移', async () => {
     const root = prepare()
     const normalized = await loadConfig(root)

@@ -80,6 +80,69 @@ function runAdapterSuite(create: (dir: string) => StorageAdapter): void {
     expect(storage.listChanges('new-id')).toHaveLength(1)
   })
 
+  it('批注 kind：followup 往返、缺省回落 annotation', () => {
+    const followup = storage.addAnnotation({
+      targetType: 'call',
+      targetId: 'fn#a>doThing',
+      author: 'tester',
+      content: '追问记录',
+      kind: 'followup'
+    })
+    expect(followup.kind).toBe('followup')
+    const plain = storage.addAnnotation({
+      targetType: 'function',
+      targetId: 'fn#a',
+      author: 'tester',
+      content: '普通批注（未传 kind）'
+    })
+    expect(plain.kind).toBe('annotation')
+
+    expect(storage.listAnnotations('fn#a>doThing')[0].kind).toBe('followup')
+    expect(storage.getAnnotation(plain.id)?.kind).toBe('annotation')
+  })
+
+  it('migrateTarget：call 级 stepId 前缀迁移，不误伤其它批注', () => {
+    storage.addAnnotation({
+      targetType: 'call',
+      targetId: 'old-id>doThing',
+      author: 'tester',
+      content: '追问记录',
+      kind: 'followup'
+    })
+    storage.addAnnotation({
+      targetType: 'call',
+      targetId: 'other-id>doThing',
+      author: 'tester',
+      content: '别的 caller 的同名步骤'
+    })
+    storage.addAnnotation({
+      targetType: 'function',
+      targetId: 'old-id-extended',
+      author: 'tester',
+      content: '前缀相似但不是 call 级'
+    })
+    storage.addAnnotation({
+      targetType: 'function',
+      targetId: 'old-id',
+      author: 'tester',
+      content: '函数级批注'
+    })
+
+    storage.migrateTarget('old-id', 'new-id')
+
+    // call 级：`${oldId}>` 前缀替换为 `${newId}>`
+    expect(storage.listAnnotations('new-id>doThing')).toHaveLength(1)
+    expect(storage.listAnnotations('new-id>doThing')[0].kind).toBe('followup')
+    expect(storage.listAnnotations('old-id>doThing')).toHaveLength(0)
+    // 其它 caller 的步骤不受影响
+    expect(storage.listAnnotations('other-id>doThing')).toHaveLength(1)
+    // 仅前缀相似（无 `>` 分隔）的函数级批注不受影响
+    expect(storage.listAnnotations('old-id-extended')).toHaveLength(1)
+    // 精确匹配的函数级批注照常迁移
+    expect(storage.listAnnotations('new-id')).toHaveLength(1)
+    expect(storage.listAnnotations('old-id')).toHaveLength(0)
+  })
+
   it('变更历史全量保留且新→旧排序', () => {
     storage.appendChange({ targetId: 'fn#1', type: 'added', description: '第一次' })
     storage.appendChange({ targetId: 'fn#1', type: 'modified', description: '第二次' })
@@ -226,6 +289,114 @@ describe('存储层迁移与向后兼容', () => {
     const rec = storage.listChanges('t')[0]
     expect(rec.source).toBe('snapshot')
     expect(rec.commit).toBeUndefined()
+    storage.close()
+  })
+
+  it('SqliteStorage：旧库 annotations 无 kind 列，init 幂等补列且旧行回落 annotation', () => {
+    const dir = freshDir()
+    const dbPath = join(dir, 'autodoc.db')
+    // 手工构造「旧 schema」库：annotations 表无 kind 列，且已有一条批注
+    const old = new DatabaseSync(dbPath)
+    old.exec(`
+      CREATE TABLE annotations (
+        id TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_id TEXT NOT NULL,
+        author TEXT NOT NULL, content TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE changes (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+        target_id TEXT NOT NULL, date TEXT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL
+      );
+      CREATE TABLE snapshots (file_id TEXT PRIMARY KEY, json TEXT NOT NULL);
+    `)
+    old
+      .prepare(
+        "INSERT INTO annotations (id,target_type,target_id,author,content,created_at,updated_at) VALUES ('a-1','function','t','tester','旧批注','2023-01-01T00:00:00.000Z','2023-01-01T00:00:00.000Z')"
+      )
+      .run()
+    old.close()
+
+    const upgraded = new SqliteStorage(dbPath)
+    upgraded.init()
+    // 旧行 kind 为 NULL → 读出回落 'annotation'
+    expect(upgraded.listAnnotations('t')[0].kind).toBe('annotation')
+    // 迁移后可正常写入 followup
+    const followup = upgraded.addAnnotation({
+      targetType: 'call',
+      targetId: 't>callee',
+      author: 'tester',
+      content: '追问记录',
+      kind: 'followup'
+    })
+    expect(upgraded.getAnnotation(followup.id)?.kind).toBe('followup')
+    upgraded.close()
+
+    // 重复 init（ALTER 再次执行）不报错，数据完好
+    const reopened = new SqliteStorage(dbPath)
+    expect(() => reopened.init()).not.toThrow()
+    expect(reopened.listAnnotations('t>callee')[0].kind).toBe('followup')
+    reopened.close()
+  })
+
+  it('JsonStorage：缺失 kind 字段的旧批注读出回落 annotation', () => {
+    const dir = freshDir()
+    const dataPath = join(dir, 'autodoc.json')
+    writeFileSync(
+      dataPath,
+      JSON.stringify({
+        version: 1,
+        annotations: [
+          {
+            id: 'legacy-a',
+            targetType: 'function',
+            targetId: 't',
+            author: 'tester',
+            content: '旧批注',
+            createdAt: '2023-01-01T00:00:00.000Z',
+            updatedAt: '2023-01-01T00:00:00.000Z'
+          }
+        ],
+        changes: [],
+        snapshots: {}
+      }),
+      'utf-8'
+    )
+    const storage = new JsonStorage(dataPath)
+    storage.init()
+    expect(storage.listAnnotations('t')[0].kind).toBe('annotation')
+    expect(storage.getAnnotation('legacy-a')?.kind).toBe('annotation')
+    storage.close()
+  })
+
+  it('JsonStorage：updateAnnotation 对缺失 kind 的旧批注归一补 annotation（不篡改已有 kind）', () => {
+    const dir = freshDir()
+    const dataPath = join(dir, 'autodoc.json')
+    writeFileSync(
+      dataPath,
+      JSON.stringify({
+        version: 1,
+        annotations: [
+          {
+            id: 'legacy-a',
+            targetType: 'function',
+            targetId: 't',
+            author: 'tester',
+            content: '旧批注',
+            createdAt: '2023-01-01T00:00:00.000Z',
+            updatedAt: '2023-01-01T00:00:00.000Z'
+          }
+        ],
+        changes: [],
+        snapshots: {}
+      }),
+      'utf-8'
+    )
+    const storage = new JsonStorage(dataPath)
+    storage.init()
+    // 旧数据无 kind：update 返回对象补 'annotation'，与 list/get 归一一致
+    const updated = storage.updateAnnotation('legacy-a', { content: '改过的旧批注' })
+    expect(updated?.content).toBe('改过的旧批注')
+    expect(updated?.kind).toBe('annotation')
     storage.close()
   })
 

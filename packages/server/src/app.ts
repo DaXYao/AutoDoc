@@ -2,11 +2,13 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { AnnotationTargetType, NewProjectInput, ProjectsResponse } from '@autodoc/shared-types'
+import type { AnnotationKind, AnnotationTargetType, AskRequest, NewProjectInput, ProjectsResponse } from '@autodoc/shared-types'
 import { regenerate } from './context.js'
 import { pickFolder } from './pickFolder.js'
 import type { ProjectManager } from './projects.js'
 import { loadInsight, refreshInsightAI } from './insight.js'
+import { AskInputError, askCallStep } from './ask.js'
+import { getDeepSeekConfig } from './env.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
 
 export interface BuildAppOptions {
@@ -17,13 +19,14 @@ export interface BuildAppOptions {
   readOnly?: boolean
 }
 
-const TARGET_TYPES: AnnotationTargetType[] = ['function', 'file', 'module']
+const TARGET_TYPES: AnnotationTargetType[] = ['function', 'file', 'module', 'call']
 
 interface AnnotationBody {
   targetType?: unknown
   targetId?: unknown
   author?: unknown
   content?: unknown
+  kind?: unknown
 }
 
 export async function buildApp(options: BuildAppOptions): Promise<FastifyInstance> {
@@ -181,7 +184,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       typeof body.author !== 'string' ||
       body.author.trim().length === 0 ||
       typeof body.content !== 'string' ||
-      body.content.trim().length === 0
+      body.content.trim().length === 0 ||
+      (body.kind !== undefined && body.kind !== 'annotation' && body.kind !== 'followup')
     ) {
       return reply.code(400).send({ error: 'invalid annotation payload' })
     }
@@ -189,7 +193,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       targetType: body.targetType as AnnotationTargetType,
       targetId: body.targetId,
       author: body.author.trim(),
-      content: body.content
+      content: body.content,
+      kind: (body.kind as AnnotationKind | undefined) ?? 'annotation'
     })
     return reply.code(201).send(created)
   })
@@ -223,6 +228,39 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     const removed = service.storage.deleteAnnotation(id)
     if (!removed) return reply.code(404).send({ error: `annotation not found: ${id}` })
     return reply.code(204).send()
+  })
+
+  /* ------------------------- 就地追问（轴 B） ------------------------- */
+
+  // 非写操作：不受 readOnly 拦截（readOnly 只拦写），但需要活动项目 + 已配置 AI
+  app.post('/api/ask', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const body = (req.body ?? {}) as Partial<AskRequest>
+    if (
+      typeof body.functionId !== 'string' ||
+      body.functionId.trim().length === 0 ||
+      typeof body.stepId !== 'string' ||
+      body.stepId.trim().length === 0 ||
+      typeof body.question !== 'string' ||
+      body.question.trim().length === 0
+    ) {
+      return reply.code(400).send({ error: 'invalid ask payload' })
+    }
+    if (getDeepSeekConfig() === null) {
+      return reply.code(409).send({ error: '未配置 AI（DEEPSEEK_API_KEY），就地追问不可用' })
+    }
+    try {
+      return await askCallStep(service, {
+        functionId: body.functionId,
+        stepId: body.stepId,
+        question: body.question
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (error instanceof AskInputError) return reply.code(400).send({ error: message })
+      return reply.code(500).send({ error: `追问失败：${message}` })
+    }
   })
 
   app.post('/api/refresh', async (req, reply) => {

@@ -1,4 +1,4 @@
-import type { Annotation, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType } from '@autodoc/shared-types'
+import type { Annotation, AnnotationKind, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 
 export interface NewAnnotationInput {
@@ -6,6 +6,8 @@ export interface NewAnnotationInput {
   targetId: string
   author: string
   content: string
+  /** 批注种类；缺省 'annotation'；'followup'=就地追问记录 */
+  kind?: AnnotationKind
 }
 
 export interface AnnotationPatch {
@@ -44,7 +46,11 @@ export interface StorageAdapter {
   addAnnotation(input: NewAnnotationInput): Annotation
   updateAnnotation(id: string, patch: AnnotationPatch): Annotation | null
   deleteAnnotation(id: string): boolean
-  /** 函数重命名时将批注与历史从旧 ID 迁移到新 ID */
+  /**
+   * 函数重命名时将批注与历史从旧 ID 迁移到新 ID；
+   * 同时做 call 级前缀迁移：targetId 形如 `${oldId}>${calleeName}` 的调用步骤批注
+   * 前缀替换为 `${newId}>`（stepId 随 caller 稳定 ID 联动）。
+   */
   migrateTarget(oldId: string, newId: string): void
 
   /** 返回某函数全部变更记录（含归档），新→旧排序 */

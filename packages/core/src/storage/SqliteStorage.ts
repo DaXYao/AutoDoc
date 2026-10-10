@@ -38,7 +38,8 @@ export class SqliteStorage implements StorageAdapter {
         author TEXT NOT NULL,
         content TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        kind TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_annotations_target ON annotations(target_id);
       CREATE TABLE IF NOT EXISTS changes (
@@ -64,10 +65,11 @@ export class SqliteStorage implements StorageAdapter {
     // 此时 this.db 已就绪，backupOnce() 内 conn()→init() 因 this.db 非空会立即返回（不递归）；
     // backedUp 幂等标志确保备份只做一次。全新库（文件此前不存在）无用户数据，无需备份，直接迁移。
     if (isUpgrade) this.backupOnce('premigrate')
-    // 幂等迁移：为已存在的 changes 表补充新列（重复执行时忽略 duplicate column 错误）
+    // 幂等迁移：为已存在的 changes / annotations 表补充新列（重复执行时忽略 duplicate column 错误）
     for (const ddl of [
       'ALTER TABLE changes ADD COLUMN source TEXT',
-      'ALTER TABLE changes ADD COLUMN commit_json TEXT'
+      'ALTER TABLE changes ADD COLUMN commit_json TEXT',
+      'ALTER TABLE annotations ADD COLUMN kind TEXT'
     ]) {
       try {
         this.db.exec(ddl)
@@ -128,11 +130,12 @@ export class SqliteStorage implements StorageAdapter {
       author: input.author,
       content: input.content,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      kind: input.kind ?? 'annotation'
     }
     this.conn()
       .prepare(
-        'INSERT INTO annotations (id, target_type, target_id, author, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO annotations (id, target_type, target_id, author, content, created_at, updated_at, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       )
       .run(
         annotation.id,
@@ -141,7 +144,8 @@ export class SqliteStorage implements StorageAdapter {
         annotation.author,
         annotation.content,
         annotation.createdAt,
-        annotation.updatedAt
+        annotation.updatedAt,
+        input.kind ?? 'annotation'
       )
     return annotation
   }
@@ -173,6 +177,14 @@ export class SqliteStorage implements StorageAdapter {
     const db = this.conn()
     db.prepare('UPDATE annotations SET target_id = ? WHERE target_id = ?').run(newId, oldId)
     db.prepare('UPDATE changes SET target_id = ? WHERE target_id = ?').run(newId, oldId)
+    // call 级前缀迁移：stepId 形如 `${callerId}>${calleeName}`，caller 重命名时
+    // 把 `${oldId}>` 前缀替换为 `${newId}>`。用 substr 等值比较代替 LIKE，
+    // 规避 oldId 中 %/_ 通配符的转义问题，且只命中 call 级（带 `>` 分隔符）不误伤其它批注。
+    const prefix = `${oldId}>`
+    // substr 为 1 基：从 prefix.length 起恰好保留 `>` 分隔符，拼上 newId 即完成前缀替换
+    db.prepare(
+      'UPDATE annotations SET target_id = ? || substr(target_id, ?) WHERE substr(target_id, 1, ?) = ?'
+    ).run(newId, prefix.length, prefix.length, prefix)
   }
 
   listChanges(targetId: string): ChangeRecord[] {
@@ -245,7 +257,9 @@ export class SqliteStorage implements StorageAdapter {
       author: String(row.author),
       content: String(row.content),
       createdAt: String(row.created_at),
-      updatedAt: String(row.updated_at)
+      updatedAt: String(row.updated_at),
+      // 旧行 kind 为 NULL：缺省回落 'annotation'（向后兼容）
+      kind: row.kind === 'followup' ? 'followup' : 'annotation'
     }
   }
 
