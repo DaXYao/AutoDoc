@@ -28,6 +28,7 @@ export const DEFAULT_EXPAND: Required<DefaultExpandConfig> = {
   codeBlocks: false,
   changes: false,
   annotations: true,
+  callChainNoise: false,
   flowAutoExpandDepth: 2
 }
 

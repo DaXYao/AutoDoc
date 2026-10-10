@@ -71,6 +71,7 @@ export const AI_PASS_ORDER: AiPassKey[] = [
   'categories',
   'coreRoles',
   'narratives',
+  'keySteps',
   'flows'
 ]
 
@@ -81,6 +82,7 @@ export const AI_PASS_LABELS: Record<AiPassKey, string> = {
   categories: '三分类',
   coreRoles: '核心角色',
   narratives: '链路叙事',
+  keySteps: '主干识别',
   flows: '脉络树'
 }
 

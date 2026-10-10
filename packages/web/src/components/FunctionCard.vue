@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
-import type { CallEdge, FunctionCategory, FunctionDocView } from '@autodoc/shared-types'
+import type { CallEdge, FunctionDocView } from '@autodoc/shared-types'
 import { appState, findFunctionEntry } from '../store/app'
 import { expandDefault, isExpanded, toggle } from '../store/expand'
 import { CHANGE_LABELS, CATEGORY_LABELS, ROLE_COLORS, ROLE_LABELS, editorLink, formatDate } from '../utils/format'
+import { splitCallChain } from '../utils/callChain'
 import AnnotationPanel from './AnnotationPanel.vue'
+import CallNode from './CallNode.vue'
 
 const props = defineProps<{ fn: FunctionDocView }>()
 
@@ -18,6 +20,15 @@ const callChain = computed(() => [...props.fn.calls].sort((a, b) => a.line - b.l
 
 /** 图谱洞察（核心度/上下游/链路职责） */
 const fi = computed(() => appState.insight?.functions[props.fn.id] ?? null)
+
+/**
+ * 主干 / 次要拆分（AI-first）：keyCallIndexes 为 undefined（AI 未生成/失败）时不拆分、
+ * 全部归主干并置 keyStepsMissing（模板提示 + 不折叠）；否则按下标拆分。
+ */
+const callSplit = computed(() => splitCallChain(callChain.value, fi.value?.keyCallIndexes))
+const mainChain = computed(() => callSplit.value.mainChain)
+const noiseChain = computed(() => callSplit.value.noiseChain)
+const keyStepsMissing = computed(() => callSplit.value.keyStepsMissing)
 
 function fnName(id: string): string {
   const entry = findFunctionEntry(id)
@@ -35,13 +46,6 @@ function chainKey(edge: CallEdge, i: number): string {
   return `${i}-${edge.calleeName}-${edge.calleeId ?? 'x'}`
 }
 
-function goToCallee(edge: CallEdge): void {
-  if (!edge.calleeId) return
-  const entry = findFunctionEntry(edge.calleeId)
-  if (!entry) return
-  void router.push({ name: 'file', params: { fileId: entry.fileId }, query: { fn: edge.calleeId! } })
-}
-
 /** 过长文本截断显示（配合 title 属性悬浮全文） */
 function truncateText(text: string, max = 72): string {
   return text.length > max ? `${text.slice(0, max)}…` : text
@@ -54,6 +58,7 @@ const sourceHref = computed(() =>
 
 const blocksKey = (): string => `card:${props.fn.id}:blocks`
 const callsKey = (): string => `card:${props.fn.id}:calls`
+const callsNoiseKey = (): string => `card:${props.fn.id}:callsNoise`
 const graphKey = (): string => `card:${props.fn.id}:graph`
 const changesKey = (): string => `card:${props.fn.id}:changes`
 const annotationsKey = (): string => `card:${props.fn.id}:annotations`
@@ -154,47 +159,36 @@ const annotationsKey = (): string => `card:${props.fn.id}:annotations`
             {{ label }}
           </span>
         </div>
-        <!-- 链路：节点（着色点 + 名称 + 角色 + 分类 + 用途）之间用箭头连接 -->
+        <!-- AI-first 降级提示：主干识别未生成/失败时不折叠、显示全部调用 -->
+        <p v-if="keyStepsMissing && callChain.length > 0" class="mb-2 text-xs text-gray-400">
+          注意：主干识别未生成/失败，当前显示全部调用
+        </p>
+        <!-- 主干调用：节点（着色点 + 名称 + 角色 + 分类 + 用途）之间用箭头连接 -->
         <ol class="flex flex-col">
-          <template v-for="(edge, i) in callChain" :key="chainKey(edge, i)">
-            <li class="flex items-start gap-2">
-              <span
-                class="mt-1 w-2.5 h-2.5 rounded-full shrink-0"
-                :class="ROLE_COLORS[edge.role].dot"
-              />
-              <div class="min-w-0">
-                <div class="flex flex-wrap items-center gap-2 text-xs">
-                  <button
-                    v-if="edge.calleeId && findFunctionEntry(edge.calleeId)"
-                    class="font-mono hover:underline"
-                    :class="ROLE_COLORS[edge.role].text"
-                    @click="goToCallee(edge)"
-                  >
-                    {{ edge.calleeName }}
-                  </button>
-                  <span v-else class="font-mono" :class="ROLE_COLORS[edge.role].text">
-                    {{ edge.calleeName }}
-                  </span>
-                  <span class="text-gray-400">· {{ ROLE_LABELS[edge.role] }}</span>
-                  <n-tag size="tiny" :bordered="false" :type="edge.calleeCategory === 'external' ? 'default' : 'info'">
-                    {{ edge.calleeCategory === 'external' ? '外部/未解析' : CATEGORY_LABELS[edge.calleeCategory as FunctionCategory] }}
-                  </n-tag>
-                  <span class="text-gray-300">L{{ edge.line }}</span>
-                </div>
-                <div v-if="edge.calleePurpose" class="text-xs text-gray-500 mt-0.5">
-                  作用：{{ edge.calleePurpose }}
-                </div>
-                <div v-else-if="edge.calleeCategory === 'external'" class="text-xs text-gray-400 mt-0.5">
-                  作用：外部/未解析调用（不在本项目索引内）
-                </div>
-              </div>
-            </li>
-            <li v-if="i < callChain.length - 1" class="flex gap-2 py-0.5" aria-hidden="true">
+          <template v-for="(edge, i) in mainChain" :key="chainKey(edge, i)">
+            <CallNode :edge="edge" />
+            <li v-if="i < mainChain.length - 1" class="flex gap-2 py-0.5" aria-hidden="true">
               <span class="w-2.5 flex justify-center text-gray-300 text-xs leading-none">↓</span>
               <span />
             </li>
           </template>
         </ol>
+        <!-- 次要调用：可折叠（默认折叠，展开状态持久化到 localStorage） -->
+        <div v-if="noiseChain.length > 0" class="mt-2">
+          <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(callsNoiseKey(), expandDefault('callChainNoise'))">
+            次要调用（{{ noiseChain.length }}）
+            {{ isExpanded(callsNoiseKey(), expandDefault('callChainNoise')) ? '▾' : '▸' }}
+          </button>
+          <ol v-if="isExpanded(callsNoiseKey(), expandDefault('callChainNoise'))" class="mt-2 flex flex-col">
+            <template v-for="(edge, i) in noiseChain" :key="chainKey(edge, i)">
+              <CallNode :edge="edge" />
+              <li v-if="i < noiseChain.length - 1" class="flex gap-2 py-0.5" aria-hidden="true">
+                <span class="w-2.5 flex justify-center text-gray-300 text-xs leading-none">↓</span>
+                <span />
+              </li>
+            </template>
+          </ol>
+        </div>
       </div>
     </div>
 

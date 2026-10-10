@@ -191,6 +191,8 @@ export interface DefaultExpandConfig {
   codeBlocks?: boolean
   changes?: boolean
   annotations?: boolean
+  /** 调用链路「次要调用」区块默认是否展开，缺省 false=折叠 */
+  callChainNoise?: boolean
   /** 脉络架构树默认自动展开的层级深度（0=全部折叠） */
   flowAutoExpandDepth?: number
 }
@@ -364,6 +366,11 @@ export interface FunctionInsight {
   aiCategory: FunctionCategory | null
   /** AI 分类理由 */
   aiCategoryReason: string
+  /**
+   * AI 判为主干/关键步骤的调用下标：按 line 升序排序后的 calls 数组中属于主干者。
+   * undefined=AI 未生成/失败（前端据此显示全部调用、不折叠）；存在（含空数组）则据此拆分主干/次要。
+   */
+  keyCallIndexes?: number[]
 }
 
 /**
@@ -404,6 +411,7 @@ export type AiPassKey =
   | 'categories'
   | 'coreRoles'
   | 'narratives'
+  | 'keySteps'
   | 'flows'
 
 /** 项目洞察聚合（静态 + 可选 AI 增强） */

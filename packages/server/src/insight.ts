@@ -69,6 +69,13 @@ const PARTITION_MAX_TOKENS = 8000
  */
 const CORE_JUDGMENT_MAX_TOKENS = 8000
 const CATEGORIES_MAX_TOKENS = 8000
+/**
+ * 主干识别（keySteps）：输出为每函数一个小下标数组 + 一句 reason，体量远小于输入；
+ * 8000 与其它结构化 pass 对齐，配合下方分批（单批 ≤120 函数）足够单批输出不截断。
+ */
+const KEY_STEPS_MAX_TOKENS = 8000
+/** 仅对调用数 ≥ 此阈值的函数跑主干识别（噪音问题只在调用多时才有） */
+const KEY_STEPS_MIN_CALLS = 5
 /** 单批喂给 AI 的函数数上限；超过则分批多次调用后合并（避免单次响应超 maxTokens 被截断） */
 const AI_CHUNK_SIZE = 120
 /** 单批解析失败/畸形的重试次数（模型输出非确定，偶发畸形 JSON，重试可显著降低整批降级概率） */
@@ -130,6 +137,12 @@ export interface CoreJudgmentResult {
 /** pending 分类分批结果：categories 为各成功批按 fnId 的合并 */
 export interface CategoriesResult {
   categories: CategoryEnvelope
+  batches: number
+  failedBatches: number
+}
+/** 主干识别分批结果：steps 为 fnId → 主干调用的局部下标数组（按 line 升序的 calls 下标） */
+export interface KeyStepsResult {
+  steps: Record<string, number[]>
   batches: number
   failedBatches: number
 }
@@ -334,6 +347,100 @@ export async function aiCategories(graph: ProjectGraph): Promise<CategoriesResul
     if (!done) failedBatches++
   }
   return { categories: out, batches: batches.length, failedBatches }
+}
+
+/**
+ * AI 主干识别：从调用数 ≥ KEY_STEPS_MIN_CALLS 的函数里，为其「按 line 升序的调用列表」
+ * 挑出承载业务主干/关键步骤的调用局部序号，排除日志/纯校验/异常处理/琐碎工具等噪音。
+ * 仿 aiCategories：分批（全局 idx 稳定映射）+ 重试 + 截断视为不完整 + 零有效条目不当成功。
+ * AI-first：失败/为空时不静态兜底，交由前端显示「主干识别失败/未生成」并展示全部调用。
+ */
+export async function aiKeySteps(graph: ProjectGraph): Promise<KeyStepsResult> {
+  const ids = indexTable(graph)
+  const candidates = ids
+    .map((id, i) => ({ id, i, fn: graph.nodes.get(id)! }))
+    .filter((x) => x.fn.calls.length >= KEY_STEPS_MIN_CALLS)
+  if (candidates.length === 0) return { steps: {}, batches: 0, failedBatches: 0 }
+  const batches = chunkArray(candidates, AI_CHUNK_SIZE)
+  const multi = batches.length > 1
+  const out: Record<string, number[]> = {}
+  let failedBatches = 0
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b]
+    // 仅接受本批范围内的全局 idx，避免 AI 幻觉越批污染
+    const batchIdx = new Set(batch.map((x) => x.i))
+    const byIdx = new Map(batch.map((x) => [x.i, x]))
+    const lines = batch
+      .map((x) => {
+        const calls = [...x.fn.calls]
+          .sort((a, c) => a.line - c.line)
+          .map(
+            (c, ci) =>
+              `    ${ci}|${c.calleeName}|${c.calleeCategory}|${c.role}|${(c.calleePurpose ?? '').slice(0, 30)}`
+          )
+          .join('\n')
+        return `${x.i}|${fnLabel(x.fn)}|${x.fn.purpose.slice(0, 40)}\n${calls}`
+      })
+      .join('\n')
+    const scope = multi ? `（第 ${b + 1}/${batches.length} 批）` : ''
+    const user =
+      `以下函数的调用较多${scope}。每个函数先给「全局idx|函数名|用途」，其后缩进的每行是它的一个调用「局部序号|被调名|三分类|角色|用途」（局部序号从0开始，按调用点行号升序）：\n${lines}\n` +
+      `请为每个函数挑出承载业务主干/关键步骤的调用「局部序号」，排除日志、纯参数校验、异常处理、琐碎工具等噪音调用。` +
+      `键必须原样回填上面给出的全局idx数字；keySteps 内只填该函数调用的局部序号。\n` +
+      `输出 JSON: {"<全局idx>":{"keySteps":[0,2,3],"reason":"一句话"}}`
+    let done = false
+    for (let attempt = 1; attempt <= AI_PARSE_RETRIES && !done; attempt++) {
+      try {
+        const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+          maxTokens: KEY_STEPS_MAX_TOKENS,
+          temperature: AI_STRUCTURE_TEMPERATURE
+        })
+        if (reply.truncated) {
+          console.warn(
+            `[autodoc] AI 主干识别第 ${b + 1}/${batches.length} 批第 ${attempt} 次输出被截断(finish_reason=length)，视为不完整${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+          )
+          continue
+        }
+        const raw = extractJson<Record<string, { keySteps?: unknown; reason?: string }>>(reply.content)
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          console.warn(
+            `[autodoc] AI 主干识别第 ${b + 1}/${batches.length} 批第 ${attempt} 次返回无法解析${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+          )
+          continue
+        }
+        let accepted = 0
+        for (const [key, v] of Object.entries(raw)) {
+          const idx = Number(key)
+          if (!batchIdx.has(idx)) continue
+          const item = byIdx.get(idx)
+          if (!item || !v || !Array.isArray(v.keySteps)) continue
+          const callCount = item.fn.calls.length
+          // 只保留合法局部下标（整数、[0, callCount) 内），越界丢弃
+          const valid = [...new Set(
+            v.keySteps
+              .map((s) => (typeof s === 'number' ? s : Number(s)))
+              .filter((s) => Number.isInteger(s) && s >= 0 && s < callCount)
+          )].sort((a, c) => a - c)
+          out[item.id] = valid
+          accepted++
+        }
+        // 结构可解析但零有效条目（idx 全被过滤/keySteps 全非数组）：不静默当成功，重试耗尽计入 failedBatches
+        if (accepted === 0) {
+          console.warn(
+            `[autodoc] AI 主干识别第 ${b + 1}/${batches.length} 批第 ${attempt} 次零有效条目（候选 ${batch.length} 个）${attempt < AI_PARSE_RETRIES ? '，重试' : '，计入降级批'}`
+          )
+          continue
+        }
+        done = true
+      } catch (e) {
+        console.warn(
+          `[autodoc] AI 主干识别第 ${b + 1}/${batches.length} 批第 ${attempt} 次失败${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}：${e instanceof Error ? e.message : String(e)}`
+        )
+      }
+    }
+    if (!done) failedBatches++
+  }
+  return { steps: out, batches: batches.length, failedBatches }
 }
 
 /** AI 按功能重要性判核心（而非调用次数）；函数多时分批，各批 core idx 取并集合并 */
@@ -550,6 +657,19 @@ function applyCategories(
   }
 }
 
+/** 将 AI 主干识别结果写入 insight.functions[fnId].keyCallIndexes（拷贝数组） */
+function applyKeySteps(
+  insight: ProjectInsight,
+  _graph: ProjectGraph,
+  steps: Record<string, number[]>
+): void {
+  for (const [fnId, idxs] of Object.entries(steps)) {
+    const f = insight.functions[fnId]
+    if (!f || !Array.isArray(idxs)) continue
+    f.keyCallIndexes = [...idxs]
+  }
+}
+
 /** 将图谱的核心判定同步到 insight.functions */
 function syncCore(insight: ProjectInsight, graph: ProjectGraph): void {
   for (const [id, ins] of Object.entries(insight.functions)) {
@@ -626,6 +746,11 @@ export function loadInsight(service: DocService, feedback = ''): InsightBundle {
   const cats = cache.get<CategoryEnvelope>(fp, 'categories')
   if (cats) {
     applyCategories(insight, graph, cats)
+    touched = true
+  }
+  const ks = cache.get<Record<string, number[]>>(fp, 'keySteps')
+  if (ks) {
+    applyKeySteps(insight, graph, ks)
     touched = true
   }
   const roles = cache.get<Record<string, string>>(fp, 'coreRoles')
@@ -813,6 +938,32 @@ export async function refreshInsightAI(
   }
   applyNarratives(insight, narr ?? {})
 
+  // 5b) 主干识别（keySteps，AI-first，无静态兜底）：为调用多的函数挑出业务主干调用下标
+  const hadKeyStepCandidates = [...graph.nodes.values()].some(
+    (f) => f.calls.length >= KEY_STEPS_MIN_CALLS
+  )
+  let keySteps = opts.force ? undefined : cache.get<Record<string, number[]>>(fp, 'keySteps')
+  if (!keySteps) {
+    try {
+      const res = await aiKeySteps(graph)
+      keySteps = res.steps
+      if (Object.keys(keySteps).length > 0) cache.set(fp, 'keySteps', keySteps)
+      status.keySteps =
+        Object.keys(keySteps).length > 0 ? 'ok' : hadKeyStepCandidates ? 'failed' : 'skipped'
+      if (res.failedBatches > 0) {
+        console.warn(`[autodoc] AI 主干识别 ${res.failedBatches}/${res.batches} 批降级（其余批已合并）`)
+      }
+    } catch (e) {
+      status.keySteps = 'failed'
+      console.warn(`[autodoc] AI 主干识别失败，前端将显示全部调用：${e instanceof Error ? e.message : String(e)}`)
+      keySteps = {}
+    }
+  } else {
+    status.keySteps =
+      Object.keys(keySteps).length > 0 ? 'ok' : hadKeyStepCandidates ? 'failed' : 'skipped'
+  }
+  applyKeySteps(insight, graph, keySteps ?? {})
+
   // 6) 递归脉络架构树（依赖前 5 段的 modules/core/chains/narratives）
   const flowCfg = service.normalized.config.insight?.flow ?? {}
   const caps: FlowCaps = {
@@ -915,6 +1066,7 @@ export async function refreshInsightAI(
     Object.keys(cats ?? {}).length ||
     Object.keys(roles ?? {}).length ||
     Object.keys(narr ?? {}).length ||
+    Object.keys(keySteps ?? {}).length ||
     flowsAiOk
   )
   cache.set(fp, 'aiStatus', status)
