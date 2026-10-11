@@ -5,12 +5,15 @@ import { useMessage } from 'naive-ui'
 import { appState, ensureInsightAI, findFunctionEntry, regenerateInsightAI, repartitionInsight } from '../store/app'
 import { AI_PASS_LABELS, AI_PASS_ORDER, AI_STATUS_META } from '../utils/format'
 import FlowTree from '../components/FlowTree.vue'
+import InsightHistory from '../components/InsightHistory.vue'
 
 const router = useRouter()
 const message = useMessage()
 const aiBusy = ref(false)
 const feedback = ref('')
 const partitionBusy = ref(false)
+/** 历史版本区（每次生成 AI 后新快照入档，需要刷新列表） */
+const historyRef = ref<InstanceType<typeof InsightHistory> | null>(null)
 
 onMounted(() => {
   void triggerAI(false)
@@ -24,6 +27,7 @@ async function triggerAI(force: boolean): Promise<void> {
   try {
     if (force) await regenerateInsightAI()
     else await ensureInsightAI()
+    void historyRef.value?.reload()
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error))
   } finally {
@@ -40,6 +44,7 @@ async function handleRepartition(): Promise<void> {
   partitionBusy.value = true
   try {
     await repartitionInsight(feedback.value.trim())
+    void historyRef.value?.reload()
     const cur = appState.insight
     if (cur && cur.partitionSource === 'ai' && cur.partitionFeedback === feedback.value.trim()) {
       message.success('已按建议重新划分')
@@ -141,6 +146,9 @@ function goModule(id: string): void {
       </template>
     </n-empty>
     <template v-else>
+      <!-- 历史版本区（含回滚态横幅 +「回到实时」；静态模式自动隐藏） -->
+      <InsightHistory ref="historyRef" />
+
       <!-- AI 状态提示 -->
       <n-alert
         v-if="insight.aiEnabled && !insight.aiGenerated"

@@ -96,6 +96,14 @@ export async function repartitionInsight(feedback: string): Promise<void> {
   if (enriched) appState.insight = enriched
 }
 
+/**
+ * 重新拉取当前生效洞察（回滚/清除回滚后调用）。
+ * 后端 loadInsight 在 activeId 命中时返回历史快照，否则返回实时计算结果。
+ */
+export async function refreshInsight(): Promise<void> {
+  appState.insight = await fetchInsight()
+}
+
 export async function bootstrap(): Promise<void> {
   appState.loading = true
   appState.error = null

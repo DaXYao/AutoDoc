@@ -6,6 +6,9 @@ import type {
   FileDocView,
   FileSummary,
   FunctionIndexEntry,
+  InsightDiff,
+  InsightHistoryResponse,
+  InsightSnapshot,
   NewProjectInput,
   ProjectInfo,
   ProjectInsight,
@@ -144,6 +147,62 @@ export async function requestInsightPartition(feedback: string): Promise<Project
   })
   if (!res.ok) return null
   return (await res.json()) as ProjectInsight
+}
+
+/* ------------------------- 历史 AI 洞察快照（H2） ------------------------- */
+
+/** POST/DELETE 失败时组装带后端 error 文案的 Error（对齐 askCallStep 风格） */
+async function errorFromResponse(res: Response, fallback: string): Promise<Error> {
+  const detail = await res.json().catch(() => ({}))
+  return new Error((detail as { error?: string }).error ?? `${fallback}：${res.status}`)
+}
+
+/** 历史快照列表（最近 N + activeId 回滚指针）；静态模式或失败返回 null（前端降级隐藏历史区） */
+export async function fetchInsightHistory(): Promise<InsightHistoryResponse | null> {
+  if (mode !== 'api') return null
+  try {
+    return await fetchJson<InsightHistoryResponse>('/api/insight/history')
+  } catch {
+    return null
+  }
+}
+
+/** 单份完整快照（含 insight 载荷）；静态模式或失败（含 404）返回 null */
+export async function fetchInsightSnapshot(id: string): Promise<InsightSnapshot | null> {
+  if (mode !== 'api') return null
+  try {
+    return await fetchJson<InsightSnapshot>(`/api/insight/history/${encodeURIComponent(id)}`)
+  } catch {
+    return null
+  }
+}
+
+/** 对比两份快照（aId=旧 → bId=新，diff 的 from/to 按此定序）；缺参 400 / 不存在 404 抛错 */
+export async function compareInsightSnapshots(aId: string, bId: string): Promise<InsightDiff> {
+  if (mode !== 'api') throw new Error('历史版本写操作仅服务模式可用')
+  const res = await fetch('/api/insight/history/compare', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ aId, bId })
+  })
+  if (!res.ok) throw await errorFromResponse(res, '对比快照失败')
+  return (await res.json()) as InsightDiff
+}
+
+/** 回滚：把 activeId 指向该快照（写操作，只读模式 403 抛错） */
+export async function rollbackInsightSnapshot(id: string): Promise<void> {
+  if (mode !== 'api') throw new Error('历史版本写操作仅服务模式可用')
+  const res = await fetch(`/api/insight/history/${encodeURIComponent(id)}/rollback`, {
+    method: 'POST'
+  })
+  if (!res.ok) throw await errorFromResponse(res, '回滚失败')
+}
+
+/** 清除回滚指针，回到实时视图（写操作，只读模式 403 抛错） */
+export async function clearInsightRollback(): Promise<void> {
+  if (mode !== 'api') throw new Error('历史版本写操作仅服务模式可用')
+  const res = await fetch('/api/insight/history/active', { method: 'DELETE' })
+  if (!res.ok && res.status !== 204) throw await errorFromResponse(res, '回到实时失败')
 }
 
 export async function fetchMeta(): Promise<ServerMeta> {

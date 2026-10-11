@@ -2,6 +2,19 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-12 · H2：历史 AI 分析结果保留 · 前端（历史版本区 / 回滚横幅 / 两版对比）
+
+- **内容**：基于 H1 后端契约实现洞察页「历史版本」前端能力，纯 web 包增量，不改后端/README/shared-types。
+  1. `web/data/api.ts`：新增 `fetchInsightHistory`/`fetchInsightSnapshot`（GET，mode!=='api' 或失败返回 null 降级）、`compareInsightSnapshots`（POST，aId=旧/bId=新）、`rollbackInsightSnapshot`（POST）、`clearInsightRollback`（DELETE /history/active，兼容 204）；写操作失败经 `errorFromResponse` 抛后端 error 文案（对齐 askCallStep 风格）。
+  2. `web/utils/insightHistory.ts`（新增，纯函数）：`snapshotTriggerLabel`（refresh→重新生成、partition→按建议划分）、`formatSnapshotStats`（「模块N · 脉络节点N · 核心N · 链路N」，负数/NaN/缺失按 0 防御）、`summarizeDiff`（InsightDiff→中文差异行：概述/模块增删/脉络根与节点数/核心数/分类计数/AI 段状态，无变化维度跳过，全同返回 []，复用 AI_PASS_LABELS/AI_STATUS_META/CATEGORY_LABELS/CATEGORY_ORDER）。
+  3. `web/components/InsightHistory.vue`（新增）：activeId!=null 时顶部 n-alert 回滚态横幅（快照时间 +「回到实时」）；n-list 历史列表（savedAt/trigger 标签/summary 截断/stats 摘要/「当前查看」高亮/partition 建议回显/archivedCount>0 底部归档提示/空态文案）；每条「回滚到此版本」与对比勾选框，恰好勾选两条时「对比这两版」可用（按 savedAt 定序旧→新传 aId/bId），n-modal 渲染 summarizeDiff 差异行；只读模式（appState.meta?.readOnly）隐藏回滚与回到实时按钮；静态导出模式整区不渲染；defineExpose(reload) 供外部刷新。
+  4. `web/views/InsightHome.vue`：洞察内容顶部挂 `<InsightHistory>`；`triggerAI`/`handleRepartition` 成功后调 `historyRef.reload()`（新生成快照入档即时可见）。
+  5. `web/store/app.ts`：新增 `refreshInsight()` action（复用 fetchInsight 重拉当前生效洞察）——回滚/清除回滚后调用，activeId 命中时后端返回历史快照 insight，实现视图切换。
+  6. `web/test/insightHistory.test.ts`（新增 13 例）：trigger 标签、stats 正常/负数/undefined/NaN 防御、diff 全同空数组、概述截断、模块增删与空跳过、脉络根/节点数、（无）占位、核心数与分类缺失按 0、分类负数脏数据不误报、AI 段缺失=未执行、多维度输出顺序。
+- **影响范围**：仅 web（api/store/新组件/InsightHome/新 util + 测试）；不改 server、core、shared-types、README。
+- **动机**：H1 已具备快照存储/回滚/diff 后端；H2 让用户在洞察页查看历史归档、两版对比、一键回滚或回到实时视图。
+- **测试**：`pnpm lint`（eslint + 四包 typecheck 含 vue-tsc）与 `pnpm test` 全绿（core 12 文件 / server 127 / web 26）。
+
 ## 2026-10-12 · H1 初审整改：activeId 语义修正（回滚指针，默认实时，重新生成清空）
 
 - **内容**：修正 H1 的一处设计语义缺陷——上一轮让 `refreshInsightAI` 每次生成后把 activeId 指向最新快照，导致重新生成后再改源码时 `GET /api/insight` 仍返回旧快照、绕过既有 basis 一致性/陈旧检测。
