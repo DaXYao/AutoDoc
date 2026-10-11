@@ -197,6 +197,30 @@ function buildCallEdges(
         }
       }
     }
+    // 命名空间内部调用：`import * as lib from './x'` + `lib.fn()` → 连到 x 导出的 fn。
+    // 仅当接收者是命名空间 import 的局部名时命中，静态 100% 确定才连（铁证级）。
+    // 暂缓：re-export(`export…from`)链与类静态方法 `Foo.bar()` 解析（更复杂/有歧义，留待后续阶段）。
+    if (!resolved && site.receiver) {
+      const nsImp = importByName.get(site.receiver)
+      if (nsImp && nsImp.kind === 'namespace') {
+        const targetFile = resolveModule(relPath, nsImp.source, knownPaths)
+        if (targetFile) {
+          resolved = exportedIndex.get(targetFile)?.get(calledName) ?? null
+        }
+      }
+    }
+    // 最终仍解析不到 → 外部/未解析，补记来源模块说明符（供阶段2 让 AI 按「模块.名」作答）。
+    // 取值优先级：接收者 import 源 > 被调名 import 源 > null（无来源，如本地对象成员调用）。
+    let externalModule: string | null | undefined
+    if (!resolved) {
+      const receiverSource = site.receiver
+        ? importByName.get(site.receiver)?.source
+        : undefined
+      const rawSource = receiverSource ?? importByName.get(calledName)?.source ?? null
+      // 仅裸模块说明符（不以 '.' 开头，如 vue/node:fs）才记录：相对路径未解析属「项目内没连上」，
+      // 并非真外部库，AI 无法凭训练知识描述 './x'，记 null（项目内未连通的区分交后续阶段）。
+      externalModule = rawSource !== null && !rawSource.startsWith('.') ? rawSource : null
+    }
     edges.push({
       callerId: fn.id,
       calleeName: calledName,
@@ -205,7 +229,8 @@ function buildCallEdges(
       calleeCategory: resolved ? resolved.category : 'external',
       role: site.role,
       line: site.line,
-      calleePurpose: resolved ? resolved.purpose : null
+      calleePurpose: resolved ? resolved.purpose : null,
+      ...(resolved ? {} : { externalModule })
     })
   }
   return edges
@@ -249,9 +274,14 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
   const exportedIndex = new Map<string, Map<string, FunctionDoc>>()
   for (const unit of units) {
     const table = new Map<string, FunctionDoc>()
-    for (const fn of unit.functions) {
+    // unit.parsed 与 unit.functions 同序对应；用 parsed 上的 isDefaultExport 补 'default' 键
+    unit.parsed.forEach((p, index) => {
+      const fn = unit.functions[index]
+      if (!fn) return
       if (fn.exported) table.set(fn.name, fn)
-    }
+      // 默认导出：额外登记 'default' 键，供 `import foo from './x'` 的默认导入解析命中
+      if (p.isDefaultExport && !table.has('default')) table.set('default', fn)
+    })
     exportedIndex.set(unit.relPath, table)
   }
 
@@ -270,7 +300,11 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
     }
     const importByName = new Map<string, ParsedImport>()
     for (const imp of imports) {
-      if (imp.kind === 'named') importByName.set(imp.localName, imp)
+      // named/default 供「被调名 = 局部名」直接解析；namespace 供「receiver.fn()」成员解析。
+      // 三者都以 localName 建索引：既有 named 路径不变，新增 default/namespace 只增解析、不改判定。
+      if (imp.kind === 'named' || imp.kind === 'default' || imp.kind === 'namespace') {
+        importByName.set(imp.localName, imp)
+      }
     }
 
     parsed.forEach((p, index) => {

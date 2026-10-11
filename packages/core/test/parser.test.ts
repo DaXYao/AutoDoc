@@ -5,11 +5,19 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import { ensureDefaultParsers, parserRegistry } from '../src/index.js'
 
 const fixtureDir = fileURLToPath(new URL('./fixtures/sample-project', import.meta.url))
+const resolveDir = fileURLToPath(new URL('./fixtures/resolve-project', import.meta.url))
 
 async function parseFixture(relPath: string) {
   const parser = parserRegistry.forFile(relPath)
   expect(parser, `缺少 ${relPath} 的解析器`).toBeTruthy()
   const source = await readFile(join(fixtureDir, relPath), 'utf-8')
+  return (await parser!.parse(source)).functions
+}
+
+async function parseResolve(relPath: string) {
+  const parser = parserRegistry.forFile(relPath)
+  expect(parser, `缺少 ${relPath} 的解析器`).toBeTruthy()
+  const source = await readFile(join(resolveDir, relPath), 'utf-8')
   return (await parser!.parse(source)).functions
 }
 
@@ -78,5 +86,36 @@ describe('TypeScript 解析器', () => {
     expect(isBlank?.docComment).toBeNull()
     const formatDate = functions.find((f) => f.name === 'formatDate')
     expect(formatDate?.docComment).toContain('格式化')
+  })
+})
+
+describe('成员调用接收者与默认导出标记（阶段1 增量）', () => {
+  it('成员调用捕获简单标识符接收者；identifier 调用不设 receiver', async () => {
+    const [run] = await parseResolve('src/caller.ts')
+    const foo = run.callSites.find((s) => s.name === 'foo')
+    expect(foo?.receiver).toBeUndefined()
+    const bar = run.callSites.find((s) => s.name === 'bar')
+    expect(bar?.receiver).toBe('lib')
+    const readFile = run.callSites.find((s) => s.name === 'readFile')
+    expect(readFile?.receiver).toBe('fs')
+    const load = run.callSites.find((s) => s.name === 'load')
+    expect(load?.receiver).toBe('explorer')
+  })
+
+  it('嵌套成员调用不设 receiver：deep.a.b.c() 只记属性名 c', async () => {
+    const [run] = await parseResolve('src/caller.ts')
+    const c = run.callSites.find((s) => s.name === 'c')
+    expect(c).toBeTruthy()
+    expect(c?.receiver).toBeUndefined()
+  })
+
+  it('export default function 标记 isDefaultExport；具名导出不标记', async () => {
+    const functions = await parseResolve('src/x.ts')
+    const foo = functions.find((f) => f.name === 'foo')
+    expect(foo?.isDefaultExport).toBe(true)
+    expect(foo?.exported).toBe(true)
+    const bar = functions.find((f) => f.name === 'bar')
+    expect(bar?.isDefaultExport).toBeUndefined()
+    expect(bar?.exported).toBe(true)
   })
 })

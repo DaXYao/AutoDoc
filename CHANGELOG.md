@@ -2,6 +2,29 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-12 · 阶段1 初审整改：externalModule 只记裸模块说明符 + 补断言
+
+- **内容**：3 处精准小修，纯增量原则不变。
+  1. `generate.ts` `buildCallEdges`：externalModule 计算加「裸说明符过滤」——仅当来源不以 `.` 开头（真外部库/Node 内置，如 vue、node:fs）才记录；相对路径来源（./x 未解析成员）属「项目内没连上」非真外部库，记 null。优先级顺序（接收者源 > 被调名源）不变，已解析边仍不带 externalModule。
+  2. `CHANGELOG.md`：阶段1 条目补记「`export default () => {}` 现产出 `anonymous` 函数条目」的函数条目级增量说明（见下条）。
+  3. 测试：fixture `resolve-project` 扩 caller.ts + 新增 comp.ts（`export default class`）；resolve.test.ts 补 3 例（相对路径来源 externalModule=null、接收者源优先 m1、export default class 不误连）；parser.test.ts 补 1 例（嵌套成员调用 `deep.a.b.c()` 不设 receiver）。
+- **影响范围**：core（generate.ts 一处 + 测试/fixture）；不改 README、不动 server/web、不改 shared-types。
+- **动机**：初审发现相对路径来源记入 externalModule 对阶段2「AI 按模块.名补全外部库用途」无意义（AI 无法凭训练知识描述项目内 './x'）；并补齐嵌套 receiver、default class 不误连、来源优先级三处断言缺口。
+- **测试**：`pnpm lint` 与 `pnpm test` 全绿。
+
+## 2026-10-12 · 外部/未解析调用解析 · 阶段1：core 解析地基（纯增量）
+
+- **内容**：只新增解析能力 + 给外部边补记来源模块，不改既有解析行为与 external 判定口径。
+  1. `parser/types.ts`：`ParsedCallSite` 加可选 `receiver?`（成员调用接收者，仅简单标识符形态）；`ParsedFunction` 加可选 `isDefaultExport?`。
+  2. `parser/jsFamily.ts`：`collectCalls` 对 `member_expression` 读取 `object`，当且仅当其为 `identifier` 时记 `receiver`（`a.b.c()` 嵌套接收者、identifier、new 均不设；name 仍为 property 文本，兼容既有 byName）；`collectTopLevel` 以结构化方式（`export_statement` 是否含 `default` 关键字子节点）判定默认导出，对 `export default function/箭头/函数表达式` 标记 `isDefaultExport`（新增顶层匿名箭头/函数分支，仅出现在默认导出声明位，不影响既有口径）。注意该分支属「函数条目级」增量：`export default () => {}`（顶层匿名默认导出）现在会产出一个名为 `anonymous` 的函数条目（此前不产出，是默认导入解析的必要前提），对应文件快照会多出一条 added 变更记录，非仅调用边级增量。
+  3. `generate.ts`：`exportedIndex` 借 `parsed.isDefaultExport` 为每文件补 `'default'` 键；`importByName` 由仅 `named` 扩为 `named/default/namespace`（打通默认导入解析、支撑命名空间解析）；`buildCallEdges` 在既有分支之后、判定 external 之前新增「命名空间内部调用」路径（`receiver` 命中 namespace import → 目标文件按 `calledName` 查导出表），并为最终 external 边补记 `externalModule`（优先级：接收者 import 源 > 被调名 import 源 > null）。去重键、stepId、按行排序不变。
+  4. `shared-types`：`CallEdge` 加可选 `externalModule?: string | null`（仅外部边填充，供阶段2 让 AI 按「模块.名」作答）。
+  5. `parser/csharp.ts`：不改逻辑；`receiver` 为可选字段，csharp 不设，typecheck 通过。
+- **影响范围**：core（types/jsFamily/generate）+ shared-types（CallEdge）+ core 测试与新增 fixture `resolve-project`；不改 README、不动 server/web。
+- **动机**：为「解析外部/未解析调用」打底——修复默认导入连不上、新增命名空间内部调用解析、给外部边标注来源模块；坚持「铁证级、静态 100% 确定才连，宁可少连不可连错」。
+- **暂缓项**：re-export（`export…from`）链解析、类静态方法 `Foo.bar()` 与 `export default class` → `'default'` 映射（类不产出单一函数条目，映射会误连），均留待后续阶段；代码内已注明原因。
+- **测试**：新增 `test/resolve.test.ts`（默认导入 / 命名空间内部调用 / vue 命名 import externalModule / node:fs 命名空间成员调用 / 无来源本地对象成员调用 externalModule=null，5 例）与 `parser.test.ts` 2 例（receiver 捕获、isDefaultExport 标记）。`pnpm lint` 与 `pnpm test` 全绿（core 112 / server 103 / web 8）。
+
 ## 2026-10-11 · 初审整改：ask.ts 无 id 占位口径统一 + keySteps reason 断言加强
 
 - **内容**：2 处精准小修，不重构、不动 AI pass 兜底逻辑。

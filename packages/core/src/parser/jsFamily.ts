@@ -88,8 +88,13 @@ function extractParams(paramsNode: SyntaxNode | null): string[] {
 function collectCalls(root: SyntaxNode | null): ParsedCallSite[] {
   const sites: ParsedCallSite[] = []
   if (!root) return sites
-  const push = (node: SyntaxNode, name: string): void => {
-    sites.push({ name, line: node.startPosition.row + 1, role: detectCallRole(node, name) })
+  const push = (node: SyntaxNode, name: string, receiver?: string): void => {
+    sites.push({
+      name,
+      line: node.startPosition.row + 1,
+      role: detectCallRole(node, name),
+      ...(receiver !== undefined ? { receiver } : {})
+    })
   }
   const visit = (node: SyntaxNode): void => {
     if (node.type === 'call_expression') {
@@ -100,7 +105,14 @@ function collectCalls(root: SyntaxNode | null): ParsedCallSite[] {
         } else if (fn.type === 'member_expression') {
           const property = fn.childForFieldName('property')
           if (property && property.type === 'property_identifier') {
-            push(node, property.text)
+            // 接收者仅在简单标识符形态（lib.fn()）时捕获；嵌套（a.b.c()）不设，避免歧义。
+            // name 保持 property 文本不变，兼容既有 byName 匹配口径。
+            const object = fn.childForFieldName('object')
+            push(
+              node,
+              property.text,
+              object && object.type === 'identifier' ? object.text : undefined
+            )
           }
         }
       }
@@ -206,6 +218,8 @@ interface BuildOptions {
   className: string | null
   kind: 'function' | 'method'
   exported: boolean
+  /** 是否 `export default …` 形态（供默认导入解析；缺省 false） */
+  isDefaultExport?: boolean
   visibility: Visibility
   decorators: string[]
 }
@@ -244,6 +258,7 @@ export class JsFamilyParser implements LanguageParser {
       visibility: opts.visibility,
       decorators: opts.decorators,
       exported: opts.exported,
+      ...(opts.isDefaultExport ? { isDefaultExport: true } : {}),
       docComment: findDocComment(opts.anchor),
       bodyText: opts.bodyNode ? opts.bodyNode.text : '',
       callSites: collectCalls(opts.bodyNode),
@@ -258,14 +273,17 @@ export class JsFamilyParser implements LanguageParser {
     exported: boolean,
     out: ParsedFunction[],
     anchor?: SyntaxNode,
-    extraDecorators?: string[]
+    extraDecorators?: string[],
+    isDefaultExport?: boolean
   ): void {
     const outerAnchor = anchor ?? node
 
     if (node.type === 'export_statement') {
+      // 结构化判定默认导出：export_statement 含 'default' 关键字子节点（避免脆弱的纯文本匹配）
+      const isDefault = allKids(node).some((c) => c.type === 'default')
       for (const child of namedKids(node)) {
         if (child.type === 'comment' || child.type === 'export_clause') continue
-        this.collectTopLevel(child, true, out, outerAnchor)
+        this.collectTopLevel(child, true, out, outerAnchor, undefined, isDefault)
       }
       return
     }
@@ -276,7 +294,7 @@ export class JsFamilyParser implements LanguageParser {
         .map(decoratorName)
       const definition = node.childForFieldName('definition')
       if (definition) {
-        this.collectTopLevel(definition, exported, out, outerAnchor, decorators)
+        this.collectTopLevel(definition, exported, out, outerAnchor, decorators, isDefaultExport)
       }
       return
     }
@@ -297,12 +315,37 @@ export class JsFamilyParser implements LanguageParser {
             className: null,
             kind: 'function',
             exported,
+            isDefaultExport,
+            visibility: exported ? 'exported' : 'module-local',
+            decorators
+          })
+        )
+        break
+      // `export default () => {}` / `export default function () {}`：匿名默认导出表达式。
+      // 顶层裸箭头/函数表达式仅出现在默认导出声明位，故此处新增分支不影响既有解析口径。
+      case 'arrow_function':
+      case 'function':
+      case 'generator_function':
+        out.push(
+          this.buildEntry({
+            node,
+            anchor: outerAnchor,
+            nameNode: node.childForFieldName('name'),
+            paramsNode: node.childForFieldName('parameters'),
+            bodyNode: node.childForFieldName('body'),
+            returnTypeNode: node.childForFieldName('return_type'),
+            className: null,
+            kind: 'function',
+            exported,
+            isDefaultExport,
             visibility: exported ? 'exported' : 'module-local',
             decorators
           })
         )
         break
       case 'class_declaration':
+        // 暂缓：`export default class {}` 不标 isDefaultExport。类默认导出不产出单一函数条目，
+        // 映射到 'default' 键会指向某个方法而误连，违背「宁可少连不可连错」；留待后续类解析阶段。
         this.collectClass(node, exported, decorators, outerAnchor, out)
         break
       case 'lexical_declaration':
@@ -322,6 +365,7 @@ export class JsFamilyParser implements LanguageParser {
               className: null,
               kind: 'function',
               exported,
+              isDefaultExport,
               visibility: exported ? 'exported' : 'module-local',
               decorators
             })

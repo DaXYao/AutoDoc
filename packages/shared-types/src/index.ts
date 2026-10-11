@@ -92,6 +92,12 @@ export interface CallEdge {
   line: number
   /** 被调用方用途说明（文件内可解析时填充，否则 null） */
   calleePurpose: string | null
+  /**
+   * 外部调用的来源模块说明符（如 'vue'、'node:fs'、'cosmiconfig'），供「追问」等阶段
+   * 让 AI 按「模块.名」定位外部实现。仅在 calleeId 为 null（外部/未解析）时填充：
+   * 有 import 源则为该源字符串，无源（如本地对象成员调用）为 null。已解析边不设此字段。
+   */
+  externalModule?: string | null
 }
 
 export type FunctionKind = 'function' | 'method'

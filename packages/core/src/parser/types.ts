@@ -6,6 +6,11 @@ export interface ParsedCallSite {
   /** 1 基行号 */
   line: number
   role: CallRole
+  /**
+   * 成员调用 `obj.method()` 的接收者对象文本，仅当接收者是简单标识符时才有值。
+   * 嵌套接收者（`a.b.c()`）与 identifier/new 调用不设，避免歧义（供命名空间解析用）。
+   */
+  receiver?: string
 }
 
 /**
@@ -29,6 +34,8 @@ export interface ParsedFunction {
   bodyText: string
   /** 函数体内出现的所有调用点（含无法解析的），按源码顺序 */
   callSites: ParsedCallSite[]
+  /** 是否为 `export default …` 声明的默认导出（供默认导入解析用；缺省 false） */
+  isDefaultExport?: boolean
   /** 方法体内「注释 + 紧随代码块」提取结果（functionId 在主流程回填） */
   codeBlocks: Omit<CodeBlock, 'functionId'>[]
   /** 1 基行号 */
