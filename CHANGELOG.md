@@ -2,6 +2,31 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-12 · H1 初审整改：activeId 语义修正（回滚指针，默认实时，重新生成清空）
+
+- **内容**：修正 H1 的一处设计语义缺陷——上一轮让 `refreshInsightAI` 每次生成后把 activeId 指向最新快照，导致重新生成后再改源码时 `GET /api/insight` 仍返回旧快照、绕过既有 basis 一致性/陈旧检测。
+  1. `server/insight.ts`：`saveInsightSnapshot` 存完新快照后改为 `setActiveInsightSnapshotId(null)` **清空回滚指针**（回到实时视图），不再指向最新快照；`loadInsight` 的 activeId 分支与 rollback/clear 端点（app.ts）保持不变。activeId 语义定为：**回滚指针，默认 null=实时视图，仅 rollback 端点设快照 id，重新生成清空**。
+  2. `server/test/flow.test.ts`：回退上一轮在两处 basis-不符用例里手工插入的 `setActiveInsightSnapshotId(null)`（掩盖性改动）；修复 1 后两例走实时路径自然通过。
+  3. `core/storage/SqliteStorage.ts`：`getInsightSnapshot` 的 insight_json 解析加 try/catch，损坏或缺失时返回 null 并 console.warn（对齐 stats_json 容错风格），去掉 `{} as ProjectInsight` 非法兜底。
+  4. `server/test/insightHistory.test.ts`：断言对齐新语义——saveInsightSnapshot/refreshInsightAI 后 activeId 为 null；「loadInsight activeId 命中返回快照」改为手动置回滚态后断言；新增「rollback 后重新生成 → activeId 被清空为 null」用例。既有 stats/diff/存储往返/向后兼容覆盖不削弱。
+- **影响范围**：server（insight + 两测试文件）+ core（SqliteStorage）；不改 shared-types、不改 web、不改 README。
+- **动机**：H1 初审发现 activeId 被误用为「当前=最新」指针，与回滚指针的正确语义冲突，且靠测试内手工清 activeId 掩盖了回归。
+- **测试**：`pnpm lint`（eslint + 四包 typecheck）与 `pnpm test` 全绿（core 124 / server 127 / web 13）；flow.test.ts 65 例、insightHistory.test.ts 全部通过。
+
+## 2026-10-12 · H1：历史 AI 分析结果保留 · 后端地基（快照存储 / 回滚 / diff）
+
+- **内容**：为「AI 每次生成的洞察有出入、旧结果可能有价值」提供历史保留能力的后端与数据层（前端为 H2）。纯增量，不动既有 AI pass 兜底逻辑、不改 README。
+  1. `shared-types`：新增 `InsightSnapshotStats`/`InsightSnapshotTrigger`/`InsightSnapshotMeta`/`InsightSnapshot`/`InsightDiff`/`InsightHistoryResponse`；`InsightConfig` 加可选 `history?: { showRecent?: number }`。
+  2. `core/config.ts`：schema 增 `insight.properties.history.showRecent`（integer、[1,100]、additionalProperties:false）；新增导出常量 `DEFAULT_SHOW_RECENT=10` 与辅助 `resolveShowRecent(normalized)`（未配置回落 10）——schema/默认常量/辅助三处联动。
+  3. `core/storage`：`StorageAdapter` 增 `listInsightSnapshots`(仅 meta、新→旧)/`getInsightSnapshot`(含完整 insight)/`addInsightSnapshot`(写)/`getActiveInsightSnapshotId`/`setActiveInsightSnapshotId`(写)，并导出共用 `toSnapshotMeta`。**无删除接口，全归档永不删**。SqliteStorage：幂等 `CREATE TABLE insight_history(...)` + kv 表 `app_state(key,value)`（activeId 存 key='activeInsightSnapshotId'），写前 `backupOnce()`，list 只 SELECT meta 列不取 insight_json、`ORDER BY saved_at DESC`，stats 走 stats_json。JsonStorage：`JsonData` 加 `insightHistory?`/`activeInsightSnapshotId?`，写走 `mutate()`(=init+backupOnce)+原子 `save()`，list 剥离 insight 载荷、按 savedAt 倒序，旧数据缺省补 `[]`/undefined。
+  4. `server/insight.ts`：新增纯函数 `computeSnapshotStats`(moduleCount/chainCount/flowNodeCount 递归/coreCount/categoryCounts 按 graph.nodes/aiPassStatus) 与 `saveInsightSnapshot`(randomUUID + 组装整份快照 + addInsightSnapshot + setActiveInsightSnapshotId(null) 清空回滚指针——activeId 是**回滚指针**，默认 null=实时视图，重新生成清空它，仅 rollback 端点指向快照；**try/catch 包裹，失败只 console.warn 绝不影响主流程**)；接入 `refreshInsightAI` **AI 启用路径末尾**（aiStatus 写好后、return 前，trigger=`forcePartition?'partition':'refresh'`；`!aiEnabled` 提前 return 分支不存）；`loadInsight` **开头**先查 activeId，命中快照则直接返回该快照 insight（回滚/历史视图）+ 仍 `buildGraph` 得 graph，activeId 空/快照不存在则走既有缓存计算逻辑不变。
+  5. `server/insightDiff.ts`（新增）：纯函数 `diffInsightSnapshots(a,b)` 结构化摘要 diff——summary 文本变化、modules 按 name 求 added/removed/commonCount、flows 取 roots 的 label + 递归节点数、coreCount/categoryCounts 取自 stats、aiStatus 逐 pass 仅列变化项。
+  6. `server/app.ts`：新增 `GET /api/insight/history`(最近 N + total + archivedCount + activeId + showRecent，读)、`GET /api/insight/history/:id`(完整快照/404，读)、`POST /api/insight/history/compare`(缺参 400、任一不存在 404，读不拦 readOnly)、`POST /api/insight/history/:id/rollback`(404 校验 + setActive，**写，readOnly 403**)、`DELETE /api/insight/history/active`(activeId 置 null 回实时视图，**写，readOnly 403**)；均先 `manager.getActive()`，无活动项目 409。
+- **影响范围**：shared-types + core（config/storage 三文件）+ server（insight/新 insightDiff/app）+ 测试；不改 README、不改 web、不动其它 AI pass 兜底逻辑。
+- **动机**：AI 洞察非确定、旧结果可能更优，需保留历史以供查看/对比/回滚，且属用户数据须写前备份、归档不删（对齐批注/变更历史既有安全约定）。
+- **关键决策**：① 粒度=每次生成存一整份 ProjectInsight 快照；② 全归档永不删，接口只返回最近 N（默认 10、可配）；③ activeId 为**回滚指针**：默认 null=实时视图，仅 rollback 端点将其设为快照 id，重新生成清空它（loadInsight 在 activeId 命中时返回该快照，不改写实时计算逻辑）；④ diff 为结构化摘要而非全文比对。
+- **测试**：core `storage.test.ts` 双适配器补快照往返（meta-only/倒序/无载荷、get 含完整 insight、activeId set/get/置 null、无删除接口）+ 向后兼容（旧 SQLite 库无表幂等建表读取缺省空、旧 JSON 缺字段读取缺省空）；server 新增 `insightHistory.test.ts`（computeSnapshotStats 流数/核心/分类/状态、diffInsightSnapshots 各维度、saveInsightSnapshot 清空 activeId、loadInsight activeId 命中返回快照（手动置回滚态）/清除回实时、refreshInsightAI 自动存快照且 activeId 保持 null、rollback 后重新生成清空 activeId + forcePartition→partition + !aiEnabled 不存）。既有 `flow.test.ts` 两处 basis-不符用例无需手工清 activeId，走实时路径自然通过（refresh 不再设置 activeId）。`pnpm lint`（eslint + 四包 typecheck）与 `pnpm test` 全绿（core 124 / server 126 / web 13）。
+
 ## 2026-10-12 · 阶段2 初审整改：externals 4 处精准小修
 
 - **内容**：4 处精准小修，不改架构、不动其它 AI pass 兜底逻辑。

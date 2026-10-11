@@ -1,4 +1,4 @@
-import type { Annotation, AnnotationKind, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType } from '@autodoc/shared-types'
+import type { Annotation, AnnotationKind, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType, InsightSnapshot, InsightSnapshotMeta } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 
 export interface NewAnnotationInput {
@@ -13,6 +13,24 @@ export interface NewAnnotationInput {
 export interface AnnotationPatch {
   content?: string
   author?: string
+}
+
+/**
+ * 从完整快照剥离 insight 载荷，得到仅含元信息的视图（供列表下发/返回）。
+ * SQLite 与 JSON 两个适配器共用，保证 meta 结构一致。
+ */
+export function toSnapshotMeta(snapshot: InsightSnapshot): InsightSnapshotMeta {
+  return {
+    id: snapshot.id,
+    savedAt: snapshot.savedAt,
+    graphFingerprint: snapshot.graphFingerprint,
+    trigger: snapshot.trigger,
+    partitionFeedback: snapshot.partitionFeedback,
+    aiEnabled: snapshot.aiEnabled,
+    aiGenerated: snapshot.aiGenerated,
+    summary: snapshot.summary,
+    stats: snapshot.stats
+  }
 }
 
 export interface NewChangeInput {
@@ -64,4 +82,17 @@ export interface StorageAdapter {
   getGitWatermark(): string | null
   /** 推进 Git 水位线（写操作，触发写前备份） */
   setGitWatermark(hash: string): void
+
+  /* ------------------------- 历史 AI 洞察快照（用户数据：写前备份、全归档不删、无删除接口） ------------------------- */
+
+  /** 全部快照的元信息（不含 insight 载荷），新→旧排序 */
+  listInsightSnapshots(): InsightSnapshotMeta[]
+  /** 按 id 取完整快照（含 insight 载荷）；不存在返回 null */
+  getInsightSnapshot(id: string): InsightSnapshot | null
+  /** 追加一份快照（写操作，触发写前备份）；返回其元信息。归档不删，故无删除接口 */
+  addInsightSnapshot(snapshot: InsightSnapshot): InsightSnapshotMeta
+  /** 当前生效（回滚/历史视图）的快照 id；null=实时计算视图 */
+  getActiveInsightSnapshotId(): string | null
+  /** 设置当前生效快照 id；传 null 回到实时计算视图（写操作，触发写前备份） */
+  setActiveInsightSnapshotId(id: string | null): void
 }

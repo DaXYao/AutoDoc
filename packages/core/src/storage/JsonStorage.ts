@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, w
 import { readFileSync } from 'node:fs'
 import { dirname, join, basename, extname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { Annotation, ChangeRecord, ChangeSource } from '@autodoc/shared-types'
+import type { Annotation, ChangeRecord, ChangeSource, InsightSnapshot, InsightSnapshotMeta } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 import type {
   AnnotationPatch,
@@ -10,6 +10,7 @@ import type {
   NewChangeInput,
   StorageAdapter
 } from './StorageAdapter.js'
+import { toSnapshotMeta } from './StorageAdapter.js'
 
 interface JsonData {
   version: 1
@@ -18,6 +19,10 @@ interface JsonData {
   snapshots: Record<string, FileSnapshot>
   /** Git 历史回填水位线（已消化到的 commit hash） */
   gitWatermark?: string
+  /** 历史 AI 洞察快照（含完整 insight 载荷）；旧数据缺省视为 [] */
+  insightHistory?: InsightSnapshot[]
+  /** 当前生效（回滚/历史视图）快照 id；旧数据缺省视为 undefined（实时计算） */
+  activeInsightSnapshotId?: string
 }
 
 /** 每次返回全新的空数据对象；避免 module 级单例的可变引用被写操作跨实例污染 */
@@ -238,6 +243,38 @@ export class JsonStorage implements StorageAdapter {
   setGitWatermark(hash: string): void {
     this.mutate()
     this.data.gitWatermark = hash
+    this.save()
+  }
+
+  listInsightSnapshots(): InsightSnapshotMeta[] {
+    this.init()
+    // 旧数据无 insightHistory 字段：缺省补 []；返回时剥离 insight 载荷只给 meta，按 savedAt 倒序（新→旧）
+    return [...(this.data.insightHistory ?? [])]
+      .sort((a, b) => b.savedAt.localeCompare(a.savedAt))
+      .map((s) => toSnapshotMeta(s))
+  }
+
+  getInsightSnapshot(id: string): InsightSnapshot | null {
+    this.init()
+    return (this.data.insightHistory ?? []).find((s) => s.id === id) ?? null
+  }
+
+  addInsightSnapshot(snapshot: InsightSnapshot): InsightSnapshotMeta {
+    this.mutate()
+    ;(this.data.insightHistory ??= []).push(snapshot)
+    this.save()
+    return toSnapshotMeta(snapshot)
+  }
+
+  getActiveInsightSnapshotId(): string | null {
+    this.init()
+    return this.data.activeInsightSnapshotId ?? null
+  }
+
+  setActiveInsightSnapshotId(id: string | null): void {
+    this.mutate()
+    if (id === null) delete this.data.activeInsightSnapshotId
+    else this.data.activeInsightSnapshotId = id
     this.save()
   }
 }

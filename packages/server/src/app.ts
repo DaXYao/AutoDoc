@@ -2,11 +2,13 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { AnnotationKind, AnnotationTargetType, AskRequest, NewProjectInput, ProjectsResponse } from '@autodoc/shared-types'
+import type { AnnotationKind, AnnotationTargetType, AskRequest, InsightHistoryResponse, NewProjectInput, ProjectsResponse } from '@autodoc/shared-types'
+import { resolveShowRecent } from '@autodoc/core'
 import { regenerate } from './context.js'
 import { pickFolder } from './pickFolder.js'
 import type { ProjectManager } from './projects.js'
 import { loadInsight, refreshInsightAI } from './insight.js'
+import { diffInsightSnapshots } from './insightDiff.js'
 import { AskInputError, askCallStep } from './ask.js'
 import { getDeepSeekConfig } from './env.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
@@ -131,6 +133,70 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       feedback: typeof body.feedback === 'string' ? body.feedback : ''
     })
     return insight
+  })
+
+  /* ------------------------- 历史 AI 洞察快照（H1） ------------------------- */
+
+  // 历史列表：全归档、只返回最近 N（读操作，不受 readOnly 拦截）
+  app.get('/api/insight/history', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const all = service.storage.listInsightSnapshots()
+    const showRecent = resolveShowRecent(service.normalized)
+    const snapshots = all.slice(0, showRecent)
+    const body: InsightHistoryResponse = {
+      snapshots,
+      total: all.length,
+      archivedCount: Math.max(all.length - showRecent, 0),
+      activeId: service.storage.getActiveInsightSnapshotId(),
+      showRecent
+    }
+    return body
+  })
+
+  // 单份完整快照（读）
+  app.get<{ Params: { id: string } }>('/api/insight/history/:id', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const snap = service.storage.getInsightSnapshot(req.params.id)
+    if (!snap) return reply.code(404).send({ error: `snapshot not found: ${req.params.id}` })
+    return snap
+  })
+
+  // 对比两版：结构化摘要 diff（读，不受 readOnly 拦截）
+  app.post('/api/insight/history/compare', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const body = (req.body ?? {}) as { aId?: unknown; bId?: unknown }
+    if (typeof body.aId !== 'string' || body.aId.length === 0 ||
+        typeof body.bId !== 'string' || body.bId.length === 0) {
+      return reply.code(400).send({ error: '缺少 aId / bId' })
+    }
+    const a = service.storage.getInsightSnapshot(body.aId)
+    const b = service.storage.getInsightSnapshot(body.bId)
+    if (!a) return reply.code(404).send({ error: `snapshot not found: ${body.aId}` })
+    if (!b) return reply.code(404).send({ error: `snapshot not found: ${body.bId}` })
+    return diffInsightSnapshots(a, b)
+  })
+
+  // 回滚为当前：把 activeId 指向该快照（写操作，readOnly 403）
+  app.post<{ Params: { id: string } }>('/api/insight/history/:id/rollback', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const snap = service.storage.getInsightSnapshot(req.params.id)
+    if (!snap) return reply.code(404).send({ error: `snapshot not found: ${req.params.id}` })
+    service.storage.setActiveInsightSnapshotId(req.params.id)
+    return { ok: true, activeId: req.params.id }
+  })
+
+  // 清除当前生效快照，回到实时计算视图（写操作，readOnly 403）
+  app.delete('/api/insight/history/active', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    service.storage.setActiveInsightSnapshotId(null)
+    return { ok: true, activeId: null }
   })
 
   /* ------------------------- 文档数据路由（作用于活动项目） ------------------------- */

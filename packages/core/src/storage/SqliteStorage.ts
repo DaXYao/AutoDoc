@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { Annotation, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType } from '@autodoc/shared-types'
+import type { Annotation, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType, InsightSnapshot, InsightSnapshotMeta, InsightSnapshotStats, ProjectInsight } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 import { backupBaseName, pruneBackups } from './JsonStorage.js'
 import type {
@@ -11,6 +11,7 @@ import type {
   NewChangeInput,
   StorageAdapter
 } from './StorageAdapter.js'
+import { toSnapshotMeta } from './StorageAdapter.js'
 
 /**
  * SQLite 存储适配器，基于 Node 内置 node:sqlite（零原生依赖、免编译）。
@@ -58,6 +59,22 @@ export class SqliteStorage implements StorageAdapter {
       CREATE TABLE IF NOT EXISTS git_state (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS insight_history (
+        id TEXT PRIMARY KEY,
+        saved_at TEXT NOT NULL,
+        fingerprint TEXT,
+        trigger TEXT,
+        partition_feedback TEXT,
+        ai_enabled INTEGER,
+        ai_generated INTEGER,
+        summary TEXT,
+        stats_json TEXT,
+        insight_json TEXT
+      );
+      CREATE TABLE IF NOT EXISTS app_state (
+        key TEXT PRIMARY KEY,
+        value TEXT
       );
     `)
     // 迁移前备份：仅升级已有库时触发，用 'premigrate' 类型命名（<base>.premigrate.<stamp>.bak），
@@ -247,6 +264,104 @@ export class SqliteStorage implements StorageAdapter {
         "INSERT INTO git_state (key, value) VALUES ('watermark', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
       )
       .run(hash)
+  }
+
+  listInsightSnapshots(): InsightSnapshotMeta[] {
+    // 只 SELECT meta 列（不取 insight_json），按保存时间倒序（新→旧）
+    const rows = this.conn()
+      .prepare(
+        'SELECT id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json FROM insight_history ORDER BY saved_at DESC'
+      )
+      .all()
+    return rows.map((row) => this.rowToSnapshotMeta(row))
+  }
+
+  getInsightSnapshot(id: string): InsightSnapshot | null {
+    const row = this.conn()
+      .prepare('SELECT * FROM insight_history WHERE id = ?')
+      .get(id)
+    if (!row) return null
+    const meta = this.rowToSnapshotMeta(row)
+    // insight_json 缺失或损坏时返回 null（该快照视为不可用），不构造非法空对象；
+    // 对齐 stats_json 的损坏容错风格：只 warn，不抛、不阻断调用方
+    if (typeof row.insight_json !== 'string' || row.insight_json.length === 0) {
+      console.warn(`[autodoc] 洞察快照 ${id} 缺失 insight_json，视为不可用`)
+      return null
+    }
+    try {
+      const insight = JSON.parse(row.insight_json) as ProjectInsight
+      return { ...meta, insight }
+    } catch {
+      console.warn(`[autodoc] 洞察快照 ${id} 的 insight_json 解析失败，视为不可用`)
+      return null
+    }
+  }
+
+  addInsightSnapshot(snapshot: InsightSnapshot): InsightSnapshotMeta {
+    this.backupOnce()
+    this.conn()
+      .prepare(
+        'INSERT INTO insight_history (id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, insight_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      )
+      .run(
+        snapshot.id,
+        snapshot.savedAt,
+        snapshot.graphFingerprint,
+        snapshot.trigger,
+        snapshot.partitionFeedback,
+        snapshot.aiEnabled ? 1 : 0,
+        snapshot.aiGenerated ? 1 : 0,
+        snapshot.summary,
+        JSON.stringify(snapshot.stats),
+        JSON.stringify(snapshot.insight)
+      )
+    return toSnapshotMeta(snapshot)
+  }
+
+  getActiveInsightSnapshotId(): string | null {
+    const row = this.conn()
+      .prepare("SELECT value FROM app_state WHERE key = 'activeInsightSnapshotId'")
+      .get()
+    return row && typeof row.value === 'string' && row.value.length > 0 ? row.value : null
+  }
+
+  setActiveInsightSnapshotId(id: string | null): void {
+    this.backupOnce()
+    this.conn()
+      .prepare(
+        "INSERT INTO app_state (key, value) VALUES ('activeInsightSnapshotId', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+      )
+      .run(id)
+  }
+
+  private rowToSnapshotMeta(row: Record<string, unknown>): InsightSnapshotMeta {
+    let stats: InsightSnapshotStats = {
+      moduleCount: 0,
+      chainCount: 0,
+      flowNodeCount: 0,
+      coreCount: 0,
+      categoryCounts: {},
+      aiPassStatus: {}
+    }
+    const statsJson = row.stats_json
+    if (typeof statsJson === 'string' && statsJson.length > 0) {
+      try {
+        stats = { ...stats, ...(JSON.parse(statsJson) as Partial<InsightSnapshotStats>) }
+      } catch {
+        // stats_json 损坏时保留空摘要，不阻断历史读取
+      }
+    }
+    return {
+      id: String(row.id),
+      savedAt: String(row.saved_at),
+      graphFingerprint: typeof row.fingerprint === 'string' ? row.fingerprint : '',
+      trigger: row.trigger === 'partition' ? 'partition' : 'refresh',
+      partitionFeedback: typeof row.partition_feedback === 'string' ? row.partition_feedback : '',
+      aiEnabled: Number(row.ai_enabled) === 1,
+      aiGenerated: Number(row.ai_generated) === 1,
+      summary: typeof row.summary === 'string' ? row.summary : '',
+      stats
+    }
   }
 
   private rowToAnnotation(row: Record<string, unknown>): Annotation {

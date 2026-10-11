@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import type {
   AiPassKey,
@@ -9,6 +9,9 @@ import type {
   FunctionDoc,
   InsightChain,
   InsightModule,
+  InsightSnapshot,
+  InsightSnapshotStats,
+  InsightSnapshotTrigger,
   ProjectInsight
 } from '@autodoc/shared-types'
 import { deepseekChat, extractJson, type ChatMessage } from './ai.js'
@@ -868,6 +871,84 @@ function applyNarratives(insight: ProjectInsight, narr: NarrativeEnvelope): void
   }
 }
 
+/* ------------------------- 历史快照（H1） ------------------------- */
+
+/** 递归统计脉络架构树节点总数 */
+function countFlowNodes(nodes: FlowNode[] | undefined): number {
+  if (!nodes) return 0
+  let n = 0
+  for (const x of nodes) n += 1 + countFlowNodes(x.children)
+  return n
+}
+
+/**
+ * 纯函数：从一份 insight + graph 计算结构化统计摘要（供历史列表与 diff，不下发整份载荷）。
+ * - flowNodeCount：递归数 insight.flows 节点总数；
+ * - coreCount：insight.functions 中 isCore 计数；
+ * - categoryCounts：按 graph.nodes 的 category 统计（三分类 + pending）；
+ * - aiPassStatus：insight.aiStatus ?? {}。
+ */
+export function computeSnapshotStats(
+  insight: ProjectInsight,
+  graph: ProjectGraph
+): InsightSnapshotStats {
+  let coreCount = 0
+  for (const f of Object.values(insight.functions)) {
+    if (f.isCore) coreCount++
+  }
+  const categoryCounts: Partial<Record<FunctionCategory, number>> = {}
+  for (const fn of graph.nodes.values()) {
+    categoryCounts[fn.category] = (categoryCounts[fn.category] ?? 0) + 1
+  }
+  return {
+    moduleCount: insight.modules.length,
+    chainCount: insight.chains.length,
+    flowNodeCount: countFlowNodes(insight.flows),
+    coreCount,
+    categoryCounts,
+    aiPassStatus: insight.aiStatus ?? {}
+  }
+}
+
+/**
+ * 保存一份完整 ProjectInsight 快照，并清空回滚指针（activeId=null，回到实时视图）。
+ * activeInsightSnapshotId 是「回滚指针」：默认 null = 实时视图；仅 rollback 端点会将其
+ * 指向某个快照。重新生成即用户想看当前最新结果，故存完快照后清空 activeId，
+ * 使 loadInsight 走既有实时缓存计算（含 basis 一致性/陈旧检测），而非固化旧快照。
+ * 属用户数据：由存储适配器内部保证写前备份、归档不删。
+ * 失败只 console.warn，绝不影响洞察生成主流程（快照是附加能力，不得拖垮 refresh）。
+ */
+export function saveInsightSnapshot(
+  service: DocService,
+  insight: ProjectInsight,
+  graph: ProjectGraph,
+  trigger: InsightSnapshotTrigger
+): InsightSnapshot | null {
+  try {
+    const snapshot: InsightSnapshot = {
+      id: randomUUID(),
+      savedAt: new Date().toISOString(),
+      graphFingerprint: graph.fingerprint,
+      trigger,
+      partitionFeedback: insight.partitionFeedback,
+      aiEnabled: insight.aiEnabled,
+      aiGenerated: insight.aiGenerated,
+      summary: insight.summary,
+      stats: computeSnapshotStats(insight, graph),
+      insight
+    }
+    service.storage.addInsightSnapshot(snapshot)
+    // 回滚指针清空：新快照仅入历史归档，当前视图回到实时计算（不指向最新快照）
+    service.storage.setActiveInsightSnapshotId(null)
+    return snapshot
+  } catch (e) {
+    console.warn(
+      `[autodoc] 保存历史洞察快照失败（已忽略，不影响洞察生成）：${e instanceof Error ? e.message : String(e)}`
+    )
+    return null
+  }
+}
+
 /* ------------------------- 对外入口 ------------------------- */
 
 export interface InsightBundle {
@@ -884,6 +965,13 @@ export interface RefreshOptions {
 /** 读取洞察：静态 + 命中缓存的 AI（不触发网络） */
 export function loadInsight(service: DocService, feedback = ''): InsightBundle {
   const graph = buildGraph(service.files)
+  // H1：回滚/历史视图——若设了 activeId 且快照命中，直接返回该快照的 insight；
+  // graph 仍实时构建（其它消费方需要）。activeId 为空或快照不存在时，走现有缓存计算逻辑。
+  const activeId = service.storage.getActiveInsightSnapshotId()
+  if (activeId) {
+    const snap = service.storage.getInsightSnapshot(activeId)
+    if (snap) return { insight: snap.insight, graph }
+  }
   const aiEnabled = getDeepSeekConfig() !== null
   const insight = buildInsight(graph, aiEnabled, feedback)
   if (!aiEnabled) return { insight, graph }
@@ -1270,5 +1358,9 @@ export async function refreshInsightAI(
   )
   cache.set(fp, 'aiStatus', status)
   insight.aiStatus = status
+  // H1：AI 启用路径成功末尾保存一整份快照入历史，并清空回滚指针（activeId=null，回到实时视图；
+  // !aiEnabled 的提前 return 分支不存）。trigger 区分普通刷新与按建议重新划分。
+  // saveInsightSnapshot 内部 try/catch，失败不影响主流程。
+  saveInsightSnapshot(service, insight, graph, opts.forcePartition ? 'partition' : 'refresh')
   return { insight, graph }
 }

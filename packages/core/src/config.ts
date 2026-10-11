@@ -17,6 +17,9 @@ const AjvClass =
 
 export const MODULE_NAME = 'autodoc'
 
+/** 历史 AI 洞察快照列表默认返回的最近份数（insight.history.showRecent 缺省值） */
+export const DEFAULT_SHOW_RECENT = 10
+
 /** 默认展开策略（可被 autodoc 配置 ui.defaultExpand 覆盖，禁止在 UI 写死） */
 export const DEFAULT_EXPAND: Required<DefaultExpandConfig> = {
   fileHeader: true,
@@ -129,6 +132,14 @@ const configSchema = {
             maxChildrenPerNode: { type: 'integer', minimum: 1, maximum: 50 },
             maxNodesTotal: { type: 'integer', minimum: 1, maximum: 2000 }
           }
+        },
+        history: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            // 历史列表返回的最近快照份数：正整数、[1,100]（缺省 10，见 resolveShowRecent）
+            showRecent: { type: 'integer', minimum: 1, maximum: 100 }
+          }
         }
       }
     }
@@ -191,4 +202,13 @@ export async function loadConfig(
     configPath: result?.filepath ?? null,
     defaultExpand: { ...DEFAULT_EXPAND, ...(config.ui?.defaultExpand ?? {}) }
   }
+}
+
+/**
+ * 解析生效的「历史快照最近返回份数」：未配置 insight.history.showRecent 时回落 DEFAULT_SHOW_RECENT(10)。
+ * 供 app.ts 的历史列表路由直接读到生效值（三处联动：schema 校验 + 默认常量 + 本辅助）。
+ */
+export function resolveShowRecent(normalized: NormalizedConfig): number {
+  const configured = normalized.config.insight?.history?.showRecent
+  return typeof configured === 'number' ? configured : DEFAULT_SHOW_RECENT
 }

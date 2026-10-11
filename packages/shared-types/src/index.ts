@@ -252,6 +252,11 @@ export interface FlowConfig {
 
 export interface InsightConfig {
   flow?: FlowConfig
+  /** 历史 AI 洞察快照：接口只返回最近 N 份（全归档、永不删） */
+  history?: {
+    /** 历史列表返回的最近快照份数，缺省 10 */
+    showRecent?: number
+  }
 }
 
 export interface AutodocConfig {
@@ -479,6 +484,85 @@ export interface ProjectInsight {
    * 与自动生成的 FunctionDoc/CallEdge 分离，只存于洞察层。AI 未生成/失败时缺省（前端保持既有文案）。
    */
   externals?: Record<string, Record<string, ExternalSymbolInfo>>
+}
+
+/* ------------------------- 历史 AI 洞察快照（H1） ------------------------- */
+
+/**
+ * 一份 ProjectInsight 快照的结构化统计摘要（用于历史列表与 diff，避免下发/比对整份载荷）。
+ */
+export interface InsightSnapshotStats {
+  /** 模块数 */
+  moduleCount: number
+  /** 实现链路数 */
+  chainCount: number
+  /** 脉络架构树节点总数（递归计数） */
+  flowNodeCount: number
+  /** 核心函数数 */
+  coreCount: number
+  /** 三分类计数 */
+  categoryCounts: Partial<Record<FunctionCategory, number>>
+  /** 各 AI 段执行状态快照 */
+  aiPassStatus: Partial<Record<AiPassKey, AiPassStatus>>
+}
+
+/** 快照触发来源：refresh=普通刷新；partition=按建议重新划分 */
+export type InsightSnapshotTrigger = 'refresh' | 'partition'
+
+/** 快照元信息（不含 insight 载荷，供历史列表下发） */
+export interface InsightSnapshotMeta {
+  id: string
+  /** 保存时间（ISO） */
+  savedAt: string
+  /** 生成时的图谱指纹 */
+  graphFingerprint: string
+  trigger: InsightSnapshotTrigger
+  /** 本次快照所依据的划分建议（空串=无） */
+  partitionFeedback: string
+  aiEnabled: boolean
+  aiGenerated: boolean
+  /** 项目级 AI 概述快照 */
+  summary: string
+  stats: InsightSnapshotStats
+}
+
+/** 完整快照：元信息 + 整份 ProjectInsight */
+export interface InsightSnapshot extends InsightSnapshotMeta {
+  insight: ProjectInsight
+}
+
+/**
+ * 两份快照的结构化摘要 diff（对比维度：概述文本、模块增删、脉络根/节点数、核心数、分类计数、AI 段状态变化）。
+ */
+export interface InsightDiff {
+  fromId: string
+  toId: string
+  summary: { changed: boolean; from: string; to: string }
+  /** 按模块 name 比对 */
+  modules: { added: string[]; removed: string[]; commonCount: number }
+  /** roots 用 label；节点数为递归总数 */
+  flows: { fromRoots: string[]; toRoots: string[]; fromNodeCount: number; toNodeCount: number }
+  coreCount: { from: number; to: number }
+  categoryCounts: {
+    from: Partial<Record<FunctionCategory, number>>
+    to: Partial<Record<FunctionCategory, number>>
+  }
+  /** 仅列出发生变化的 AI 段 */
+  aiStatus: { key: AiPassKey; from?: AiPassStatus; to?: AiPassStatus }[]
+}
+
+/** GET /api/insight/history 响应 */
+export interface InsightHistoryResponse {
+  /** 最近 N 份，新→旧 */
+  snapshots: InsightSnapshotMeta[]
+  /** 归档总份数（全部快照数） */
+  total: number
+  /** 已归档（超出最近 N）份数 */
+  archivedCount: number
+  /** 当前生效（回滚/历史视图）的快照 id；null=实时计算视图 */
+  activeId: string | null
+  /** 生效的最近返回份数 */
+  showRecent: number
 }
 
 /* ------------------------- 就地追问（轴 B） ------------------------- */

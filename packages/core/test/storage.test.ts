@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { InsightSnapshot, ProjectInsight } from '@autodoc/shared-types'
 import { JsonStorage, backupBaseName, pruneBackups } from '../src/storage/JsonStorage.js'
 import { SqliteStorage } from '../src/storage/SqliteStorage.js'
 import type { StorageAdapter } from '../src/storage/StorageAdapter.js'
@@ -13,6 +14,41 @@ function freshDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'autodoc-test-'))
   workDirs.push(dir)
   return dir
+}
+
+/** 构造一份最小可用的历史洞察快照（用于双适配器往返测试） */
+function mkSnapshot(id: string, savedAt: string, summary: string): InsightSnapshot {
+  const insight: ProjectInsight = {
+    generatedAt: savedAt,
+    graphFingerprint: `fp-${id}`,
+    aiEnabled: true,
+    aiGenerated: true,
+    partitionSource: 'ai',
+    partitionFeedback: '',
+    summary,
+    modules: [],
+    chains: [],
+    functions: {}
+  }
+  return {
+    id,
+    savedAt,
+    graphFingerprint: `fp-${id}`,
+    trigger: 'refresh',
+    partitionFeedback: '',
+    aiEnabled: true,
+    aiGenerated: true,
+    summary,
+    stats: {
+      moduleCount: 0,
+      chainCount: 0,
+      flowNodeCount: 0,
+      coreCount: 0,
+      categoryCounts: {},
+      aiPassStatus: {}
+    },
+    insight
+  }
 }
 
 function bestEffortRemove(dir: string): void {
@@ -220,6 +256,53 @@ function runAdapterSuite(create: (dir: string) => StorageAdapter): void {
     const backupDir = join(dir, 'backups')
     expect(existsSync(backupDir)).toBe(true)
     expect(readdirSync(backupDir).filter((f) => f.endsWith('.bak')).length).toBeGreaterThan(0)
+  })
+
+  it('历史洞察快照：add→list(仅 meta、倒序、无载荷)→get(含完整 insight) 往返一致', () => {
+    // 三条快照，savedAt 递增；列表应新→旧倒序
+    storage.addInsightSnapshot(mkSnapshot('s1', '2026-01-01T00:00:00.000Z', '第一版'))
+    storage.addInsightSnapshot(mkSnapshot('s2', '2026-01-02T00:00:00.000Z', '第二版'))
+    storage.addInsightSnapshot(mkSnapshot('s3', '2026-01-03T00:00:00.000Z', '第三版'))
+
+    const list = storage.listInsightSnapshots()
+    expect(list.map((m) => m.id)).toEqual(['s3', 's2', 's1'])
+    // 列表仅含 meta，不携带 insight 载荷
+    for (const meta of list) {
+      expect((meta as Partial<InsightSnapshot>).insight).toBeUndefined()
+      expect(meta.summary).toBeTruthy()
+      expect(meta.stats).toBeDefined()
+    }
+
+    // get 返回完整快照（含 insight），往返一致
+    const full = storage.getInsightSnapshot('s2')
+    expect(full?.id).toBe('s2')
+    expect(full?.summary).toBe('第二版')
+    expect(full?.insight).toBeDefined()
+    expect(full?.insight.graphFingerprint).toBe('fp-s2')
+    expect(storage.getInsightSnapshot('nope')).toBeNull()
+  })
+
+  it('历史洞察快照：activeId set/get，设 null 清除', () => {
+    expect(storage.getActiveInsightSnapshotId()).toBeNull()
+    storage.addInsightSnapshot(mkSnapshot('s1', '2026-01-01T00:00:00.000Z', 'x'))
+    storage.setActiveInsightSnapshotId('s1')
+    expect(storage.getActiveInsightSnapshotId()).toBe('s1')
+    // 覆盖为另一份（回滚语义）
+    storage.setActiveInsightSnapshotId('s0')
+    expect(storage.getActiveInsightSnapshotId()).toBe('s0')
+    // 清除回到实时计算视图
+    storage.setActiveInsightSnapshotId(null)
+    expect(storage.getActiveInsightSnapshotId()).toBeNull()
+  })
+
+  it('历史洞察快照：全归档不删，且不暴露删除接口', () => {
+    storage.addInsightSnapshot(mkSnapshot('s1', '2026-01-01T00:00:00.000Z', 'x'))
+    storage.addInsightSnapshot(mkSnapshot('s2', '2026-01-02T00:00:00.000Z', 'y'))
+    expect(storage.listInsightSnapshots()).toHaveLength(2)
+    // 归档不删：适配器不提供任何删除快照的方法
+    const s = storage as unknown as Record<string, unknown>
+    expect(s.deleteInsightSnapshot).toBeUndefined()
+    expect(s.removeInsightSnapshot).toBeUndefined()
   })
 }
 
@@ -466,6 +549,52 @@ describe('存储层迁移与向后兼容', () => {
     // 全新库无需迁移前备份
     expect(existsSync(join(dir, 'backups'))).toBe(false)
     fresh.close()
+  })
+
+  it('SqliteStorage：旧库无 insight_history/app_state 表，init 幂等建表且读取缺省空', () => {
+    const dir = freshDir()
+    const dbPath = join(dir, 'autodoc.db')
+    // 手工构造「旧 schema」库：无 insight_history / app_state 表
+    const old = new DatabaseSync(dbPath)
+    old.exec(`
+      CREATE TABLE annotations (
+        id TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_id TEXT NOT NULL,
+        author TEXT NOT NULL, content TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE changes (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+        target_id TEXT NOT NULL, date TEXT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL
+      );
+      CREATE TABLE snapshots (file_id TEXT PRIMARY KEY, json TEXT NOT NULL);
+      CREATE TABLE git_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    `)
+    old.close()
+
+    const upgraded = new SqliteStorage(dbPath)
+    expect(() => upgraded.init()).not.toThrow()
+    expect(upgraded.listInsightSnapshots()).toEqual([])
+    expect(upgraded.getActiveInsightSnapshotId()).toBeNull()
+    // 建表后可正常写入
+    upgraded.addInsightSnapshot(mkSnapshot('s1', '2026-01-01T00:00:00.000Z', 'x'))
+    expect(upgraded.listInsightSnapshots()).toHaveLength(1)
+    upgraded.close()
+  })
+
+  it('JsonStorage：缺失 insightHistory/activeInsightSnapshotId 字段的旧侧车数据读取缺省空', () => {
+    const dir = freshDir()
+    const dataPath = join(dir, 'autodoc.json')
+    writeFileSync(
+      dataPath,
+      JSON.stringify({ version: 1, annotations: [], changes: [], snapshots: {} }),
+      'utf-8'
+    )
+    const storage = new JsonStorage(dataPath)
+    storage.init()
+    expect(storage.listInsightSnapshots()).toEqual([])
+    expect(storage.getInsightSnapshot('any')).toBeNull()
+    expect(storage.getActiveInsightSnapshotId()).toBeNull()
+    storage.close()
   })
 })
 
