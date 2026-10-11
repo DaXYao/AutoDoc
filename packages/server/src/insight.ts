@@ -3,6 +3,7 @@ import { dirname } from 'node:path'
 import type {
   AiPassKey,
   AiPassStatus,
+  ExternalSymbolInfo,
   FlowNode,
   FunctionCategory,
   FunctionDoc,
@@ -26,6 +27,7 @@ import {
   type FlowGenStats
 } from './flow.js'
 import { applyCoreJudgment, applyPartition, buildGraph, type CoreJudgment, type Partition, type ProjectGraph } from './graph.js'
+import { collectWorkspacePackageNames } from './workspacePackages.js'
 
 /** AI 划分信封（缓存单元）：members 为函数在索引表中的下标 */
 interface PartitionEnvelope {
@@ -83,6 +85,11 @@ const AI_CHUNK_SIZE = 120
  * 用比 AI_CHUNK_SIZE(120) 更小的专属批大小，保证单批输出远低于 max_tokens 不被截断。
  */
 const KEY_STEPS_CHUNK_SIZE = 40
+/**
+ * 外部库补全（externals）：输出为每符号一行小 JSON（purpose + 可选 signature），体量远小于输入；
+ * 8000 与其它结构化 pass 对齐，配合 AI_CHUNK_SIZE 分批，单批输出远低于上限不截断。
+ */
+const EXTERNALS_MAX_TOKENS = 8000
 /** 单批解析失败/畸形的重试次数（模型输出非确定，偶发畸形 JSON，重试可显著降低整批降级概率） */
 const AI_PARSE_RETRIES = 2
 /** 结构化分析 pass（核心判定/分类）用较低 temperature，降低格式与结果波动 */
@@ -148,6 +155,12 @@ export interface CategoriesResult {
 /** 主干识别分批结果：steps 为 fnId → 主干调用的局部下标数组（按 line 升序的 calls 下标） */
 export interface KeyStepsResult {
   steps: Record<string, number[]>
+  batches: number
+  failedBatches: number
+}
+/** 外部库补全分批结果：externals 为 模块说明符 → 函数名 → AI 补全信息 的嵌套合并 */
+export interface ExternalsResult {
+  externals: Record<string, Record<string, ExternalSymbolInfo>>
   batches: number
   failedBatches: number
 }
@@ -449,6 +462,137 @@ export async function aiKeySteps(graph: ProjectGraph): Promise<KeyStepsResult> {
   return { steps: out, batches: batches.length, failedBatches }
 }
 
+/** 外部库补全候选：模块说明符 + 符号名（按 (module,name) 去重） */
+export interface ExternalCandidate {
+  module: string
+  name: string
+}
+
+/** externalModule 是否属于 workspace 自有包（等于某包名或以「包名/」开头，如 @autodoc/core、@autodoc/core/sub） */
+function isSelfPackage(moduleSpecifier: string, selfPackages: Set<string>): boolean {
+  for (const name of selfPackages) {
+    if (moduleSpecifier === name || moduleSpecifier.startsWith(`${name}/`)) return true
+  }
+  return false
+}
+
+/**
+ * 收集「真外部库调用」候选：calleeCategory='external' 且 externalModule 非空（裸模块说明符），
+ * 排除 workspace 自有包（项目自己的包不是公开库，AI 只会瞎编）；按 (module,name) 去重并排序，
+ * 保证索引表与分批稳定。externalModule=null（本地对象方法/全局/相对未连通）不补，保持现状。
+ */
+export function collectExternalCandidates(
+  graph: ProjectGraph,
+  selfPackages: Set<string>
+): ExternalCandidate[] {
+  const seen = new Set<string>()
+  const out: ExternalCandidate[] = []
+  for (const fn of graph.nodes.values()) {
+    for (const call of fn.calls) {
+      if (call.calleeCategory !== 'external') continue
+      const mod = call.externalModule
+      if (typeof mod !== 'string' || mod.length === 0) continue
+      if (isSelfPackage(mod, selfPackages)) continue
+      const key = `${mod}\u0000${call.calleeName}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ module: mod, name: call.calleeName })
+    }
+  }
+  out.sort((a, b) =>
+    a.module === b.module ? a.name.localeCompare(b.name) : a.module.localeCompare(b.module)
+  )
+  return out
+}
+
+/**
+ * AI 外部库补全：对裸模块说明符的外部调用，凭模型对公开库/内置模块的通用知识补
+ * 「一句话用途 + 可选常见签名」。仿 aiKeySteps/aiCategories：分批（全局 idx 稳定映射）+
+ * 重试 + 截断视为不完整 + 零有效条目不当成功。外部调用永远保持 calleeCategory='external'，
+ * AI 只补用途/签名、不改身份不改分类；AI-first：失败/为空时不静态兜底，前端保持既有文案。
+ * candidates 可由调用方预先算好传入（避免重复计算），未传则内部自算。
+ */
+export async function aiExternals(
+  graph: ProjectGraph,
+  selfPackages: Set<string>,
+  candidates?: ExternalCandidate[]
+): Promise<ExternalsResult> {
+  const cands = candidates ?? collectExternalCandidates(graph, selfPackages)
+  if (cands.length === 0) return { externals: {}, batches: 0, failedBatches: 0 }
+  const batches = chunkArray(cands, AI_CHUNK_SIZE)
+  const multi = batches.length > 1
+  const out: Record<string, Record<string, ExternalSymbolInfo>> = {}
+  let failedBatches = 0
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b]
+    // 全局 idx = 候选在去重排序后列表中的下标；仅接受本批范围内的 idx，避免 AI 幻觉越批污染
+    const base = b * AI_CHUNK_SIZE
+    const batchIdx = new Set<number>()
+    const byIdx = new Map<number, ExternalCandidate>()
+    batch.forEach((c, k) => {
+      batchIdx.add(base + k)
+      byIdx.set(base + k, c)
+    })
+    const lines = batch.map((c, k) => `${base + k}|${c.module}|${c.name}`).join('\n')
+    const scope = multi ? `（第 ${b + 1}/${batches.length} 批）` : ''
+    const user =
+      `以下是一个项目调用到的外部库/内置模块符号${scope}（索引|模块说明符|函数名）：\n${lines}\n` +
+      `请基于你对这些公开库的通用了解，为每个符号给出 purpose(一句话中文用途) 与可选 signature(常见签名，不确定就留空)。` +
+      `不确定就留空、禁止编造项目特定行为；键必须原样回填上面给出的索引数字。\n` +
+      `输出 JSON: {"<索引>":{"purpose":"...","signature":"..."}}`
+    let done = false
+    for (let attempt = 1; attempt <= AI_PARSE_RETRIES && !done; attempt++) {
+      try {
+        const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+          maxTokens: EXTERNALS_MAX_TOKENS,
+          temperature: AI_STRUCTURE_TEMPERATURE
+        })
+        if (reply.truncated) {
+          console.warn(
+            `[autodoc] AI 外部库补全第 ${b + 1}/${batches.length} 批第 ${attempt} 次输出被截断(finish_reason=length)，视为不完整${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+          )
+          continue
+        }
+        const raw = extractJson<Record<string, { purpose?: unknown; signature?: unknown }>>(reply.content)
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          console.warn(
+            `[autodoc] AI 外部库补全第 ${b + 1}/${batches.length} 批第 ${attempt} 次返回无法解析${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+          )
+          continue
+        }
+        let accepted = 0
+        for (const [key, v] of Object.entries(raw)) {
+          const idx = Number(key)
+          if (!batchIdx.has(idx)) continue
+          const cand = byIdx.get(idx)
+          // purpose 为非空字符串才计入；signature 可选（非空字符串才带上）
+          if (!cand || !v || typeof v.purpose !== 'string' || v.purpose.trim().length === 0) continue
+          const info: ExternalSymbolInfo = { purpose: v.purpose }
+          if (typeof v.signature === 'string' && v.signature.trim().length > 0) {
+            info.signature = v.signature
+          }
+          ;(out[cand.module] ??= {})[cand.name] = info
+          accepted++
+        }
+        // 结构可解析但零有效条目（idx 全被过滤/purpose 全空）：不静默当成功，重试耗尽计入 failedBatches
+        if (accepted === 0) {
+          console.warn(
+            `[autodoc] AI 外部库补全第 ${b + 1}/${batches.length} 批第 ${attempt} 次零有效条目（候选 ${batch.length} 个）${attempt < AI_PARSE_RETRIES ? '，重试' : '，计入降级批'}`
+          )
+          continue
+        }
+        done = true
+      } catch (e) {
+        console.warn(
+          `[autodoc] AI 外部库补全第 ${b + 1}/${batches.length} 批第 ${attempt} 次失败${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}：${e instanceof Error ? e.message : String(e)}`
+        )
+      }
+    }
+    if (!done) failedBatches++
+  }
+  return { externals: out, batches: batches.length, failedBatches }
+}
+
 /** AI 按功能重要性判核心（而非调用次数）；函数多时分批，各批 core idx 取并集合并 */
 export async function aiCoreJudgment(graph: ProjectGraph): Promise<CoreJudgmentResult> {
   const ids = indexTable(graph)
@@ -676,6 +820,21 @@ function applyKeySteps(
   }
 }
 
+/**
+ * 将 AI 外部库补全结果写入 insight.externals（拷贝，避免与缓存对象共享引用）。
+ * AI-first：失败/无内容时不赋值，insight.externals 保持缺省(undefined)，前端回退原文案；
+ * 与 loadInsight 缓存回读路径一致（有内容才赋值）。
+ */
+function applyExternals(
+  insight: ProjectInsight,
+  externals: Record<string, Record<string, ExternalSymbolInfo>>
+): void {
+  if (Object.keys(externals).length === 0) return
+  const copy: Record<string, Record<string, ExternalSymbolInfo>> = {}
+  for (const [mod, syms] of Object.entries(externals)) copy[mod] = { ...syms }
+  insight.externals = copy
+}
+
 /** 将图谱的核心判定同步到 insight.functions */
 function syncCore(insight: ProjectInsight, graph: ProjectGraph): void {
   for (const [id, ins] of Object.entries(insight.functions)) {
@@ -757,6 +916,11 @@ export function loadInsight(service: DocService, feedback = ''): InsightBundle {
   const ks = cache.get<Record<string, number[]>>(fp, 'keySteps')
   if (ks) {
     applyKeySteps(insight, graph, ks)
+    touched = true
+  }
+  const ex = cache.get<Record<string, Record<string, ExternalSymbolInfo>>>(fp, 'externals')
+  if (ex) {
+    applyExternals(insight, ex)
     touched = true
   }
   const roles = cache.get<Record<string, string>>(fp, 'coreRoles')
@@ -970,6 +1134,34 @@ export async function refreshInsightAI(
   }
   applyKeySteps(insight, graph, keySteps ?? {})
 
+  // 5c) 外部库 AI 补全（externals，AI-first，无静态兜底）：对裸模块说明符的外部调用，
+  // 凭模型对公开库的通用知识补「用途/签名」；workspace 自有包（含分析本项目自身）一律排除
+  const selfPkgs = collectWorkspacePackageNames(service.rootDir)
+  // 候选只算一次：既用于 hadExternalCandidates 判空（skipped 语义），又传给 aiExternals 免重复计算
+  const externalCandidates = collectExternalCandidates(graph, selfPkgs)
+  const hadExternalCandidates = externalCandidates.length > 0
+  let externals = opts.force ? undefined : cache.get<Record<string, Record<string, ExternalSymbolInfo>>>(fp, 'externals')
+  if (!externals) {
+    try {
+      const res = await aiExternals(graph, selfPkgs, externalCandidates)
+      externals = res.externals
+      if (Object.keys(externals).length > 0) cache.set(fp, 'externals', externals)
+      status.externals =
+        Object.keys(externals).length > 0 ? 'ok' : hadExternalCandidates ? 'failed' : 'skipped'
+      if (res.failedBatches > 0) {
+        console.warn(`[autodoc] AI 外部库补全 ${res.failedBatches}/${res.batches} 批降级（其余批已合并）`)
+      }
+    } catch (e) {
+      status.externals = 'failed'
+      console.warn(`[autodoc] AI 外部库补全失败，前端保持「外部/未解析」文案：${e instanceof Error ? e.message : String(e)}`)
+      externals = {}
+    }
+  } else {
+    status.externals =
+      Object.keys(externals).length > 0 ? 'ok' : hadExternalCandidates ? 'failed' : 'skipped'
+  }
+  applyExternals(insight, externals ?? {})
+
   // 6) 递归脉络架构树（依赖前 5 段的 modules/core/chains/narratives）
   const flowCfg = service.normalized.config.insight?.flow ?? {}
   const caps: FlowCaps = {
@@ -1073,6 +1265,7 @@ export async function refreshInsightAI(
     Object.keys(roles ?? {}).length ||
     Object.keys(narr ?? {}).length ||
     Object.keys(keySteps ?? {}).length ||
+    Object.keys(externals ?? {}).length ||
     flowsAiOk
   )
   cache.set(fp, 'aiStatus', status)

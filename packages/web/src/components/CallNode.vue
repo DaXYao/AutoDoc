@@ -7,6 +7,7 @@ import { addAnnotation, askCallStep, deleteAnnotation } from '../data/api'
 import { appState, findFunctionEntry } from '../store/app'
 import { CATEGORY_LABELS, ROLE_COLORS, ROLE_LABELS, formatDate } from '../utils/format'
 import { formatAskMeta } from '../utils/ask'
+import { externalSymbolInfo } from '../utils/externals'
 import { renderMarkdown } from '../utils/markdown'
 
 const props = defineProps<{
@@ -22,6 +23,9 @@ const message = useMessage()
 const AUTHOR_KEY = 'autodoc.author'
 
 const readOnly = computed(() => appState.meta?.readOnly ?? false)
+
+/** 外部库 AI 补全信息（洞察层，命中才展示；未命中回退既有「外部/未解析」文案） */
+const externalInfo = computed(() => externalSymbolInfo(appState.insight, props.edge))
 
 /* ------------------------- 就地追问面板（本地态，不持久化） ------------------------- */
 
@@ -149,6 +153,21 @@ async function handleDeleteFollowup(followup: Annotation): Promise<void> {
       </div>
       <div v-if="edge.calleePurpose" class="text-xs text-gray-500 mt-0.5">
         作用：{{ edge.calleePurpose }}
+      </div>
+      <div
+        v-else-if="externalInfo"
+        class="text-xs text-gray-500 mt-0.5 flex flex-wrap items-center gap-1.5"
+      >
+        <span>作用：{{ externalInfo.purpose }}</span>
+        <!-- AI 凭公开库知识推断，醒目标注以区别于项目内已确证用途 -->
+        <n-tag size="tiny" :bordered="false" type="warning">外部·AI 推断</n-tag>
+        <span
+          v-if="externalInfo.signature"
+          class="font-mono text-gray-400"
+          :title="externalInfo.signature"
+        >
+          {{ externalInfo.signature }}
+        </span>
       </div>
       <div v-else-if="edge.calleeCategory === 'external'" class="text-xs text-gray-400 mt-0.5">
         作用：外部/未解析调用（不在本项目索引内）

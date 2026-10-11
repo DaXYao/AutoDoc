@@ -2,6 +2,29 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-12 · 阶段2 初审整改：externals 4 处精准小修
+
+- **内容**：4 处精准小修，不改架构、不动其它 AI pass 兜底逻辑。
+  1. `server/insight.ts`：`aiExternals` 增加可选第三参 `candidates?: ExternalCandidate[]`（未传则内部自算，向后兼容既有调用/测试）；`refreshInsightAI` 5c 段候选只算一次（`externalCandidates`），既用于 `hadExternalCandidates` 判空又传给 `aiExternals`，消除重复计算。`status.externals` 的 ok/failed/skipped 判定语义不变。
+  2. `web/utils/externals.ts`：`externalSymbolInfo` 命中判断改为 `purpose.trim().length > 0`，纯空白 purpose（如 `'   '`）视为未命中，与 server 侧过滤口径一致。
+  3. `server/workspacePackages.ts`：`SKIP_DIRS` 扩充 `build`、`coverage`、`.turbo`、`.cache`（只增不减），有界遍历与文件数上限逻辑不变。
+  4. `server/insight.ts`：`applyExternals` 传入为空对象时直接返回不赋值，失败/无内容时 `insight.externals` 保持缺省(undefined)，与「AI-first 失败即缺省、前端回退原文案」注释措辞一致；`loadInsight` 缓存回读路径行为不变（缓存只在有内容时写入）。
+- **影响范围**：server（insight/workspacePackages）+ web（utils/externals）+ 对应测试；不改 README、不改 shared-types、不改 core。
+- **动机**：阶段2 初审发现的重复计算、脏数据防御缺口、SKIP_DIRS 覆盖不足、失败态 `{}` 与注释不符四处整改。
+- **测试**：web `externals.test.ts` 脏缓存例补「纯空白 purpose 未命中」断言；server `workspacePackages.test.ts` 补 build/coverage/.turbo/.cache 下 package.json 不被收集断言。`pnpm lint` 与 `pnpm test` 全绿（core 116 / server 119 / web 13）。
+
+## 2026-10-12 · 外部/未解析调用解析 · 阶段2：外部库 AI 补全（externals pass）
+
+- **内容**：对「裸模块说明符」的真外部库调用，新增 AI pass 凭模型对公开库的通用知识补全「一句话用途 + 可选常见签名」，前端在调用节点内联展示并醒目标注「外部·AI 推断」，与项目内已确证用途视觉区分。
+  1. `shared-types`：`AiPassKey` 加 `'externals'`；新增 `ExternalSymbolInfo { purpose; signature? }`；`ProjectInsight` 加可选 `externals?: Record<模块说明符, Record<函数名, ExternalSymbolInfo>>`（洞察层，与 core 静态 FunctionDoc/CallEdge 分离）。
+  2. `server/workspacePackages.ts`（新增）：`collectWorkspacePackageNames(rootDir)` 有界遍历收集 workspace 自有包名（排除 node_modules/.git/dist，最多读 500 个 package.json，畸形/无 name 跳过不抛）。
+  3. `server/insight.ts`：新增 `collectExternalCandidates`（只收 calleeCategory='external' 且 externalModule 非空者，**排除自有包**——等于包名或以「包名/」开头即排除，防 AI 对项目自己的包瞎编；按 (module,name) 去重排序）、`aiExternals`（仿 aiKeySteps：全局 idx 索引表 + AI_CHUNK_SIZE 分批 + EXTERNALS_MAX_TOKENS=8000 + AI_STRUCTURE_TEMPERATURE + 截断视为不完整重试 + 零有效条目计 failedBatches + prompt 强调「不确定就留空、禁止编造项目特定行为」）、`applyExternals`（拷贝写入）；接入 `refreshInsightAI` 5c 段（force 绕缓存、cache.get/set 'externals'、status.externals=ok/failed/skipped、纳入 aiGenerated）与 `loadInsight` 缓存回读（touched）。**AI-first：失败/未生成不静态兜底**，前端回退既有「外部/未解析调用（不在本项目索引内）」文案；外部调用永远保持 calleeCategory='external'，AI 只补用途/签名、不改身份不改分类。
+  4. `server/ask.ts`：追问种子上下文增强——被问 edge 有 externalModule 时 calleeBlock 点明「外部库 `模块.函数名`（项目内无源码）」，buildSkeleton 外部调用行附带 `|模块=<externalModule>`；协议与安全天花板不变。
+  5. `web`：`utils/format.ts` AI_PASS_ORDER/LABELS 加 `externals`（'外部库补全'，keySteps 后 flows 前，与后端一致）；新增纯函数 `utils/externals.ts` `externalSymbolInfo(insight, edge)`；`CallNode.vue` 命中时内联「作用：<purpose>」+ n-tag warning「外部·AI 推断」+ signature 小字（title 悬浮），未命中保持原文案。
+- **影响范围**：shared-types + server（insight/ask/新 helper）+ web（format/CallNode/新 util）+ 测试；不改 README、不动其它 AI pass 兜底逻辑、不改 core。
+- **动机**：阶段1 已给外部边记录来源模块；本阶段让「vue/node:fs/cosmiconfig 等公开库调用」在调用链路里不再是纯黑洞，同时用自有包排除 + 分离存储 + 醒目标注守住「不臆造、不混入确证内容」边界。
+- **测试**：新增 server `test/externals.test.ts`（候选收集/去重/自有包排除含子路径与前缀陷阱/null 不补、正常返回、分批 idx 跨批、截断/畸形/零有效条目降级、间歇畸形重试成功、purpose/signature 过滤）与 `test/workspacePackages.test.ts`（收集/排除目录/畸形跳过/不可读目录）；web `test/externals.test.ts`（命中/非外部/无模块/未命中/脏缓存 5 例）。`pnpm lint` 与 `pnpm test` 全绿（core 116 / server 119 / web 13）。
+
 ## 2026-10-12 · 阶段1 初审整改：externalModule 只记裸模块说明符 + 补断言
 
 - **内容**：3 处精准小修，纯增量原则不变。

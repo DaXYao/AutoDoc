@@ -436,7 +436,19 @@ export type AiPassKey =
   | 'coreRoles'
   | 'narratives'
   | 'keySteps'
+  | 'externals'
   | 'flows'
+
+/**
+ * AI 凭训练知识补全的外部库符号信息（用途/常见签名）。
+ * 注意：这是模型对公开库的通用了解，非项目内确证内容，展示时必须醒目标注「AI 推断」。
+ */
+export interface ExternalSymbolInfo {
+  /** 一句话中文用途 */
+  purpose: string
+  /** 常见签名（AI 不确定时缺省） */
+  signature?: string
+}
 
 /** 项目洞察聚合（静态 + 可选 AI 增强） */
 export interface ProjectInsight {
@@ -461,6 +473,12 @@ export interface ProjectInsight {
   flowsFingerprint?: string
   /** 各 AI 段执行状态（可观测性） */
   aiStatus?: Partial<Record<AiPassKey, AiPassStatus>>
+  /**
+   * 外部库符号 AI 补全（外层 key=模块说明符，内层 key=函数名）。
+   * 由 AI 凭训练知识对「裸模块说明符的外部调用」补全用途/签名，非项目内确证内容；
+   * 与自动生成的 FunctionDoc/CallEdge 分离，只存于洞察层。AI 未生成/失败时缺省（前端保持既有文案）。
+   */
+  externals?: Record<string, Record<string, ExternalSymbolInfo>>
 }
 
 /* ------------------------- 就地追问（轴 B） ------------------------- */

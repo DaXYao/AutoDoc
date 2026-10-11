@@ -116,7 +116,9 @@ function buildSkeleton(calls: CallEdge[], askStepId: string): string {
     .sort((a, b) => a.line - b.line)
     .map((c, i) => {
       const mark = c.stepId === askStepId ? ' ←【用户问的是这一步】' : ''
-      return `${i}|${c.calleeName}|id=${c.calleeId ?? '（外部/未解析，无id）'}|role=${c.role}|${c.calleeCategory}|${c.calleePurpose ?? '（无用途说明）'}${mark}`
+      // 真外部库调用附带来源模块，让模型知道这是哪个公开库的函数
+      const ext = c.externalModule ? `|模块=${c.externalModule}` : ''
+      return `${i}|${c.calleeName}|id=${c.calleeId ?? '（外部/未解析，无id）'}|role=${c.role}|${c.calleeCategory}|${c.calleePurpose ?? '（无用途说明）'}${ext}${mark}`
     })
     .join('\n')
 }
@@ -170,6 +172,9 @@ export async function askCallStep(
     const calleeSource = await readFunctionSource(service, graph, edge.calleeId)
     trackRead(edge.calleeId, calleeSource)
     calleeBlock = calleeSource ?? '（源码读取失败）'
+  } else if (edge.externalModule) {
+    // 真外部库调用：点明「模块.函数名」，让模型基于对该公开库的了解作答
+    calleeBlock = `外部库 \`${edge.externalModule}.${edge.calleeName}\`（项目内无源码）`
   } else {
     calleeBlock = '外部/未解析，无源码'
   }
