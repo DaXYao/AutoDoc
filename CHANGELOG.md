@@ -2,6 +2,22 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-11 · 初审整改：ask.ts 无 id 占位口径统一 + keySteps reason 断言加强
+
+- **内容**：2 处精准小修，不重构、不动 AI pass 兜底逻辑。
+  1. `ask.ts` 种子上下文「被调函数源码」标题里 `calleeId=${edge.calleeId ?? 'null'}` 改为 `?? '（外部/未解析，无id）'`，与 `buildSkeleton` 骨架占位口径统一，避免字面 `null` 让模型困惑。
+  2. `keySteps.test.ts` 加强「prompt 不再要求 reason」断言：新增 `prompt` 含无 reason schema 片段 `{"keySteps":[0,2,3]}`、且不含键形式 `"reason":`；保留原有 `not.toContain('"reason"')` 与「模型多给 reason 仍容错解析」断言，不削弱。
+- **影响范围**：server（ask.ts 一行 + keySteps.test.ts 断言）；不改 README、不改运行时协议。
+- **测试**：`pnpm lint` 与 `pnpm test` 全绿（server 103 例）。
+
+## 2026-10-11 · 实机修复：轴 A keySteps 防截断 + 轴 B 追问骨架带 calleeId
+
+- **内容**：两处精准修复，不重构、不动其它 AI pass 兜底逻辑。
+  1. 轴 A `insight.ts` keySteps 防截断（实机 259 函数项目上 `aiStatus.keySteps=failed`，两次重试均 finish_reason=length 被截断）：输出 schema 从 `{"<全局idx>":{"keySteps":[...],"reason":"一句话"}}` 改为 `{"<全局idx>":{"keySteps":[...]}}`（reason 解析后本就被丢弃，白占近半输出 token）；prompt 明确「不要输出 reason 等额外字段」；解析侧容错——模型多给 reason 仍只取下标、不判失败。新增专属小分批常量 `KEY_STEPS_CHUNK_SIZE=40`（输出体量随候选函数数增长，比通用 `AI_CHUNK_SIZE=120` 更小以保证单批输出远低于 `KEY_STEPS_MAX_TOKENS=8000`），`aiKeySteps` 改用该批大小。重试/截断降级/零有效条目计 failedBatches/缓存键/applyKeySteps/loadInsight 回读均不变。
+  2. 轴 B `ask.ts` 骨架带被调稳定 id：`buildSkeleton` 每行在 calleeName 后加入 `id=<calleeId>`（外部/未解析显示 `id=（外部/未解析，无id）`），模型可直接把骨架里的 id 放进 read 请求做多跳读源码，免去先 search 再 read 的绕路；`systemPrompt` read 分支说明同步更新。read/search/answer 协议、三层安全天花板、AI-first、兜底逻辑均不变。
+- **影响范围**：server（insight.ts / ask.ts）+ 对应测试；不改 README、不改 shared-types、不动前端。
+- **测试**：keySteps.test.ts 分批断言改为 250 候选→7 批（ceil(250/40)）、新增「prompt 不再要求 reason（schema 无 reason 版）+ 模型多给 reason 仍正常解析」断言；ask.test.ts 种子骨架断言改为含 id 的新格式，新增「模型首轮直接 read 只在骨架出现的 calleeId，源码被读取并计入 usedFunctionIds」用例。`pnpm lint` 与 `pnpm test` 全绿（server 103 例）。
+
 ## 2026-10-11 · 轴 B2：就地追问前端闭环（CallNode 追问面板 + followup 回显）
 
 - **内容**：

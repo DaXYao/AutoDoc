@@ -115,10 +115,17 @@ beforeEach(() => {
 /* ------------------------- aiKeySteps ------------------------- */
 
 describe('aiKeySteps', () => {
-  it('正常返回：解析出主干局部下标，maxTokens=8000', async () => {
+  it('正常返回：解析出主干局部下标，maxTokens=8000；prompt 不再要求 reason', async () => {
     const g = graph(3, 6)
     const ids = sortedIds(g)
-    mockChat((info) => JSON.stringify({ [info.firstIdx]: { keySteps: [0, 2, 4], reason: '主干' } }))
+    let prompt = ''
+    vi.mocked(deepseekChat).mockImplementation(async (messages, opts) => {
+      prompt = messages[messages.length - 1].content
+      const info = parseUser(prompt)
+      calls.push({ maxTokens: opts?.maxTokens, ...info })
+      // 容错：模型多给了 reason 也应正常解析、只取下标
+      return reply(JSON.stringify({ [info.firstIdx]: { keySteps: [0, 2, 4], reason: '主干' } }))
+    })
 
     const res = await aiKeySteps(g)
     expect(res.batches).toBe(1)
@@ -127,6 +134,11 @@ describe('aiKeySteps', () => {
     // 仅首个 idx 被回填
     expect(res.steps[ids[0]]).toEqual([0, 2, 4])
     expect(Object.keys(res.steps)).toEqual([ids[0]])
+    // 输出 schema 为无 reason 版；prompt 不再要求输出 "reason" 字段（仅保留「不要输出 reason」的告诫）
+    expect(prompt).toContain('{"<全局idx>":{"keySteps":[0,2,3]}}')
+    expect(prompt).toContain('{"keySteps":[0,2,3]}')
+    expect(prompt).not.toContain('"reason"')
+    expect(prompt).not.toContain('"reason":')
   })
 
   it('调用数 < 5 的函数不纳入候选、不调用 AI', async () => {
@@ -139,16 +151,19 @@ describe('aiKeySteps', () => {
     expect(calls).toHaveLength(0)
   })
 
-  it('250 函数触发 3 批，按 fnId 合并', async () => {
+  it('250 函数触发 7 批（KEY_STEPS_CHUNK_SIZE=40），按 fnId 合并', async () => {
     const g = graph(250, 5)
     const ids = sortedIds(g)
-    mockChat((info) => JSON.stringify({ [info.firstIdx]: { keySteps: [1], reason: 'r' } }))
+    mockChat((info) => JSON.stringify({ [info.firstIdx]: { keySteps: [1] } }))
 
     const res = await aiKeySteps(g)
-    expect(res.batches).toBe(3)
+    // ceil(250/40) = 7 批
+    expect(res.batches).toBe(7)
     expect(res.failedBatches).toBe(0)
-    expect(calls).toHaveLength(3)
-    expect(Object.keys(res.steps).sort()).toEqual([ids[0], ids[120], ids[240]].sort())
+    expect(calls).toHaveLength(7)
+    expect(Object.keys(res.steps).sort()).toEqual(
+      [0, 40, 80, 120, 160, 200, 240].map((i) => ids[i]).sort()
+    )
   })
 
   it('截断(finish_reason=length)：重试耗尽计入 failedBatches，不产出', async () => {

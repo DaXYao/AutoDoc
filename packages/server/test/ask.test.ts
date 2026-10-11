@@ -236,8 +236,28 @@ describe('askCallStep（agentic 检索）', () => {
     expect(seed).toContain('用户问的是这一步')
     expect(seed).toContain('helperOne')
     expect(seed).toContain(req.question)
-    // 骨架按 line 升序列出全部一层调用
-    expect(seed.indexOf('helperOne|role=core')).toBeLessThan(seed.indexOf('externalThing|role=core'))
+    // 骨架按 line 升序列出全部一层调用，且每个被调带稳定 id（外部调用标注无 id）
+    expect(seed.indexOf('helperOne|id=helperOne|role=core')).toBeLessThan(
+      seed.indexOf('externalThing|id=（外部/未解析，无id）|role=core')
+    )
+    service.storage.close()
+  })
+
+  it('骨架带 calleeId：模型首轮直接 read 仅在骨架出现的 id，无需先 search', async () => {
+    const { service } = await makeFixture()
+    // 问 externalThing 这一步 → helperOne 只以骨架 id 形式出现（非种子 caller/callee）
+    const { chat, seen } = scriptedChat([
+      () => JSON.stringify({ action: 'read', ids: ['helperOne'] }),
+      () => answer('多跳读完再答')
+    ])
+    const res = await askCallStep(service, { ...req, stepId: 'caller>externalThing' }, { chat })
+    expect(res.answer).toBe('多跳读完再答')
+    expect(res.degraded).toBe(false)
+    // 骨架里的 id 可直接 read：源码被读取并计入 usedFunctionIds
+    expect(res.usedFunctionIds).toContain('helperOne')
+    const feed = seen[1][seen[1].length - 1].content
+    expect(feed).toContain('## helperOne')
+    expect(feed).toContain('return 1')
     service.storage.close()
   })
 

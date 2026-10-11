@@ -70,14 +70,19 @@ const PARTITION_MAX_TOKENS = 8000
 const CORE_JUDGMENT_MAX_TOKENS = 8000
 const CATEGORIES_MAX_TOKENS = 8000
 /**
- * 主干识别（keySteps）：输出为每函数一个小下标数组 + 一句 reason，体量远小于输入；
- * 8000 与其它结构化 pass 对齐，配合下方分批（单批 ≤120 函数）足够单批输出不截断。
+ * 主干识别（keySteps）：输出为每函数一个小下标数组（不要求 reason），体量远小于输入；
+ * 8000 与其它结构化 pass 对齐，配合下方 KEY_STEPS_CHUNK_SIZE 专属小分批，单批输出远低于上限不截断。
  */
 const KEY_STEPS_MAX_TOKENS = 8000
 /** 仅对调用数 ≥ 此阈值的函数跑主干识别（噪音问题只在调用多时才有） */
 const KEY_STEPS_MIN_CALLS = 5
 /** 单批喂给 AI 的函数数上限；超过则分批多次调用后合并（避免单次响应超 maxTokens 被截断） */
 const AI_CHUNK_SIZE = 120
+/**
+ * keySteps 专属分批大小：其输出体量随候选函数数增长（每函数一行 JSON），
+ * 用比 AI_CHUNK_SIZE(120) 更小的专属批大小，保证单批输出远低于 max_tokens 不被截断。
+ */
+const KEY_STEPS_CHUNK_SIZE = 40
 /** 单批解析失败/畸形的重试次数（模型输出非确定，偶发畸形 JSON，重试可显著降低整批降级概率） */
 const AI_PARSE_RETRIES = 2
 /** 结构化分析 pass（核心判定/分类）用较低 temperature，降低格式与结果波动 */
@@ -361,7 +366,7 @@ export async function aiKeySteps(graph: ProjectGraph): Promise<KeyStepsResult> {
     .map((id, i) => ({ id, i, fn: graph.nodes.get(id)! }))
     .filter((x) => x.fn.calls.length >= KEY_STEPS_MIN_CALLS)
   if (candidates.length === 0) return { steps: {}, batches: 0, failedBatches: 0 }
-  const batches = chunkArray(candidates, AI_CHUNK_SIZE)
+  const batches = chunkArray(candidates, KEY_STEPS_CHUNK_SIZE)
   const multi = batches.length > 1
   const out: Record<string, number[]> = {}
   let failedBatches = 0
@@ -386,8 +391,8 @@ export async function aiKeySteps(graph: ProjectGraph): Promise<KeyStepsResult> {
     const user =
       `以下函数的调用较多${scope}。每个函数先给「全局idx|函数名|用途」，其后缩进的每行是它的一个调用「局部序号|被调名|三分类|角色|用途」（局部序号从0开始，按调用点行号升序）：\n${lines}\n` +
       `请为每个函数挑出承载业务主干/关键步骤的调用「局部序号」，排除日志、纯参数校验、异常处理、琐碎工具等噪音调用。` +
-      `键必须原样回填上面给出的全局idx数字；keySteps 内只填该函数调用的局部序号。\n` +
-      `输出 JSON: {"<全局idx>":{"keySteps":[0,2,3],"reason":"一句话"}}`
+      `键必须原样回填上面给出的全局idx数字；keySteps 内只填该函数调用的局部序号，不要输出 reason 等任何额外字段（以免输出过长被截断）。\n` +
+      `输出 JSON: {"<全局idx>":{"keySteps":[0,2,3]}}`
     let done = false
     for (let attempt = 1; attempt <= AI_PARSE_RETRIES && !done; attempt++) {
       try {
@@ -401,7 +406,8 @@ export async function aiKeySteps(graph: ProjectGraph): Promise<KeyStepsResult> {
           )
           continue
         }
-        const raw = extractJson<Record<string, { keySteps?: unknown; reason?: string }>>(reply.content)
+        // 只取 keySteps 下标数组；模型若多给了 reason 等额外字段一律忽略（容错，不判失败）
+        const raw = extractJson<Record<string, { keySteps?: unknown }>>(reply.content)
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
           console.warn(
             `[autodoc] AI 主干识别第 ${b + 1}/${batches.length} 批第 ${attempt} 次返回无法解析${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`

@@ -103,20 +103,20 @@ function systemPrompt(): string {
   return [
     '你在帮开发者理解其项目中的一处函数调用。开发者正看着调用方函数里的某一步调用，并就这一步提问。',
     '你可以请求读取更多项目内函数的源码后再作答，往复多轮。每轮只输出一个严格 JSON 对象（禁止 Markdown 围栏外的杂文），三选一：',
-    '1. {"action":"read","ids":["<函数稳定ID>",...]}：读取这些函数的源码（单轮最多 6 个，重复/已读过的会被忽略）。',
+    '1. {"action":"read","ids":["<函数稳定ID>",...]}：读取这些函数的源码（单轮最多 6 个，重复/已读过的会被忽略）。调用骨架中每个被调都给了稳定ID（id=...），可直接把这些 id 放进 read 请求读取其源码；id 为「（外部/未解析，无id）」的表示项目外调用、无源码可读。',
     '2. {"action":"search","query":"<关键词>"}：按函数名/类名子串搜索项目内函数，得到候选列表后可再 read。',
     '3. {"action":"answer","content":"<最终中文解答>"}：信息足够时给出解答（面向开发者、紧扣所问调用步骤，使用中文）。',
     '注意：源码读取有总量与轮数上限，接近上限时应尽快 answer；只依据实际读到的源码作答，读不到的如实说明，禁止臆造。'
   ].join('\n')
 }
 
-/** caller 的一层调用骨架（按 line 升序），并高亮用户所问的那一步 */
+/** caller 的一层调用骨架（按 line 升序，含被调稳定 id 供模型直接 read），并高亮用户所问的那一步 */
 function buildSkeleton(calls: CallEdge[], askStepId: string): string {
   return [...calls]
     .sort((a, b) => a.line - b.line)
     .map((c, i) => {
       const mark = c.stepId === askStepId ? ' ←【用户问的是这一步】' : ''
-      return `${i}|${c.calleeName}|role=${c.role}|${c.calleeCategory}|${c.calleePurpose ?? '（无用途说明）'}${mark}`
+      return `${i}|${c.calleeName}|id=${c.calleeId ?? '（外部/未解析，无id）'}|role=${c.role}|${c.calleeCategory}|${c.calleePurpose ?? '（无用途说明）'}${mark}`
     })
     .join('\n')
 }
@@ -178,10 +178,10 @@ export async function askCallStep(
     callerSource ?? '（caller 源码读取失败）',
     '',
     `# 被问的这一步调用：${edge.calleeName}（stepId=${edge.stepId}，第 ${edge.line} 行，角色 ${edge.role}，分类 ${edge.calleeCategory}）`,
-    `## 被调函数源码（calleeId=${edge.calleeId ?? 'null'}）`,
+    `## 被调函数源码（calleeId=${edge.calleeId ?? '（外部/未解析，无id）'}）`,
     calleeBlock,
     '',
-    '# caller 的一层调用骨架（序号|被调名|角色|三分类|用途）',
+    '# caller 的一层调用骨架（序号|被调名|id=稳定ID|角色|三分类|用途）',
     buildSkeleton(caller.calls, edge.stepId),
     '',
     `# 用户的问题（针对「${edge.calleeName}」这一步）`,
