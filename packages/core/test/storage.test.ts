@@ -16,8 +16,13 @@ function freshDir(): string {
   return dir
 }
 
-/** 构造一份最小可用的历史洞察快照（用于双适配器往返测试） */
-function mkSnapshot(id: string, savedAt: string, summary: string): InsightSnapshot {
+/** 构造一份最小可用的历史洞察快照（用于双适配器往返测试）；可选携带用户命名/备注（H3） */
+function mkSnapshot(
+  id: string,
+  savedAt: string,
+  summary: string,
+  meta?: { label?: string; note?: string }
+): InsightSnapshot {
   const insight: ProjectInsight = {
     generatedAt: savedAt,
     graphFingerprint: `fp-${id}`,
@@ -47,6 +52,8 @@ function mkSnapshot(id: string, savedAt: string, summary: string): InsightSnapsh
       categoryCounts: {},
       aiPassStatus: {}
     },
+    ...(meta?.label !== undefined ? { label: meta.label } : {}),
+    ...(meta?.note !== undefined ? { note: meta.note } : {}),
     insight
   }
 }
@@ -295,14 +302,86 @@ function runAdapterSuite(create: (dir: string) => StorageAdapter): void {
     expect(storage.getActiveInsightSnapshotId()).toBeNull()
   })
 
-  it('历史洞察快照：全归档不删，且不暴露删除接口', () => {
+  it('历史洞察快照：命名/备注 label+note 往返（add→list→get 一致，含清空为空串、不存在返回 null）', () => {
+    const added = storage.addInsightSnapshot(
+      mkSnapshot('s1', '2026-01-01T00:00:00.000Z', 'x', { label: '重构前基线', note: '第一版备注' })
+    )
+    expect(added.label).toBe('重构前基线')
+    expect(added.note).toBe('第一版备注')
+
+    const listed = storage.listInsightSnapshots().find((m) => m.id === 's1')
+    expect(listed?.label).toBe('重构前基线')
+    expect(listed?.note).toBe('第一版备注')
+    expect(storage.getInsightSnapshot('s1')?.label).toBe('重构前基线')
+
+    // update：只改 label，note 不动；再改 note
+    const u1 = storage.updateInsightSnapshotMeta('s1', { label: '新名称' })
+    expect(u1?.label).toBe('新名称')
+    expect(u1?.note).toBe('第一版备注')
+    const u2 = storage.updateInsightSnapshotMeta('s1', { note: '改后备注' })
+    expect(u2?.label).toBe('新名称')
+    expect(u2?.note).toBe('改后备注')
+
+    // 清空为空串（区别于 undefined：空串是用户显式清空）
+    const cleared = storage.updateInsightSnapshotMeta('s1', { label: '', note: '' })
+    expect(cleared?.label).toBe('')
+    expect(cleared?.note).toBe('')
+
+    // 不存在的 id 返回 null（不抛）
+    expect(storage.updateInsightSnapshotMeta('nope', { label: 'x' })).toBeNull()
+  })
+
+  it('历史洞察快照：add 未带 label/note 时缺省 undefined（旧调用方不受影响）', () => {
+    const added = storage.addInsightSnapshot(mkSnapshot('s1', '2026-01-01T00:00:00.000Z', 'x'))
+    expect(added.label).toBeUndefined()
+    expect(added.note).toBeUndefined()
+    const listed = storage.listInsightSnapshots().find((m) => m.id === 's1')
+    expect(listed?.label).toBeUndefined()
+    expect(listed?.note).toBeUndefined()
+  })
+
+  it('历史洞察快照：deleteInsightSnapshot 移除且 list 不再含；删不存在返回 false', () => {
     storage.addInsightSnapshot(mkSnapshot('s1', '2026-01-01T00:00:00.000Z', 'x'))
     storage.addInsightSnapshot(mkSnapshot('s2', '2026-01-02T00:00:00.000Z', 'y'))
+    expect(storage.listInsightSnapshots().map((m) => m.id)).toEqual(['s2', 's1'])
+
+    expect(storage.deleteInsightSnapshot('s1')).toBe(true)
+    expect(storage.listInsightSnapshots().map((m) => m.id)).toEqual(['s2'])
+    expect(storage.getInsightSnapshot('s1')).toBeNull()
+    // 重复删/删不存在返回 false（不抛）
+    expect(storage.deleteInsightSnapshot('s1')).toBe(false)
+    expect(storage.deleteInsightSnapshot('nope')).toBe(false)
+  })
+
+  it('历史洞察快照：删除当前回滚中(active)的快照后自动取消回滚（activeId→null）', () => {
+    storage.addInsightSnapshot(mkSnapshot('s1', '2026-01-01T00:00:00.000Z', 'x'))
+    storage.addInsightSnapshot(mkSnapshot('s2', '2026-01-02T00:00:00.000Z', 'y'))
+    storage.setActiveInsightSnapshotId('s1')
+    expect(storage.getActiveInsightSnapshotId()).toBe('s1')
+
+    // 删的是 active：清回滚指针，回到实时视图
+    expect(storage.deleteInsightSnapshot('s1')).toBe(true)
+    expect(storage.getActiveInsightSnapshotId()).toBeNull()
+  })
+
+  it('历史洞察快照：删除非 active 的快照不影响当前回滚指针', () => {
+    storage.addInsightSnapshot(mkSnapshot('s1', '2026-01-01T00:00:00.000Z', 'x'))
+    storage.addInsightSnapshot(mkSnapshot('s2', '2026-01-02T00:00:00.000Z', 'y'))
+    storage.setActiveInsightSnapshotId('s1')
+
+    expect(storage.deleteInsightSnapshot('s2')).toBe(true)
+    // active 仍指向 s1（删的不是它）
+    expect(storage.getActiveInsightSnapshotId()).toBe('s1')
+    expect(storage.listInsightSnapshots().map((m) => m.id)).toEqual(['s1'])
+  })
+
+  it('历史洞察快照：系统仍不自动清理——归档全部保留，删除仅由用户显式调用', () => {
+    storage.addInsightSnapshot(mkSnapshot('s1', '2026-01-01T00:00:00.000Z', 'x'))
+    storage.addInsightSnapshot(mkSnapshot('s2', '2026-01-02T00:00:00.000Z', 'y'))
+    // 追加/更新均不触发任何自动删除，全部保留
     expect(storage.listInsightSnapshots()).toHaveLength(2)
-    // 归档不删：适配器不提供任何删除快照的方法
-    const s = storage as unknown as Record<string, unknown>
-    expect(s.deleteInsightSnapshot).toBeUndefined()
-    expect(s.removeInsightSnapshot).toBeUndefined()
+    storage.addInsightSnapshot(mkSnapshot('s3', '2026-01-03T00:00:00.000Z', 'z'))
+    expect(storage.listInsightSnapshots()).toHaveLength(3)
   })
 }
 
@@ -594,6 +673,84 @@ describe('存储层迁移与向后兼容', () => {
     expect(storage.listInsightSnapshots()).toEqual([])
     expect(storage.getInsightSnapshot('any')).toBeNull()
     expect(storage.getActiveInsightSnapshotId()).toBeNull()
+    storage.close()
+  })
+
+  it('SqliteStorage：旧库 insight_history 无 label/note 列，init 幂等补列且旧行读出 undefined', () => {
+    const dir = freshDir()
+    const dbPath = join(dir, 'autodoc.db')
+    // 手工构造「旧 schema」库：insight_history 表无 label/note 列，且已有一条快照
+    const old = new DatabaseSync(dbPath)
+    old.exec(`
+      CREATE TABLE insight_history (
+        id TEXT PRIMARY KEY, saved_at TEXT NOT NULL, fingerprint TEXT, trigger TEXT,
+        partition_feedback TEXT, ai_enabled INTEGER, ai_generated INTEGER,
+        summary TEXT, stats_json TEXT, insight_json TEXT
+      );
+      CREATE TABLE app_state (key TEXT PRIMARY KEY, value TEXT);
+    `)
+    old
+      .prepare(
+        "INSERT INTO insight_history (id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, insight_json) VALUES ('legacy-s1','2026-01-01T00:00:00.000Z','fp','refresh','',1,1,'旧快照','{}','{\"generatedAt\":\"2026-01-01T00:00:00.000Z\"}')"
+      )
+      .run()
+    old.close()
+
+    const upgraded = new SqliteStorage(dbPath)
+    expect(() => upgraded.init()).not.toThrow()
+    const meta = upgraded.listInsightSnapshots()[0]
+    expect(meta.id).toBe('legacy-s1')
+    // 旧行 label/note 为 NULL → 读出 undefined（不报错）
+    expect(meta.label).toBeUndefined()
+    expect(meta.note).toBeUndefined()
+    // 补列后可正常更新命名/备注
+    const updated = upgraded.updateInsightSnapshotMeta('legacy-s1', { label: '命名', note: '备注' })
+    expect(updated?.label).toBe('命名')
+    expect(updated?.note).toBe('备注')
+    upgraded.close()
+
+    // 重复 init（ALTER 再次执行）不报错，数据完好
+    const reopened = new SqliteStorage(dbPath)
+    expect(() => reopened.init()).not.toThrow()
+    expect(reopened.listInsightSnapshots()[0].label).toBe('命名')
+    reopened.close()
+  })
+
+  it('JsonStorage：旧侧车快照缺 label/note 字段读出 undefined，update 可补上', () => {
+    const dir = freshDir()
+    const dataPath = join(dir, 'autodoc.json')
+    writeFileSync(
+      dataPath,
+      JSON.stringify({
+        version: 1,
+        annotations: [],
+        changes: [],
+        snapshots: {},
+        insightHistory: [
+          {
+            id: 'legacy-s1',
+            savedAt: '2026-01-01T00:00:00.000Z',
+            graphFingerprint: 'fp',
+            trigger: 'refresh',
+            partitionFeedback: '',
+            aiEnabled: true,
+            aiGenerated: true,
+            summary: '旧快照',
+            stats: { moduleCount: 0, chainCount: 0, flowNodeCount: 0, coreCount: 0, categoryCounts: {}, aiPassStatus: {} },
+            insight: { generatedAt: '2026-01-01T00:00:00.000Z' }
+          }
+        ]
+      }),
+      'utf-8'
+    )
+    const storage = new JsonStorage(dataPath)
+    storage.init()
+    const meta = storage.listInsightSnapshots()[0]
+    expect(meta.label).toBeUndefined()
+    expect(meta.note).toBeUndefined()
+    const updated = storage.updateInsightSnapshotMeta('legacy-s1', { label: '命名' })
+    expect(updated?.label).toBe('命名')
+    expect(updated?.note).toBeUndefined()
     storage.close()
   })
 })

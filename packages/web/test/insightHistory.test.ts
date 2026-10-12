@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import type { InsightDiff, InsightSnapshotStats } from '@autodoc/shared-types'
 import {
   formatSnapshotStats,
+  snapshotDisplayLabel,
+  snapshotDisplayNote,
   snapshotTriggerLabel,
   summarizeDiff
 } from '../src/utils/insightHistory'
@@ -36,6 +38,29 @@ describe('snapshotTriggerLabel', () => {
   it('refresh → 重新生成；partition → 按建议划分', () => {
     expect(snapshotTriggerLabel('refresh')).toBe('重新生成')
     expect(snapshotTriggerLabel('partition')).toBe('按建议划分')
+  })
+})
+
+describe('snapshotDisplayLabel / snapshotDisplayNote（H3 命名/备注回退显示）', () => {
+  it('有命名：返回 trim 后的 label（列表主显示）', () => {
+    expect(snapshotDisplayLabel({ label: '  重构前基线  ' })).toBe('重构前基线')
+  })
+
+  it('无命名回退：undefined / 空串 / 纯空白均返回空串（调用方显示时间+触发）', () => {
+    expect(snapshotDisplayLabel({})).toBe('')
+    expect(snapshotDisplayLabel({ label: '' })).toBe('')
+    expect(snapshotDisplayLabel({ label: '   ' })).toBe('')
+  })
+
+  it('备注同规则：trim 后非空返回文本，否则空串（不渲染备注行）', () => {
+    expect(snapshotDisplayNote({ note: '  留档说明 ' })).toBe('留档说明')
+    expect(snapshotDisplayNote({})).toBe('')
+    expect(snapshotDisplayNote({ note: ' \n ' })).toBe('')
+  })
+
+  it('脏数据防御：label/note 非字符串（旧数据/损坏）按缺省处理', () => {
+    expect(snapshotDisplayLabel({ label: 123 as unknown as string })).toBe('')
+    expect(snapshotDisplayNote({ note: null as unknown as string })).toBe('')
   })
 })
 

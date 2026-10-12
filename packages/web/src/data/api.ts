@@ -9,6 +9,7 @@ import type {
   InsightDiff,
   InsightHistoryResponse,
   InsightSnapshot,
+  InsightSnapshotMeta,
   NewProjectInput,
   ProjectInfo,
   ProjectInsight,
@@ -203,6 +204,31 @@ export async function clearInsightRollback(): Promise<void> {
   if (mode !== 'api') throw new Error('历史版本写操作仅服务模式可用')
   const res = await fetch('/api/insight/history/active', { method: 'DELETE' })
   if (!res.ok && res.status !== 204) throw await errorFromResponse(res, '回到实时失败')
+}
+
+/** 更新快照的用户命名/备注（H3，写操作）：空串=清空该字段；404/403/400 抛错，成功返回更新后的 meta */
+export async function updateInsightSnapshot(
+  id: string,
+  patch: { label?: string; note?: string }
+): Promise<InsightSnapshotMeta> {
+  if (mode !== 'api') throw new Error('历史版本写操作仅服务模式可用')
+  const res = await fetch(`/api/insight/history/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch)
+  })
+  if (!res.ok) throw await errorFromResponse(res, '更新快照名称/备注失败')
+  return (await res.json()) as InsightSnapshotMeta
+}
+
+/** 删除单条快照（H3，写操作）：clearedActive=true 表示删的是当前回滚快照，需回到实时视图 */
+export async function deleteInsightSnapshot(id: string): Promise<{ clearedActive: boolean }> {
+  if (mode !== 'api') throw new Error('历史版本写操作仅服务模式可用')
+  const res = await fetch(`/api/insight/history/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  if (!res.ok && res.status !== 204) throw await errorFromResponse(res, '删除快照失败')
+  if (res.status === 204) return { clearedActive: false }
+  const data = (await res.json()) as { ok?: boolean; clearedActive?: boolean }
+  return { clearedActive: data.clearedActive === true }
 }
 
 export async function fetchMeta(): Promise<ServerMeta> {

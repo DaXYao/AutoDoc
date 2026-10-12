@@ -529,6 +529,13 @@ export interface InsightSnapshotMeta {
   /** 项目级 AI 概述快照 */
   summary: string
   stats: InsightSnapshotStats
+  /**
+   * 用户可编辑的名称（短，列表主显示，如「重构前基线」），用于快速定位某份快照；
+   * 缺省/空串则列表回退显示「时间 + 触发来源」。与自动生成内容分离，属用户数据。
+   */
+  label?: string
+  /** 用户可编辑的备注（长文本补充）；缺省/空串则列表不显示备注行 */
+  note?: string
 }
 
 /** 完整快照：元信息 + 整份 ProjectInsight */

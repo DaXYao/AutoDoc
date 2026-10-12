@@ -6,6 +6,7 @@ import type { Annotation, ChangeRecord, ChangeSource, InsightSnapshot, InsightSn
 import type { FileSnapshot } from '../changes.js'
 import type {
   AnnotationPatch,
+  InsightSnapshotMetaPatch,
   NewAnnotationInput,
   NewChangeInput,
   StorageAdapter
@@ -264,6 +265,30 @@ export class JsonStorage implements StorageAdapter {
     ;(this.data.insightHistory ??= []).push(snapshot)
     this.save()
     return toSnapshotMeta(snapshot)
+  }
+
+  updateInsightSnapshotMeta(id: string, patch: InsightSnapshotMetaPatch): InsightSnapshotMeta | null {
+    this.mutate()
+    const target = (this.data.insightHistory ?? []).find((s) => s.id === id)
+    if (!target) return null
+    // 只改用户命名/备注：空串按原样存（前端视为清空），undefined 字段不动；旧数据缺省字段直接补上
+    if (patch.label !== undefined) target.label = patch.label
+    if (patch.note !== undefined) target.note = patch.note
+    this.save()
+    return toSnapshotMeta(target)
+  }
+
+  deleteInsightSnapshot(id: string): boolean {
+    this.mutate()
+    const list = this.data.insightHistory ?? []
+    const next = list.filter((s) => s.id !== id)
+    const removed = next.length !== list.length
+    if (!removed) return false
+    this.data.insightHistory = next
+    // 删的是当前回滚指针指向的快照：顺带清 activeId（回到实时视图），不留悬空指针
+    if (this.data.activeInsightSnapshotId === id) delete this.data.activeInsightSnapshotId
+    this.save()
+    return true
   }
 
   getActiveInsightSnapshotId(): string | null {

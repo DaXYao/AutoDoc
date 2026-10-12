@@ -2,6 +2,22 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-14 · H3：历史 AI 快照增强——命名/备注 + 手动删除 · 全栈
+
+- **内容**：为每份历史洞察快照增加用户可编辑的「名称(label)/备注(note)」与「手动删除单条」能力；语义演进为**系统仍不自动清理/不自动覆盖（归档默认全留），但允许用户显式手动删单条**。删除当前回滚中(activeId)的快照时自动取消回滚（activeId→null，回到实时视图）。既有查看/对比/回滚/回到实时行为不变，不动其它 AI pass、不改 README。
+  1. `shared-types`：`InsightSnapshotMeta` 加可选 `label?`/`note?`（用户命名/备注，缺省为空则列表回退显示时间+触发）。
+  2. `core/storage/StorageAdapter.ts`：`toSnapshotMeta` 携带 label/note（仅在有值时）；新增 `InsightSnapshotMetaPatch` 类型；接口新增 `updateInsightSnapshotMeta(id, patch)`（只改 label/note，空串=清空，不存在返回 null）与 `deleteInsightSnapshot(id)`（删 active 顺带清 activeId），注释从「全归档不删、无删除接口」更新为新语义。
+  3. `core/storage/SqliteStorage.ts`：insight_history CREATE TABLE 加 `label TEXT`/`note TEXT`（新库），旧库走幂等 ALTER 补列（照 changes 表 try/catch 模式）；list SELECT 补两列、addInsightSnapshot 写入（缺省 null）、rowToSnapshotMeta 读出（NULL→undefined）；`updateInsightSnapshotMeta` 按 patch 动态 SET、changes=0→null；`deleteInsightSnapshot` DELETE 行，若被删的是 activeId 则顺带清 app_state 的 activeInsightSnapshotId（两条语句、非单事务；悬空 activeId 由 loadInsight 回退实时自愈）。两方法均写前 backupOnce。
+  4. `core/storage/JsonStorage.ts`：同语义实现（mutate+save；删 active 时 delete activeInsightSnapshotId；旧数据缺 label/note 读出 undefined）。
+  5. `server/app.ts`：新增 `PATCH /api/insight/history/:id`（body {label?,note?} 至少一个为字符串否则 400；不存在 404；readOnly 403；返回更新后 meta）与 `DELETE /api/insight/history/:id`（不存在 404；readOnly 403；返回 {ok:true,clearedActive}）。既有 `DELETE /api/insight/history/active` 静态段优先，不被 :id 参数路由抢占（有专测）。
+  6. `web/data/api.ts`：`updateInsightSnapshot(id, patch)`（PATCH，!ok 抛错）与 `deleteInsightSnapshot(id)`（DELETE，返回 {clearedActive}）。
+  7. `web/utils/insightHistory.ts`：抽纯函数 `snapshotDisplayLabel`/`snapshotDisplayNote`（trim 非空才显示，脏数据防御）。
+  8. `web/components/InsightHistory.vue`：列表行主显示优先 label（加粗，时间/触发降为次行浅色），无则回退现状；note 以小字灰行显示（truncate + title 悬浮全文）；每行「编辑」内联态（名称 input + 备注 textarea + 保存/取消，readOnly 隐藏）；每行「删除」用 n-popconfirm 二次确认（文案含"删除后不可恢复"，删 active 额外提示会回到实时），确认后 clearedActive=true 时 refreshInsight() 回实时视图 + reload() + message 提示；回滚成功文案改用命名（无名回退时间）。归档提示文案更新为「系统不自动清理，如需精简可手动删除单条」。
+- **影响范围**：shared-types + core（存储两适配器/接口）+ server（app 路由）+ web（api/utils/InsightHistory）+ 三包测试；不改 README、不动 AI pass。
+- **动机**：快照份数增多后仅靠时间+触发难以定位某一版，需要用户命名/备注；同时归档「永不删」在长期使用下会累积无效快照，开放用户显式手动删除（系统仍不自动清理），并保证删除回滚中快照时视图安全回到实时。
+- **测试**：`core/test/storage.test.ts` 双适配器新增 6+2 例（label/note 往返含清空与不存在 null、缺省 undefined、删除与删不存在 false、删 active 清回滚、删非 active 不影响、旧 SQLite 库无列/旧 JSON 无字段兼容），替换过时的「不暴露删除接口」用例；新增 `server/test/insightHistoryRoutes.test.ts` 10 例（PATCH 200/清空/400/404/403，DELETE 200 clearedActive 真假/404/403/active 静态路由不被抢占）；`web/test/insightHistory.test.ts` 新增 4 例（label/note 回退显示与脏数据防御）。`pnpm lint`（eslint + 四包 typecheck 含 vue-tsc）与 `pnpm test` 全绿（core 136 / server 144 / web 37）。
+- **关联 commit**：待提交。
+
 ## 2026-10-14 · U2 复审修复：脉络树渐进披露 5 项 · 前端
 
 - **内容**：仅 web 包增量修复 U2 初审问题，不改后端/shared-types/README。

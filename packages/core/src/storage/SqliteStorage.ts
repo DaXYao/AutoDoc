@@ -7,6 +7,7 @@ import type { FileSnapshot } from '../changes.js'
 import { backupBaseName, pruneBackups } from './JsonStorage.js'
 import type {
   AnnotationPatch,
+  InsightSnapshotMetaPatch,
   NewAnnotationInput,
   NewChangeInput,
   StorageAdapter
@@ -70,7 +71,9 @@ export class SqliteStorage implements StorageAdapter {
         ai_generated INTEGER,
         summary TEXT,
         stats_json TEXT,
-        insight_json TEXT
+        insight_json TEXT,
+        label TEXT,
+        note TEXT
       );
       CREATE TABLE IF NOT EXISTS app_state (
         key TEXT PRIMARY KEY,
@@ -82,11 +85,13 @@ export class SqliteStorage implements StorageAdapter {
     // 此时 this.db 已就绪，backupOnce() 内 conn()→init() 因 this.db 非空会立即返回（不递归）；
     // backedUp 幂等标志确保备份只做一次。全新库（文件此前不存在）无用户数据，无需备份，直接迁移。
     if (isUpgrade) this.backupOnce('premigrate')
-    // 幂等迁移：为已存在的 changes / annotations 表补充新列（重复执行时忽略 duplicate column 错误）
+    // 幂等迁移：为已存在的 changes / annotations / insight_history 表补充新列（重复执行时忽略 duplicate column 错误）
     for (const ddl of [
       'ALTER TABLE changes ADD COLUMN source TEXT',
       'ALTER TABLE changes ADD COLUMN commit_json TEXT',
-      'ALTER TABLE annotations ADD COLUMN kind TEXT'
+      'ALTER TABLE annotations ADD COLUMN kind TEXT',
+      'ALTER TABLE insight_history ADD COLUMN label TEXT',
+      'ALTER TABLE insight_history ADD COLUMN note TEXT'
     ]) {
       try {
         this.db.exec(ddl)
@@ -270,7 +275,7 @@ export class SqliteStorage implements StorageAdapter {
     // 只 SELECT meta 列（不取 insight_json），按保存时间倒序（新→旧）
     const rows = this.conn()
       .prepare(
-        'SELECT id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json FROM insight_history ORDER BY saved_at DESC'
+        'SELECT id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, label, note FROM insight_history ORDER BY saved_at DESC'
       )
       .all()
     return rows.map((row) => this.rowToSnapshotMeta(row))
@@ -301,7 +306,7 @@ export class SqliteStorage implements StorageAdapter {
     this.backupOnce()
     this.conn()
       .prepare(
-        'INSERT INTO insight_history (id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, insight_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO insight_history (id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, insight_json, label, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
       .run(
         snapshot.id,
@@ -313,9 +318,55 @@ export class SqliteStorage implements StorageAdapter {
         snapshot.aiGenerated ? 1 : 0,
         snapshot.summary,
         JSON.stringify(snapshot.stats),
-        JSON.stringify(snapshot.insight)
+        JSON.stringify(snapshot.insight),
+        snapshot.label ?? null,
+        snapshot.note ?? null
       )
     return toSnapshotMeta(snapshot)
+  }
+
+  updateInsightSnapshotMeta(id: string, patch: InsightSnapshotMetaPatch): InsightSnapshotMeta | null {
+    this.backupOnce()
+    const db = this.conn()
+    // 只更新 patch 中出现的字段；空串按原样存（读出为空串，前端视为清空）
+    const sets: string[] = []
+    const values: (string | null)[] = []
+    if (patch.label !== undefined) {
+      sets.push('label = ?')
+      values.push(patch.label)
+    }
+    if (patch.note !== undefined) {
+      sets.push('note = ?')
+      values.push(patch.note)
+    }
+    if (sets.length === 0) {
+      // 无可更新字段：存在则原样返回 meta，不存在返回 null
+      const row0 = db.prepare('SELECT * FROM insight_history WHERE id = ?').get(id)
+      return row0 ? this.rowToSnapshotMeta(row0) : null
+    }
+    const result = db
+      .prepare(`UPDATE insight_history SET ${sets.join(', ')} WHERE id = ?`)
+      .run(...values, id)
+    if (Number(result.changes) === 0) return null
+    const row = db.prepare('SELECT * FROM insight_history WHERE id = ?').get(id)
+    return row ? this.rowToSnapshotMeta(row) : null
+  }
+
+  deleteInsightSnapshot(id: string): boolean {
+    this.backupOnce()
+    const db = this.conn()
+    // 删的是当前回滚指针指向的快照：顺带清 activeId（回到实时视图）。
+    // 注意：DELETE 与清 activeId 是两条语句、非单一原子事务；极端崩溃可能短暂留下悬空
+    // activeId，但 loadInsight 对「activeId 指向已不存在快照」会回退实时计算，故可自愈。
+    const clearedActive = this.getActiveInsightSnapshotId() === id
+    const result = db.prepare('DELETE FROM insight_history WHERE id = ?').run(id)
+    const removed = Number(result.changes) > 0
+    if (removed && clearedActive) {
+      db.prepare(
+        "INSERT INTO app_state (key, value) VALUES ('activeInsightSnapshotId', NULL) ON CONFLICT(key) DO UPDATE SET value = NULL"
+      ).run()
+    }
+    return removed
   }
 
   getActiveInsightSnapshotId(): string | null {
@@ -360,7 +411,10 @@ export class SqliteStorage implements StorageAdapter {
       aiEnabled: Number(row.ai_enabled) === 1,
       aiGenerated: Number(row.ai_generated) === 1,
       summary: typeof row.summary === 'string' ? row.summary : '',
-      stats
+      stats,
+      // 用户命名/备注（H3）：NULL（旧行/未设置）→ undefined；空串按原样读出
+      label: typeof row.label === 'string' ? row.label : undefined,
+      note: typeof row.note === 'string' ? row.note : undefined
     }
   }
 

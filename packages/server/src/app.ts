@@ -190,6 +190,41 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     return { ok: true, activeId: req.params.id }
   })
 
+  // 更新快照的用户命名/备注（H3，写操作，readOnly 403）：
+  // body {label?, note?} 至少一个为字符串（空串=清空该字段）；快照不存在 404；成功返回更新后的 meta
+  app.patch<{ Params: { id: string } }>('/api/insight/history/:id', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const body = (req.body ?? {}) as { label?: unknown; note?: unknown }
+    const hasLabel = typeof body.label === 'string'
+    const hasNote = typeof body.note === 'string'
+    if (!hasLabel && !hasNote) {
+      return reply.code(400).send({ error: '缺少 label / note（至少一个为字符串）' })
+    }
+    if ((body.label !== undefined && !hasLabel) || (body.note !== undefined && !hasNote)) {
+      return reply.code(400).send({ error: 'label / note 必须为字符串' })
+    }
+    const patch: { label?: string; note?: string } = {}
+    if (hasLabel) patch.label = body.label as string
+    if (hasNote) patch.note = body.note as string
+    const meta = service.storage.updateInsightSnapshotMeta(req.params.id, patch)
+    if (!meta) return reply.code(404).send({ error: `snapshot not found: ${req.params.id}` })
+    return meta
+  })
+
+  // 手动删除单条快照（H3，写操作，readOnly 403）：系统仍不自动清理，仅此用户显式入口。
+  // 不存在 404；删的是当前回滚指针时存储层顺带清 activeId，clearedActive 告知前端回实时视图
+  app.delete<{ Params: { id: string } }>('/api/insight/history/:id', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const clearedActive = service.storage.getActiveInsightSnapshotId() === req.params.id
+    const removed = service.storage.deleteInsightSnapshot(req.params.id)
+    if (!removed) return reply.code(404).send({ error: `snapshot not found: ${req.params.id}` })
+    return { ok: true, clearedActive }
+  })
+
   // 清除当前生效快照，回到实时计算视图（写操作，readOnly 403）
   app.delete('/api/insight/history/active', async (req, reply) => {
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })

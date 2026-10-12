@@ -1,13 +1,26 @@
-import type { AiPassStatus, InsightDiff, InsightSnapshotStats, InsightSnapshotTrigger } from '@autodoc/shared-types'
+import type { AiPassStatus, InsightDiff, InsightSnapshotMeta, InsightSnapshotStats, InsightSnapshotTrigger } from '@autodoc/shared-types'
 import { AI_PASS_LABELS, AI_STATUS_META, CATEGORY_LABELS, CATEGORY_ORDER } from './format'
 
 /**
- * 历史 AI 洞察快照相关的纯展示逻辑（H2）：可独立单测，不含任何 Vue/网络依赖。
+ * 历史 AI 洞察快照相关的纯展示逻辑（H2/H3）：可独立单测，不含任何 Vue/网络依赖。
  */
 
 /** 快照触发来源 → 中文标签 */
 export function snapshotTriggerLabel(trigger: InsightSnapshotTrigger): string {
   return trigger === 'partition' ? '按建议划分' : '重新生成'
+}
+
+/**
+ * 快照列表主标题（H3）：优先用户命名 label（trim 后非空）；
+ * 无命名返回空串（调用方回退显示「时间 + 触发」现状）。
+ */
+export function snapshotDisplayLabel(meta: Pick<InsightSnapshotMeta, 'label'>): string {
+  return typeof meta.label === 'string' && meta.label.trim().length > 0 ? meta.label.trim() : ''
+}
+
+/** 快照备注展示（H3）：trim 后非空返回修剪文本，否则空串（调用方不渲染备注行） */
+export function snapshotDisplayNote(meta: Pick<InsightSnapshotMeta, 'note'>): string {
+  return typeof meta.note === 'string' && meta.note.trim().length > 0 ? meta.note.trim() : ''
 }
 
 /** 计数防御：非有限数或负数一律按 0 展示（脏数据不渲染负号） */

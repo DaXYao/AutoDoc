@@ -20,7 +20,7 @@ export interface AnnotationPatch {
  * SQLite 与 JSON 两个适配器共用，保证 meta 结构一致。
  */
 export function toSnapshotMeta(snapshot: InsightSnapshot): InsightSnapshotMeta {
-  return {
+  const meta: InsightSnapshotMeta = {
     id: snapshot.id,
     savedAt: snapshot.savedAt,
     graphFingerprint: snapshot.graphFingerprint,
@@ -31,6 +31,16 @@ export function toSnapshotMeta(snapshot: InsightSnapshot): InsightSnapshotMeta {
     summary: snapshot.summary,
     stats: snapshot.stats
   }
+  // 用户命名/备注（H3）：仅在有值时携带，旧数据缺省保持 undefined
+  if (snapshot.label !== undefined) meta.label = snapshot.label
+  if (snapshot.note !== undefined) meta.note = snapshot.note
+  return meta
+}
+
+/** 历史快照的用户命名/备注补丁（H3）：字段为字符串即更新（空串=清空），undefined=不改 */
+export interface InsightSnapshotMetaPatch {
+  label?: string
+  note?: string
 }
 
 export interface NewChangeInput {
@@ -83,14 +93,25 @@ export interface StorageAdapter {
   /** 推进 Git 水位线（写操作，触发写前备份） */
   setGitWatermark(hash: string): void
 
-  /* ------------------------- 历史 AI 洞察快照（用户数据：写前备份、全归档不删、无删除接口） ------------------------- */
+  /* ------------------------- 历史 AI 洞察快照（用户数据：写前备份、系统不自动清理；H3 起允许用户手动删单条） ------------------------- */
 
   /** 全部快照的元信息（不含 insight 载荷），新→旧排序 */
   listInsightSnapshots(): InsightSnapshotMeta[]
   /** 按 id 取完整快照（含 insight 载荷）；不存在返回 null */
   getInsightSnapshot(id: string): InsightSnapshot | null
-  /** 追加一份快照（写操作，触发写前备份）；返回其元信息。归档不删，故无删除接口 */
+  /** 追加一份快照（写操作，触发写前备份）；返回其元信息 */
   addInsightSnapshot(snapshot: InsightSnapshot): InsightSnapshotMeta
+  /**
+   * 更新快照的用户命名/备注（H3，写操作，触发写前备份）；只改 label/note，
+   * 空串=清空该字段；快照不存在返回 null。
+   */
+  updateInsightSnapshotMeta(id: string, patch: InsightSnapshotMetaPatch): InsightSnapshotMeta | null
+  /**
+   * 手动删除单条快照（H3，写操作，触发写前备份）；返回是否删除成功。
+   * 系统仍不自动清理/覆盖（归档默认全留），仅此用户显式入口可删。
+   * 若被删的是当前回滚指针（activeId）指向的快照，顺带把 activeId 置 null（回到实时视图）。
+   */
+  deleteInsightSnapshot(id: string): boolean
   /** 当前生效（回滚/历史视图）的快照 id；null=实时计算视图 */
   getActiveInsightSnapshotId(): string | null
   /** 设置当前生效快照 id；传 null 回到实时计算视图（写操作，触发写前备份） */
