@@ -10,6 +10,7 @@ import {
   rollbackInsightSnapshot
 } from '../data/api'
 import { appState, refreshInsight } from '../store/app'
+import { isExpanded, toggle } from '../store/expand'
 import { formatDate } from '../utils/format'
 import { formatSnapshotStats, snapshotTriggerLabel, summarizeDiff } from '../utils/insightHistory'
 
@@ -45,6 +46,19 @@ const activeSnapshot = computed(
 )
 const archivedCount = computed(() => history.value?.archivedCount ?? 0)
 const canCompare = computed(() => selectedIds.value.length === 2)
+
+/**
+ * 历史版本列表默认收起（渐进披露），展开态持久化到 store/expand.ts（按项目区分命名空间）。
+ * 回滚态横幅（activeId != null）在折叠之外常驻，不受此开关影响。
+ */
+const historyKey = computed(
+  () => `insight:history:${appState.activeProjectId ?? 'static'}`
+)
+const historyExpanded = computed(() => isExpanded(historyKey.value, false))
+
+function toggleHistory(): void {
+  toggle(historyKey.value, false)
+}
 
 async function reload(): Promise<void> {
   loading.value = true
@@ -147,96 +161,111 @@ async function handleCompare(): Promise<void> {
       </div>
     </n-alert>
 
-    <!-- 历史版本区 -->
-    <section class="mb-5 rounded-lg border border-gray-200 bg-white px-4 py-3">
-      <div class="flex items-center gap-2 mb-2">
+    <!-- 历史版本区（可折叠，默认收起；回滚态横幅在上方常驻不受影响） -->
+    <section class="mb-5 rounded-lg border border-gray-200 bg-white">
+      <button
+        class="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-gray-50 rounded-lg"
+        @click="toggleHistory"
+      >
         <h3 class="text-sm font-semibold text-gray-700">历史版本</h3>
-        <span v-if="history" class="text-xs text-gray-400">
-          共归档 {{ history.total }} 份，展示最近 {{ snapshots.length }} 份
+        <span
+          v-if="history"
+          class="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full text-[11px] font-semibold bg-gray-100 text-gray-600"
+        >
+          {{ history.total }}
         </span>
-        <n-button
-          class="ml-auto"
-          size="tiny"
-          secondary
-          :disabled="!canCompare"
-          :loading="compareBusy"
-          :title="canCompare ? '对比勾选的两份快照' : '请恰好勾选两份进行对比'"
-          @click="handleCompare"
-        >
-          对比这两版
-        </n-button>
-      </div>
+        <span class="ml-auto text-gray-400 text-xs">{{ historyExpanded ? '▾' : '▸' }}</span>
+      </button>
 
-      <n-spin v-if="loading" size="small" />
-      <div v-else-if="snapshots.length === 0" class="text-xs text-gray-400 py-1">
-        暂无历史快照；点击「重新生成 AI」后每次生成会自动归档一份。
-      </div>
-      <n-list v-else bordered size="small">
-        <n-list-item
-          v-for="snapshot in snapshots"
-          :key="snapshot.id"
-          :class="snapshot.id === activeId ? 'bg-amber-50/60' : ''"
-        >
-          <div class="flex items-start gap-2 w-full">
-            <n-checkbox
-              class="mt-1"
-              :checked="selectedIds.includes(snapshot.id)"
-              @update:checked="(v: boolean) => toggleSelect(snapshot.id, v)"
-            />
-            <div class="min-w-0 flex-1">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="text-xs font-medium text-gray-700">
-                  {{ formatDate(snapshot.savedAt) }}
-                </span>
-                <n-tag
-                  size="tiny"
-                  :bordered="false"
-                  :type="snapshot.trigger === 'partition' ? 'info' : 'default'"
+      <div v-show="historyExpanded" class="px-4 pb-3">
+        <div class="flex items-center gap-2 mb-2">
+          <span v-if="history" class="text-xs text-gray-400">
+            共归档 {{ history.total }} 份，展示最近 {{ snapshots.length }} 份
+          </span>
+          <n-button
+            class="ml-auto"
+            size="tiny"
+            secondary
+            :disabled="!canCompare"
+            :loading="compareBusy"
+            :title="canCompare ? '对比勾选的两份快照' : '请恰好勾选两份进行对比'"
+            @click="handleCompare"
+          >
+            对比这两版
+          </n-button>
+        </div>
+
+        <n-spin v-if="loading" size="small" />
+        <div v-else-if="snapshots.length === 0" class="text-xs text-gray-400 py-1">
+          暂无历史快照；点击「重新生成 AI」后每次生成会自动归档一份。
+        </div>
+        <n-list v-else bordered size="small">
+          <n-list-item
+            v-for="snapshot in snapshots"
+            :key="snapshot.id"
+            :class="snapshot.id === activeId ? 'bg-amber-50/60' : ''"
+          >
+            <div class="flex items-start gap-2 w-full">
+              <n-checkbox
+                class="mt-1"
+                :checked="selectedIds.includes(snapshot.id)"
+                @update:checked="(v: boolean) => toggleSelect(snapshot.id, v)"
+              />
+              <div class="min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="text-xs font-medium text-gray-700">
+                    {{ formatDate(snapshot.savedAt) }}
+                  </span>
+                  <n-tag
+                    size="tiny"
+                    :bordered="false"
+                    :type="snapshot.trigger === 'partition' ? 'info' : 'default'"
+                  >
+                    {{ snapshotTriggerLabel(snapshot.trigger) }}
+                  </n-tag>
+                  <n-tag
+                    v-if="snapshot.id === activeId"
+                    size="tiny"
+                    type="warning"
+                    :bordered="false"
+                  >
+                    当前查看
+                  </n-tag>
+                  <span v-if="!snapshot.aiGenerated" class="text-[11px] text-gray-400">
+                    未含 AI 结果
+                  </span>
+                </div>
+                <p v-if="snapshot.summary" class="mt-0.5 text-xs text-gray-500 truncate">
+                  {{ snapshot.summary }}
+                </p>
+                <p
+                  v-if="snapshot.trigger === 'partition' && snapshot.partitionFeedback"
+                  class="mt-0.5 text-[11px] text-gray-400 truncate"
                 >
-                  {{ snapshotTriggerLabel(snapshot.trigger) }}
-                </n-tag>
-                <n-tag
-                  v-if="snapshot.id === activeId"
-                  size="tiny"
-                  type="warning"
-                  :bordered="false"
-                >
-                  当前查看
-                </n-tag>
-                <span v-if="!snapshot.aiGenerated" class="text-[11px] text-gray-400">
-                  未含 AI 结果
-                </span>
+                  划分建议：{{ snapshot.partitionFeedback }}
+                </p>
+                <p class="mt-0.5 text-[11px] text-gray-400">
+                  {{ formatSnapshotStats(snapshot.stats) }}
+                </p>
               </div>
-              <p v-if="snapshot.summary" class="mt-0.5 text-xs text-gray-500 truncate">
-                {{ snapshot.summary }}
-              </p>
-              <p
-                v-if="snapshot.trigger === 'partition' && snapshot.partitionFeedback"
-                class="mt-0.5 text-[11px] text-gray-400 truncate"
+              <n-button
+                v-if="!readOnly"
+                size="tiny"
+                secondary
+                :disabled="snapshot.id === activeId"
+                :loading="rollingBackId === snapshot.id"
+                @click="handleRollback(snapshot)"
               >
-                划分建议：{{ snapshot.partitionFeedback }}
-              </p>
-              <p class="mt-0.5 text-[11px] text-gray-400">
-                {{ formatSnapshotStats(snapshot.stats) }}
-              </p>
+                {{ snapshot.id === activeId ? '正在查看' : '回滚到此版本' }}
+              </n-button>
             </div>
-            <n-button
-              v-if="!readOnly"
-              size="tiny"
-              secondary
-              :disabled="snapshot.id === activeId"
-              :loading="rollingBackId === snapshot.id"
-              @click="handleRollback(snapshot)"
-            >
-              {{ snapshot.id === activeId ? '正在查看' : '回滚到此版本' }}
-            </n-button>
-          </div>
-        </n-list-item>
-      </n-list>
+          </n-list-item>
+        </n-list>
 
-      <p v-if="archivedCount > 0" class="mt-2 text-[11px] text-gray-400">
-        另有 {{ archivedCount }} 份已归档（不展示，数据不会删除）。
-      </p>
+        <p v-if="archivedCount > 0" class="mt-2 text-[11px] text-gray-400">
+          另有 {{ archivedCount }} 份已归档（不展示，数据不会删除）。
+        </p>
+      </div>
     </section>
 
     <!-- 对比结果弹窗 -->

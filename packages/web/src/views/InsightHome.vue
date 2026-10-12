@@ -64,9 +64,9 @@ const insight = computed(() => appState.insight)
 const flows = computed(() => insight.value?.flows ?? [])
 const hasFlows = computed(() => flows.value.length > 0)
 
-/** 脉络树默认自动展开深度（可配置，不写死） */
+/** 脉络树默认自动展开深度（可配置，不写死；缺省 0 = 默认全收起，逐层手动展开） */
 const flowAutoExpandDepth = computed(
-  () => appState.meta?.ui?.defaultExpand?.flowAutoExpandDepth ?? 2
+  () => appState.meta?.ui?.defaultExpand?.flowAutoExpandDepth ?? 0
 )
 
 /** 展开态持久化命名空间：区分不同项目 */

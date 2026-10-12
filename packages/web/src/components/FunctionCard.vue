@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import type { CallEdge, FunctionDocView } from '@autodoc/shared-types'
+import { useMessage } from 'naive-ui'
+import type { Annotation, CallEdge, FunctionDocView } from '@autodoc/shared-types'
 import { appState, findFunctionEntry } from '../store/app'
 import { expandDefault, isExpanded, toggle } from '../store/expand'
+import { deleteAnnotation } from '../data/api'
 import { CHANGE_LABELS, CATEGORY_LABELS, ROLE_COLORS, ROLE_LABELS, editorLink, formatDate } from '../utils/format'
+import { renderMarkdown } from '../utils/markdown'
 import { splitCallChain } from '../utils/callChain'
 import AnnotationPanel from './AnnotationPanel.vue'
 import CallNode from './CallNode.vue'
@@ -14,6 +17,25 @@ const props = defineProps<{ fn: FunctionDocView }>()
 const emit = defineEmits<{ changed: [] }>()
 
 const router = useRouter()
+const message = useMessage()
+
+const readOnly = computed(() => appState.meta?.readOnly ?? false)
+
+/** 正在删除的追问记录 id（按钮 loading 态，防重复点击） */
+const deletingFollowupId = ref<string | null>(null)
+
+async function handleDeleteFollowup(followup: Annotation): Promise<void> {
+  if (deletingFollowupId.value) return
+  deletingFollowupId.value = followup.id
+  try {
+    await deleteAnnotation(followup.id)
+    emit('changed')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '删除追问记录失败')
+  } finally {
+    deletingFollowupId.value = null
+  }
+}
 
 /** 调用链路：按调用点行号（= 源码执行顺序）排序，逐节点着色 + 用途说明 */
 const callChain = computed(() => [...props.fn.calls].sort((a, b) => a.line - b.line))
@@ -62,6 +84,7 @@ const callsNoiseKey = (): string => `card:${props.fn.id}:callsNoise`
 const graphKey = (): string => `card:${props.fn.id}:graph`
 const changesKey = (): string => `card:${props.fn.id}:changes`
 const annotationsKey = (): string => `card:${props.fn.id}:annotations`
+const followupsKey = (): string => `card:${props.fn.id}:followups`
 </script>
 
 <template>
@@ -293,6 +316,51 @@ const annotationsKey = (): string => `card:${props.fn.id}:annotations`
           :annotations="fn.annotations"
           @changed="emit('changed')"
         />
+      </div>
+    </div>
+
+    <!-- 追问记录：函数级 AI 追问提炼而来（kind=followup），与批注严格分离展示/存储 -->
+    <div class="border-t border-gray-100 px-4 py-2">
+      <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(followupsKey(), false)">
+        追问记录（{{ fn.followups.length }}）
+        {{ isExpanded(followupsKey(), false) ? '▾' : '▸' }}
+      </button>
+      <div v-if="isExpanded(followupsKey(), false)" class="mt-2 flex flex-col gap-2">
+        <div v-if="fn.followups.length === 0" class="text-xs text-gray-400">
+          暂无追问记录（在业务脉络树中对该函数「追问」并提炼即可回显于此）。
+        </div>
+        <article
+          v-for="followup in fn.followups"
+          :key="followup.id"
+          class="rounded border border-green-100 bg-green-50/50 px-3 py-2"
+        >
+          <div class="flex items-center gap-2 text-xs text-gray-500">
+            <n-tag size="tiny" :bordered="false" type="success">追问记录</n-tag>
+            <span class="font-medium text-gray-700">{{ followup.author }}</span>
+            <span>{{ formatDate(followup.createdAt) }}</span>
+            <span v-if="followup.updatedAt !== followup.createdAt" class="text-gray-400">
+              （编辑于 {{ formatDate(followup.updatedAt) }}）
+            </span>
+            <n-popconfirm
+              v-if="!readOnly"
+              positive-text="删除"
+              negative-text="取消"
+              @positive-click="handleDeleteFollowup(followup)"
+            >
+              <template #trigger>
+                <button
+                  class="ml-auto text-red-400 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+                  :disabled="deletingFollowupId === followup.id"
+                >
+                  {{ deletingFollowupId === followup.id ? '删除中…' : '删除' }}
+                </button>
+              </template>
+              确定删除这条追问记录吗？
+            </n-popconfirm>
+          </div>
+          <!-- 追问记录按 Markdown 渲染（已禁用 HTML，防 XSS） -->
+          <div class="annotation-body mt-1 text-sm" v-html="renderMarkdown(followup.content)" />
+        </article>
       </div>
     </div>
   </article>

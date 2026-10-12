@@ -2,6 +2,29 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-14 · U2 复审修复：脉络树渐进披露 5 项 · 前端
+
+- **内容**：仅 web 包增量修复 U2 初审问题，不改后端/shared-types/README。
+  1. `web/components/FlowTree.vue`：`handleSaveFollowup`/`handleDeleteFollowup` 成功分支各补 `invalidateFileView(entry.fileId)`（entry 存在时），修复文件页 FunctionCard 走 getFileView 缓存导致会话内跳转看不到新/删除的追问记录（双处回显）。从 `store/app` 引入 `invalidateFileView`。
+  2. 同文件：函数叶子容器 `v-show="fnExpanded"`→`v-if="fnExpanded"`、结构孩子容器 `v-if="hasContent" v-show="expanded"`→`v-if="hasContent && expanded"`（占位分支相应改 `v-else-if="!hasContent"` 保持「已达深度上限」仅在无内容时显示），收起即不 mount 子 FlowTree、不触发 watch 取数。
+  3. 叶子行一行用途 `fnPurpose` 兜底：`entry?.purpose || node.summary || ''`，purpose 缺失时用 summary，再缺失整行不显示，截断逻辑保留。
+  4. `web/utils/flow.ts`：`filterFollowups` 补 `targetType==='function'` 校验，与 U1 views 拆口径一致。
+- **影响范围**：仅 web（FlowTree.vue + flow.ts + flow.test.ts）。
+- **动机**：初审发现缓存失效缺失导致回显不一致、v-show 隐藏态仍 mount 违背「默认全收起=不 mount」目标、用途行易空、filterFollowups 口径与后端不一致。
+- **测试**：`web/test/flow.test.ts` 新增 1 例（targetType='call' 的 followup 不被 filterFollowups 计入），共 7 例。`pnpm lint`（含 vue-tsc）与 `pnpm test` 全绿（core / server 134 / web 33）。
+
+## 2026-10-14 · U2：洞察页渐进披露 + 函数级追问 · 前端展示层
+
+- **内容**：基于 U1 后端契约（`POST /api/ask/function`、`FunctionDocView.followups`、`GET /api/annotations?targetId=`、`askFunction`/`fetchAnnotations`、`flowAutoExpandDepth` 默认 0）实现洞察页渐进披露与函数级追问的前端展示，纯 web 包增量，不改后端逻辑/shared-types/README。逐条落实 5 条 UX 目标：
+  1. `web/utils/flow.ts`（新增，纯函数）：`splitFlowChildren(children)` 按 `kind` 把孩子拆成 `structural`(!=leaf) 与 `leaves`(==leaf)，保持相对顺序；`filterFollowups(annotations)` 过滤 `kind==='followup'`。
+  2. `web/components/FlowTree.vue`（重构核心）：结构节点用 `splitFlowChildren` 拆分孩子——结构孩子递归下钻（保留 ↓ 箭头），函数叶子（leaf 孩子 + 原 syntheticLeaves）统一收进「函数(N)」折叠开关（expand store 持久化 `flowfn:${projectId}:${node.id}`，默认收起），移除原「默认显 8 个 + 还有 N 个」限量平铺逻辑。函数叶子行轻量化：核心度圆点 + 函数名按钮(goFunction) + 核心(AI)/AI/启发式标签 + 一行用途(`findFunctionEntry(fnId).purpose` 截断) + 追问入口 + 展开开关；展开块只显惰性 `fetchAnnotations(fnId)`→`filterFollowups` 的追问记录紧凑列表(作者/日期/renderMarkdown/只读感知删除) +「查看完整详情」链接(goFunction)。函数级追问面板照 CallNode 范式：question→`askFunction`→answer renderMarkdown + `formatAskMeta`/degraded 标注→提炼为追问记录(预填可编辑 + 作者 localStorage)→`addAnnotation(kind:'followup')`→重载本行 followups。删除 FunctionCard import 与 fnView/fnLoading/fnError/loadFn/getFileView/invalidateFileView/handleFnChanged 内联卡片链路，保留 goFunction/goModule/truncate；readOnly 隐藏追问/删除。
+  3. `web/components/FunctionCard.vue`：新增独立「追问记录（n）」折叠区（`card:${fn.id}:followups`，默认收起），渲染 `fn.followups`（作者/日期/renderMarkdown/n-popconfirm 只读感知删除→emit changed），与「批注」区(AnnotationPanel，仅 `fn.annotations`，U1 已拆)严格分离。
+  4. `web/components/InsightHistory.vue`：历史版本列表包进折叠（标题条「历史版本」+ 共 N 份徽标 + ▸/▾ 点击切换，默认收起，持久化 `insight:history:${activeProjectId|'static'}`）；回滚态横幅(activeId!=null 的 n-alert)保持在折叠之外常驻；对比按钮/勾选/列表/归档提示移入折叠体内，空态文案保留。
+  5. `web/views/InsightHome.vue`：`flowAutoExpandDepth ?? 2` 改为 `?? 0`（与 U1 新默认一致，静态模式无 meta 时也全收起）。
+- **影响范围**：仅 web（新 util + FlowTree/FunctionCard/InsightHistory/InsightHome + 测试）；不改 server、core、shared-types、README。
+- **动机**：洞察页此前把函数详情整张 FunctionCard 内联平铺、历史区常展开、脉络默认展开到 2 层，信息过载；U2 做渐进披露（历史/脉络/函数(N) 默认收起、逐层手动展开、函数行轻量化）并补齐函数级追问的双处回显（脉络树该函数行下 + 文件页函数卡追问记录区）。
+- **测试**：新增 `web/test/flow.test.ts` 6 例（splitFlowChildren 空/混合保序/全 leaf/全结构；filterFollowups 过滤/空数组）。`pnpm lint`（eslint + 四包 typecheck 含 vue-tsc）与 `pnpm test` 全绿（core 124 / server 134 / web 32）。
+
 ## 2026-10-13 · U1：洞察页渐进披露 + 函数级追问 · 后端/数据层
 
 - **内容**：为业务脉络树上的「函数整体提问」提供后端能力，并把函数级追问记录与普通批注在视图层分离下发；不改 FlowTree/FunctionCard/InsightHistory 等展示组件（U2）、不改 README。
