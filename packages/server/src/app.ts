@@ -2,14 +2,14 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { AnnotationKind, AnnotationTargetType, AskRequest, InsightHistoryResponse, NewProjectInput, ProjectsResponse } from '@autodoc/shared-types'
+import type { AnnotationKind, AnnotationTargetType, AskFunctionRequest, AskRequest, InsightHistoryResponse, NewProjectInput, ProjectsResponse } from '@autodoc/shared-types'
 import { resolveShowRecent } from '@autodoc/core'
 import { regenerate } from './context.js'
 import { pickFolder } from './pickFolder.js'
 import type { ProjectManager } from './projects.js'
 import { loadInsight, refreshInsightAI } from './insight.js'
 import { diffInsightSnapshots } from './insightDiff.js'
-import { AskInputError, askCallStep } from './ask.js'
+import { AskInputError, askCallStep, askFunction } from './ask.js'
 import { getDeepSeekConfig } from './env.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
 
@@ -320,6 +320,34 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       return await askCallStep(service, {
         functionId: body.functionId,
         stepId: body.stepId,
+        question: body.question
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (error instanceof AskInputError) return reply.code(400).send({ error: message })
+      return reply.code(500).send({ error: `追问失败：${message}` })
+    }
+  })
+
+  // 函数级追问（U1）：对某个函数整体提问；同为非写操作，不受 readOnly 拦截
+  app.post('/api/ask/function', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const body = (req.body ?? {}) as Partial<AskFunctionRequest>
+    if (
+      typeof body.functionId !== 'string' ||
+      body.functionId.trim().length === 0 ||
+      typeof body.question !== 'string' ||
+      body.question.trim().length === 0
+    ) {
+      return reply.code(400).send({ error: 'invalid ask payload' })
+    }
+    if (getDeepSeekConfig() === null) {
+      return reply.code(409).send({ error: '未配置 AI（DEEPSEEK_API_KEY），函数级追问不可用' })
+    }
+    try {
+      return await askFunction(service, {
+        functionId: body.functionId,
         question: body.question
       })
     } catch (error) {

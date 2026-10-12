@@ -12,8 +12,10 @@ import {
   AskInputError,
   MAX_ASK_ROUNDS,
   askCallStep,
+  askFunction,
   readFunctionSource
 } from '../src/ask.js'
+import { getDeepSeekConfig } from '../src/env.js'
 import { buildGraph } from '../src/graph.js'
 
 /* ------------------------- 临时工程 fixture ------------------------- */
@@ -422,6 +424,91 @@ describe('askCallStep（agentic 检索）', () => {
     await expect(
       askCallStep(service, { ...req, functionId: '没有这个函数' }, { chat })
     ).rejects.toBeInstanceOf(AskInputError)
+    service.storage.close()
+  })
+})
+
+/* ------------------------- askFunction（函数级追问，U1） ------------------------- */
+
+describe('askFunction（函数级 agentic 追问）', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    vi.unstubAllEnvs()
+  })
+
+  const req = { functionId: 'caller', question: '这个函数整体是做什么的？为何存在？' }
+
+  it('正常一轮 answer：种子含函数源码/元信息/完整调用骨架，不高亮任何单步', async () => {
+    const { service } = await makeFixture()
+    const { chat, seen } = scriptedChat([() => answer('函数级解答')])
+    const res = await askFunction(service, req, { chat })
+
+    expect(res.answer).toBe('函数级解答')
+    expect(res.rounds).toBe(1)
+    expect(res.degraded).toBe(false)
+    // 种子读取的被问函数计入 usedFunctionIds
+    expect(res.usedFunctionIds).toContain('caller')
+
+    const seed = seen[0][1].content
+    // 函数源码 + 元信息 + 用户问题
+    expect(seed).toContain('export function caller()')
+    expect(seed).toContain('三分类：implementation')
+    expect(seed).toContain('caller 的用途说明')
+    expect(seed).toContain(req.question)
+    // 完整调用骨架：内部与外部被调都在，且带稳定 id
+    expect(seed).toContain('helperOne|id=helperOne|role=core')
+    expect(seed).toContain('externalThing|id=（外部/未解析，无id）|role=core')
+    // 函数级追问不高亮任何单步
+    expect(seed).not.toContain('用户问的是这一步')
+    service.storage.close()
+  })
+
+  it('无调用的函数：骨架位置如实标注「没有解析到的调用」', async () => {
+    const { service } = await makeFixture()
+    const { chat, seen } = scriptedChat([() => answer('叶子函数解答')])
+    const res = await askFunction(service, { functionId: 'helperTwo', question: '它做什么？' }, { chat })
+    expect(res.answer).toBe('叶子函数解答')
+    expect(res.usedFunctionIds).toEqual(['helperTwo'])
+    expect(seen[0][1].content).toContain('没有解析到的调用')
+    service.storage.close()
+  })
+
+  it('read 多跳后 answer：被读函数计入 usedFunctionIds，源码回喂', async () => {
+    const { service } = await makeFixture()
+    const { chat, seen } = scriptedChat([
+      () => JSON.stringify({ action: 'read', ids: ['helperOne', 'helperTwo'] }),
+      () => answer('多跳读完再答')
+    ])
+    const res = await askFunction(service, req, { chat })
+    expect(res.answer).toBe('多跳读完再答')
+    expect(res.rounds).toBe(2)
+    expect(res.degraded).toBe(false)
+    expect(res.usedFunctionIds).toEqual(expect.arrayContaining(['caller', 'helperOne', 'helperTwo']))
+    const feed = seen[1][seen[1].length - 1].content
+    expect(feed).toContain('## helperOne')
+    expect(feed).toContain('return 1')
+    expect(feed).toContain('## helperTwo')
+    expect(feed).toContain('return 2')
+    service.storage.close()
+  })
+
+  it('functionId 不存在 → 抛 AskInputError（路由转 400）', async () => {
+    const { service } = await makeFixture()
+    const { chat } = scriptedChat([() => answer('不应到达')])
+    await expect(
+      askFunction(service, { functionId: '没有这个函数', question: '它做什么？' }, { chat })
+    ).rejects.toBeInstanceOf(AskInputError)
+    service.storage.close()
+  })
+
+  it('AI-first：未注入 chat 且未配置 key → 抛错（路由转 409）', async () => {
+    const { service } = await makeFixture()
+    // 先触发一次 loadEnv（loaded=true），再删 key：避免仓库根 .env 在测试中途回填
+    getDeepSeekConfig()
+    vi.stubEnv('DEEPSEEK_API_KEY', '')
+    expect(getDeepSeekConfig()).toBeNull()
+    await expect(askFunction(service, req)).rejects.toThrow('未配置 AI')
     service.storage.close()
   })
 })

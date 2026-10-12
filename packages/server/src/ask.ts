@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { AskRequest, AskResponse, CallEdge, FunctionDoc } from '@autodoc/shared-types'
+import type { AskFunctionRequest, AskRequest, AskResponse, CallEdge, FunctionDoc } from '@autodoc/shared-types'
 import { asChatReply, deepseekChat, extractJson, type ChatMessage } from './ai.js'
 import type { DocService } from './context.js'
 import { getDeepSeekConfig } from './env.js'
@@ -99,23 +99,38 @@ function parseAction(raw: string): AskAction | null {
   return null
 }
 
-function systemPrompt(): string {
+/**
+ * system 提示词：两种提问形态共用同一 JSON 协议与 read/search/answer 三选一。
+ * callStep=针对调用方函数里的某一步调用提问；function=针对一个函数整体提问。
+ */
+function systemPrompt(mode: 'callStep' | 'function'): string {
+  const intro =
+    mode === 'callStep'
+      ? '你在帮开发者理解其项目中的一处函数调用。开发者正看着调用方函数里的某一步调用，并就这一步提问。'
+      : '你在帮开发者理解其项目中的一个函数整体。开发者正针对这个函数提问（它做什么、为何存在、在业务主线里扮演什么角色等）。'
+  const answerHint =
+    mode === 'callStep'
+      ? '面向开发者、紧扣所问调用步骤，使用中文'
+      : '面向开发者、紧扣所问函数整体，使用中文'
   return [
-    '你在帮开发者理解其项目中的一处函数调用。开发者正看着调用方函数里的某一步调用，并就这一步提问。',
+    intro,
     '你可以请求读取更多项目内函数的源码后再作答，往复多轮。每轮只输出一个严格 JSON 对象（禁止 Markdown 围栏外的杂文），三选一：',
     '1. {"action":"read","ids":["<函数稳定ID>",...]}：读取这些函数的源码（单轮最多 6 个，重复/已读过的会被忽略）。调用骨架中每个被调都给了稳定ID（id=...），可直接把这些 id 放进 read 请求读取其源码；id 为「（外部/未解析，无id）」的表示项目外调用、无源码可读。',
     '2. {"action":"search","query":"<关键词>"}：按函数名/类名子串搜索项目内函数，得到候选列表后可再 read。',
-    '3. {"action":"answer","content":"<最终中文解答>"}：信息足够时给出解答（面向开发者、紧扣所问调用步骤，使用中文）。',
+    `3. {"action":"answer","content":"<最终中文解答>"}：信息足够时给出解答（${answerHint}）。`,
     '注意：源码读取有总量与轮数上限，接近上限时应尽快 answer；只依据实际读到的源码作答，读不到的如实说明，禁止臆造。'
   ].join('\n')
 }
 
-/** caller 的一层调用骨架（按 line 升序，含被调稳定 id 供模型直接 read），并高亮用户所问的那一步 */
-function buildSkeleton(calls: CallEdge[], askStepId: string): string {
+/**
+ * caller 的一层调用骨架（按 line 升序，含被调稳定 id 供模型直接 read）。
+ * 传入 askStepId 时高亮用户所问的那一步；传 null/undefined（函数级追问）则不高亮任何单步。
+ */
+function buildSkeleton(calls: CallEdge[], askStepId?: string | null): string {
   return [...calls]
     .sort((a, b) => a.line - b.line)
     .map((c, i) => {
-      const mark = c.stepId === askStepId ? ' ←【用户问的是这一步】' : ''
+      const mark = askStepId !== undefined && askStepId !== null && c.stepId === askStepId ? ' ←【用户问的是这一步】' : ''
       // 真外部库调用附带来源模块，让模型知道这是哪个公开库的函数
       const ext = c.externalModule ? `|模块=${c.externalModule}` : ''
       return `${i}|${c.calleeName}|id=${c.calleeId ?? '（外部/未解析，无id）'}|role=${c.role}|${c.calleeCategory}|${c.calleePurpose ?? '（无用途说明）'}${ext}${mark}`
@@ -137,66 +152,51 @@ function searchFunctions(graph: ProjectGraph, query: string): string {
   return `搜到 ${hits.length} 个匹配函数（格式：稳定ID|函数名|用途），可用 read 读取源码：\n${lines.join('\n')}`
 }
 
-export async function askCallStep(
-  service: DocService,
-  req: AskRequest,
-  deps?: { chat?: ChatFn }
-): Promise<AskResponse> {
-  const chat: ChatFn = deps?.chat ?? deepseekChat
-  // AI-first：未注入伪 chat 且未配置 key 时直接抛错（路由转 409），不做静态兜底
-  if (!deps?.chat && getDeepSeekConfig() === null) {
+/** AI-first 守卫：未注入伪 chat 且未配置 key 时直接抛错（路由转 409），不做静态兜底 */
+function requireChat(deps?: { chat?: ChatFn }): ChatFn {
+  if (deps?.chat) return deps.chat
+  if (getDeepSeekConfig() === null) {
     throw new Error('未配置 AI（DEEPSEEK_API_KEY），就地追问不可用')
   }
+  return deepseekChat
+}
 
-  const graph = buildGraph(service.files)
-  const caller = graph.nodes.get(req.functionId)
-  if (!caller) throw new AskInputError(`函数不存在：${req.functionId}`)
-  const edge = caller.calls.find((c) => c.stepId === req.stepId)
-  if (!edge) throw new AskInputError(`调用步骤不存在：${req.stepId}`)
+/** agentic 循环的读取记账状态（种子读取与循环内 read 共用，跨轮累计） */
+export interface AskLoopState {
+  /** 实际读过源码的函数稳定 ID（含种子，按读取顺序） */
+  usedFunctionIds: string[]
+  /** 已读函数集合（去重，重复 read 忽略） */
+  readIds: Set<string>
+  /** 累计回喂源码总字符数 */
+  fedChars: number
+}
 
-  const usedFunctionIds: string[] = []
-  const readIds = new Set<string>()
-  let fedChars = 0
-  const trackRead = (fnId: string, source: string | null): void => {
-    if (source === null || readIds.has(fnId)) return
-    readIds.add(fnId)
-    usedFunctionIds.push(fnId)
-    fedChars += source.length
-  }
+export function createAskLoopState(): AskLoopState {
+  return { usedFunctionIds: [], readIds: new Set(), fedChars: 0 }
+}
 
-  // 种子上下文：caller 源码 + callee 源码 + 一层调用骨架 + 用户问题
-  const callerSource = await readFunctionSource(service, graph, caller.id)
-  trackRead(caller.id, callerSource)
-  let calleeBlock: string
-  if (edge.calleeId !== null && graph.nodes.has(edge.calleeId)) {
-    const calleeSource = await readFunctionSource(service, graph, edge.calleeId)
-    trackRead(edge.calleeId, calleeSource)
-    calleeBlock = calleeSource ?? '（源码读取失败）'
-  } else if (edge.externalModule) {
-    // 真外部库调用：点明「模块.函数名」，让模型基于对该公开库的了解作答
-    calleeBlock = `外部库 \`${edge.externalModule}.${edge.calleeName}\`（项目内无源码）`
-  } else {
-    calleeBlock = '外部/未解析，无源码'
-  }
-  const seedUser = [
-    `# 提问所在函数（caller）：${caller.id}`,
-    callerSource ?? '（caller 源码读取失败）',
-    '',
-    `# 被问的这一步调用：${edge.calleeName}（stepId=${edge.stepId}，第 ${edge.line} 行，角色 ${edge.role}，分类 ${edge.calleeCategory}）`,
-    `## 被调函数源码（calleeId=${edge.calleeId ?? '（外部/未解析，无id）'}）`,
-    calleeBlock,
-    '',
-    '# caller 的一层调用骨架（序号|被调名|id=稳定ID|角色|三分类|用途）',
-    buildSkeleton(caller.calls, edge.stepId),
-    '',
-    `# 用户的问题（针对「${edge.calleeName}」这一步）`,
-    req.question
-  ].join('\n')
+/** 记账一次源码读取：null/已读过的不重复计入 */
+export function trackAskRead(state: AskLoopState, fnId: string, source: string | null): void {
+  if (source === null || state.readIds.has(fnId)) return
+  state.readIds.add(fnId)
+  state.usedFunctionIds.push(fnId)
+  state.fedChars += source.length
+}
 
-  const messages: ChatMessage[] = [
-    { role: 'system', content: systemPrompt() },
-    { role: 'user', content: seedUser }
-  ]
+/**
+ * 公共 agentic 主循环：messages 已含 system + 种子 user（种子读取的记账经 state 传入）。
+ * 每轮三选一（read/search/answer）+ 协议违规同轮重试 1 次 + 三层天花板
+ * （MAX_ASK_ROUNDS / MAX_FEED_CHARS / ASK_DEADLINE_MS），触发上限强制收尾并标注 degraded。
+ */
+export async function runAgenticLoop(
+  service: DocService,
+  graph: ProjectGraph,
+  messages: ChatMessage[],
+  deps?: { chat?: ChatFn },
+  state: AskLoopState = createAskLoopState()
+): Promise<AskResponse> {
+  const chat: ChatFn = deps?.chat ?? deepseekChat
+  const { usedFunctionIds, readIds } = state
 
   const deadline = Date.now() + ASK_DEADLINE_MS
   let rounds = 0
@@ -264,14 +264,14 @@ export async function askCallStep(
       return finish(action.content, false)
     }
     if (action.action === 'read') {
-      if (fedChars >= MAX_FEED_CHARS) return forceFinalAnswer(`累计回喂源码超 ${MAX_FEED_CHARS} 字符`)
+      if (state.fedChars >= MAX_FEED_CHARS) return forceFinalAnswer(`累计回喂源码超 ${MAX_FEED_CHARS} 字符`)
       const wanted = [...new Set(action.ids)].filter((id) => !readIds.has(id)).slice(0, MAX_READS_PER_ROUND)
       const blocks: string[] = []
       for (const id of wanted) {
         const source = await readFunctionSource(service, graph, id)
-        trackRead(id, source)
+        trackAskRead(state, id, source)
         blocks.push(source === null ? `## ${id}\n未找到（不在图谱内或源码读取失败）` : `## ${id}\n${source}`)
-        if (fedChars >= MAX_FEED_CHARS) {
+        if (state.fedChars >= MAX_FEED_CHARS) {
           blocks.push('（已达源码回喂总量上限，其余请求的函数不再读取）')
           break
         }
@@ -288,4 +288,106 @@ export async function askCallStep(
   }
 
   return forceFinalAnswer(`达到最大轮数 ${MAX_ASK_ROUNDS}`)
+}
+
+/** 调用步骤级追问（轴 B）：对 caller 里的某一步调用（stepId）提问 */
+export async function askCallStep(
+  service: DocService,
+  req: AskRequest,
+  deps?: { chat?: ChatFn }
+): Promise<AskResponse> {
+  requireChat(deps)
+
+  const graph = buildGraph(service.files)
+  const caller = graph.nodes.get(req.functionId)
+  if (!caller) throw new AskInputError(`函数不存在：${req.functionId}`)
+  const edge = caller.calls.find((c) => c.stepId === req.stepId)
+  if (!edge) throw new AskInputError(`调用步骤不存在：${req.stepId}`)
+
+  const state = createAskLoopState()
+
+  // 种子上下文：caller 源码 + callee 源码 + 一层调用骨架（高亮所问步骤）+ 用户问题
+  const callerSource = await readFunctionSource(service, graph, caller.id)
+  trackAskRead(state, caller.id, callerSource)
+  let calleeBlock: string
+  if (edge.calleeId !== null && graph.nodes.has(edge.calleeId)) {
+    const calleeSource = await readFunctionSource(service, graph, edge.calleeId)
+    trackAskRead(state, edge.calleeId, calleeSource)
+    calleeBlock = calleeSource ?? '（源码读取失败）'
+  } else if (edge.externalModule) {
+    // 真外部库调用：点明「模块.函数名」，让模型基于对该公开库的了解作答
+    calleeBlock = `外部库 \`${edge.externalModule}.${edge.calleeName}\`（项目内无源码）`
+  } else {
+    calleeBlock = '外部/未解析，无源码'
+  }
+  const seedUser = [
+    `# 提问所在函数（caller）：${caller.id}`,
+    callerSource ?? '（caller 源码读取失败）',
+    '',
+    `# 被问的这一步调用：${edge.calleeName}（stepId=${edge.stepId}，第 ${edge.line} 行，角色 ${edge.role}，分类 ${edge.calleeCategory}）`,
+    `## 被调函数源码（calleeId=${edge.calleeId ?? '（外部/未解析，无id）'}）`,
+    calleeBlock,
+    '',
+    '# caller 的一层调用骨架（序号|被调名|id=稳定ID|角色|三分类|用途）',
+    buildSkeleton(caller.calls, edge.stepId),
+    '',
+    `# 用户的问题（针对「${edge.calleeName}」这一步）`,
+    req.question
+  ].join('\n')
+
+  const messages: ChatMessage[] = [
+    { role: 'system', content: systemPrompt('callStep') },
+    { role: 'user', content: seedUser }
+  ]
+
+  return runAgenticLoop(service, graph, messages, deps, state)
+}
+
+/** 函数级追问（轴 B·U1）：对业务脉络树里的某个函数整体提问（做什么/为何存在/主线角色） */
+export async function askFunction(
+  service: DocService,
+  req: AskFunctionRequest,
+  deps?: { chat?: ChatFn }
+): Promise<AskResponse> {
+  requireChat(deps)
+
+  const graph = buildGraph(service.files)
+  const fn = graph.nodes.get(req.functionId)
+  if (!fn) throw new AskInputError(`函数不存在：${req.functionId}`)
+
+  const state = createAskLoopState()
+
+  // 种子上下文：函数元信息 + 函数源码 + 完整调用骨架（不高亮任何单步）+ 用户问题
+  const fnSource = await readFunctionSource(service, graph, fn.id)
+  trackAskRead(state, fn.id, fnSource)
+  const meta = [
+    `- 稳定ID：${fn.id}`,
+    `- 名称：${fn.className ? `${fn.className}.${fn.name}` : fn.name}（${fn.kind}）`,
+    `- 签名：${fn.signature}`,
+    `- 三分类：${fn.category}`,
+    `- 可见性：${fn.visibility}${fn.exported ? '（已导出）' : ''}`,
+    `- 位置：${graph.fileOf.get(fn.id) ?? '（未知文件）'} 第 ${fn.startLine}-${fn.endLine} 行`,
+    `- 用途说明：${fn.purpose}`
+  ].join('\n')
+  const seedUser = [
+    `# 被提问的函数：${fn.id}`,
+    '## 函数元信息',
+    meta,
+    '',
+    '## 函数源码',
+    fnSource ?? '（源码读取失败）',
+    '',
+    '# 该函数的完整一层调用骨架（序号|被调名|id=稳定ID|角色|三分类|用途）',
+    fn.calls.length > 0 ? buildSkeleton(fn.calls) : '（该函数没有解析到的调用）',
+    '',
+    `# 用户的问题（针对「${fn.name}」这个函数整体）`,
+    req.question
+  ].join('\n')
+
+  const messages: ChatMessage[] = [
+    { role: 'system', content: systemPrompt('function') },
+    { role: 'user', content: seedUser }
+  ]
+
+  return runAgenticLoop(service, graph, messages, deps, state)
 }

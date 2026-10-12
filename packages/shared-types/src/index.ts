@@ -141,6 +141,11 @@ export interface FileDoc {
 export interface FunctionDocView extends FunctionDoc {
   annotations: Annotation[]
   /**
+   * 函数级追问记录（targetType='function' 且 kind='followup'）：
+   * 与 annotations（普通批注）分离展示、分离字段，同表存储。
+   */
+  followups: Annotation[]
+  /**
    * 调用步骤级批注/追问记录：key=CallEdge.stepId，value=该调用步骤上的记录。
    * 只包含非空分组，供前端在调用链路节点上就地回显（B2）。
    */
@@ -573,6 +578,14 @@ export interface AskRequest {
   functionId: string
   /** 目标调用步骤 ID（CallEdge.stepId，形如 `${callerId}>${calleeName}`） */
   stepId: string
+  /** 用户的中文问题 */
+  question: string
+}
+
+/** POST /api/ask/function 请求：在业务脉络树里对某个函数整体提问 */
+export interface AskFunctionRequest {
+  /** 被提问函数的稳定 ID */
+  functionId: string
   /** 用户的中文问题 */
   question: string
 }

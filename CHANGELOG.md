@@ -2,6 +2,19 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-13 · U1：洞察页渐进披露 + 函数级追问 · 后端/数据层
+
+- **内容**：为业务脉络树上的「函数整体提问」提供后端能力，并把函数级追问记录与普通批注在视图层分离下发；不改 FlowTree/FunctionCard/InsightHistory 等展示组件（U2）、不改 README。
+  1. `server/ask.ts`：把 askCallStep 的 agentic 主循环（累积 messages 多轮 + nextAction 协议重试 + forceFinalAnswer + 三层天花板 MAX_ASK_ROUNDS/MAX_FEED_CHARS/ASK_DEADLINE_MS + usedFunctionIds/fedChars 记账）原样抽出为导出的 `runAgenticLoop(service, graph, messages, deps?, state?)`，配套导出 `AskLoopState`/`createAskLoopState`/`trackAskRead`（种子读取与循环内 read 共用记账）；`systemPrompt` 参数化 `'callStep' | 'function'` 两种措辞，`buildSkeleton` 的 askStepId 改为可选（缺省不高亮任何单步）。新增 `askFunction(service, {functionId, question}, deps?)`：functionId 不在图谱抛 AskInputError；种子含函数元信息（ID/名称/签名/三分类/可见性/位置/用途）+ 函数源码（readFunctionSource，计入 usedFunctionIds）+ 完整一层调用骨架（不高亮）+ 用户问题；AI-first 未注入 chat 且无 key 抛错（同 askCallStep）。askCallStep 行为/返回完全不变（既有用例全过）。
+  2. `shared-types`：新增 `AskFunctionRequest { functionId; question }`；`FunctionDocView` 加必填 `followups: Annotation[]`。
+  3. `server/views.ts`：toFileDocView 对每个 fn 取 `listAnnotations(fn.id)`（只含 function 级，call 级 targetId=stepId 不混入），按 `kind==='followup'` 拆为 `followups`，其余（含 kind 缺省旧数据）留在 `annotations`；file 级 annotations 不变。
+  4. `server/app.ts`：新增 `POST /api/ask/function`——functionId/question 非空字符串校验（否则 400）、无活动项目 409、未配 AI 409、AskInputError→400、其它→500；非写操作不被 readOnly 拦。
+  5. `core/config.ts`：`DEFAULT_EXPAND.flowAutoExpandDepth` 2→0（业务脉络默认全收起、渐进披露；schema 已允许 0-10，配置仍可覆盖）。
+  6. `web/data/api.ts`：新增 `askFunction(functionId, question)`（POST /api/ask/function，!ok 抛带 {error} 的 Error，与 askCallStep 同风格不加静态守卫）与 `fetchAnnotations(targetId)`（GET /api/annotations?targetId=，mode!=='api' 或失败返回 []）。
+- **影响范围**：server（ask/views/app + 测试）+ shared-types + core（config）+ web（仅 data/api.ts）；不改展示组件、不改 README。
+- **动机**：洞察页渐进披露需要「对函数整体提问」（它做什么/为何存在/主线角色），复用轴 B 同一 agentic 引擎；函数级追问记录（targetType='function'、kind='followup'）须与普通批注分离展示，视图层先拆分供 U2 使用。
+- **测试**：`server/test/ask.test.ts` 新增 askFunction describe 5 例（正常一轮 answer + 种子含源码/元信息/骨架且不高亮、无调用函数骨架占位、read 多跳记账、functionId 不存在抛 AskInputError、未配 key 未注入 chat 抛错），既有 askCallStep 13 例无回归；新增 `server/test/views.test.ts` 2 例（普通/followup/call 级/file 级四路拆分、kind 缺省旧数据视为普通批注）。`pnpm lint`（eslint + 四包 typecheck 含 vue-tsc）与 `pnpm test` 全绿（core 12 文件 / server 8 文件 134 例 / web 4 文件）。
+
 ## 2026-10-12 · H2：历史 AI 分析结果保留 · 前端（历史版本区 / 回滚横幅 / 两版对比）
 
 - **内容**：基于 H1 后端契约实现洞察页「历史版本」前端能力，纯 web 包增量，不改后端/README/shared-types。

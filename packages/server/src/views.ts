@@ -46,10 +46,14 @@ export function toFileDocView(service: DocService, file: FileDoc): FileDocView {
       const list = callAnnosByTarget.get(call.stepId)
       if (list && list.length > 0) callAnnotations[call.stepId] = list
     }
+    // listAnnotations(fn.id) 只返回 targetId===fn.id 的 function 级记录
+    //（call 级 targetId 为 stepId，不会混入）；按 kind 拆分普通批注与追问记录，分离展示
+    const all = service.storage.listAnnotations(fn.id)
     return {
       ...fn,
       // 批注与自动生成内容分离下发
-      annotations: service.storage.listAnnotations(fn.id),
+      annotations: all.filter((a) => a.kind !== 'followup'),
+      followups: all.filter((a) => a.kind === 'followup'),
       callAnnotations,
       recentChanges: changes.slice(0, RECENT_CHANGE_LIMIT),
       archivedChangeCount: Math.max(changes.length - RECENT_CHANGE_LIMIT, 0)

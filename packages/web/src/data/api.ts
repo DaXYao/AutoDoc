@@ -288,6 +288,36 @@ export async function askCallStep(
   return (await res.json()) as AskResponse
 }
 
+/**
+ * 对某个函数整体向 AI 提问（它做什么/为何存在/在主线里的角色）。agentic 多轮检索，可能耗时数十秒。
+ * 400=参数缺失/函数不存在；409=无活动项目/未配 AI；500=内部错误。与 askCallStep 同风格（不加静态模式守卫，由调用方在静态模式下不展示入口）。
+ */
+export async function askFunction(
+  functionId: string,
+  question: string
+): Promise<AskResponse> {
+  const res = await fetch('/api/ask/function', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ functionId, question })
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error((detail as { error?: string }).error ?? `提问失败：${res.status}`)
+  }
+  return (await res.json()) as AskResponse
+}
+
+/** 按 targetId 拉取批注/追问记录（读）；静态模式或失败返回 []（前端降级不展示） */
+export async function fetchAnnotations(targetId: string): Promise<Annotation[]> {
+  if (mode !== 'api') return []
+  try {
+    return await fetchJson<Annotation[]>(`/api/annotations?targetId=${encodeURIComponent(targetId)}`)
+  } catch {
+    return []
+  }
+}
+
 export async function refreshDocs(): Promise<void> {
   const res = await fetch('/api/refresh', { method: 'POST' })
   if (!res.ok) throw new Error(`重新生成失败：${res.status}`)
