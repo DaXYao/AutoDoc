@@ -175,12 +175,18 @@ program
       try {
         await app.listen({ port, host: '127.0.0.1' })
       } catch (error) {
-        // 端口被占：大概率是服务已在运行（重复双击启动器），直接开浏览器后退出
+        // 端口被占：说明已有 AutoDoc 实例在运行。此处绝不能"静默当成功"退出——
+        // 旧实例的 server 代码是旧的，却会从磁盘读取本次刚构建的新 web dist，
+        // 造成「新前端 + 旧后端」版本错配（典型症状：新接口落兜底 404 not found）。
+        // 故响亮报错、非零码退出，且不把浏览器导向陈旧实例。
         if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') {
-          console.log(`[autodoc] 端口 ${port} 已被占用，服务可能已在运行：${url}`)
-          if (options.open) openBrowser(url)
+          console.error(
+            `[autodoc] 端口 ${port} 已被一个正在运行的 AutoDoc 实例占用，本次构建的新代码未生效。\n` +
+              `[autodoc] 该旧实例会继续服务磁盘上的新前端资源，可能前后端版本错配（如接口报 not found）。\n` +
+              `[autodoc] 请关闭旧的 AutoDoc 窗口/进程后重新运行启动器，或用 --port 指定其它端口。`
+          )
           manager.closeAll()
-          process.exit(0)
+          process.exit(1)
         }
         throw error
       }
