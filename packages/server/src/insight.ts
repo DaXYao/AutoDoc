@@ -12,6 +12,7 @@ import type {
   InsightSnapshot,
   InsightSnapshotStats,
   InsightSnapshotTrigger,
+  InternalStep,
   ProjectInsight
 } from '@autodoc/shared-types'
 import { deepseekChat, extractJson, type ChatMessage } from './ai.js'
@@ -61,6 +62,30 @@ interface FlowTreeCache {
   salvagedCount?: number
 }
 
+/**
+ * internalSteps 缓存信封：把 failedBatches（partial 的降级信号）随产物一起持久化。
+ * 图指纹不变时缓存命中回读，若丢了降级信号会把 partial 冲销成 ok 并覆写 aiStatus 缓存；
+ * 与 FlowTreeCache 持久化 rootBackfills/salvagedCount 同理——回读时用持久化值重算，
+ * 保证「重新生成 vs 刷新」两条路径判定一致。
+ */
+interface InternalStepsCache {
+  steps: Record<string, InternalStep[]>
+  failedBatches: number
+}
+
+/** 回读归一：新信封为 { steps, failedBatches }；兼容旧缓存的裸 fnId → InternalStep[] 记录（无降级信号，按 0 处理） */
+function normalizeInternalStepsCache(raw: unknown): InternalStepsCache | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const o = raw as Record<string, unknown>
+  if (o.steps && typeof o.steps === 'object' && !Array.isArray(o.steps)) {
+    return {
+      steps: o.steps as Record<string, InternalStep[]>,
+      failedBatches: typeof o.failedBatches === 'number' && o.failedBatches > 0 ? o.failedBatches : 0
+    }
+  }
+  return { steps: o as Record<string, InternalStep[]>, failedBatches: 0 }
+}
+
 const MAX_AI_MODULES = 6
 const MAX_AI_CHAINS_PER_MODULE = 4
 const MAX_AI_CORES = 25
@@ -88,6 +113,19 @@ const AI_CHUNK_SIZE = 120
  * 用比 AI_CHUNK_SIZE(120) 更小的专属批大小，保证单批输出远低于 max_tokens 不被截断。
  */
 const KEY_STEPS_CHUNK_SIZE = 40
+/**
+ * 内部步骤归一（blocks）：8000 与其它结构化 pass 对齐；输出为每函数一组含中文标题的步骤，
+ * 体量大于 keySteps 的纯下标数组，配合下方专属更小分批保证单批输出远低于上限不截断。
+ */
+const INTERNAL_STEPS_MAX_TOKENS = 8000
+/**
+ * blocks 专属分批大小：其输入含每个注释块的注释全文 + 代码截断片段（每函数多行、每行可达数百字符），
+ * 单批输入体量远大于 keySteps/categories 的一行式索引，故取更小批（30，处于 25~40 建议区间中位），
+ * 兼顾请求次数与单批输入/输出不超模型上下文、不被 max_tokens 截断。
+ */
+const INTERNAL_STEPS_CHUNK_SIZE = 30
+/** 单个注释块喂给 AI 的代码片段上限：代码只辅助理解步骤语义，截断即可（注释全文保留） */
+const BLOCK_CODE_SNIPPET_MAX = 400
 /**
  * 外部库补全（externals）：输出为每符号一行小 JSON（purpose + 可选 signature），体量远小于输入；
  * 8000 与其它结构化 pass 对齐，配合 AI_CHUNK_SIZE 分批，单批输出远低于上限不截断。
@@ -158,6 +196,12 @@ export interface CategoriesResult {
 /** 主干识别分批结果：steps 为 fnId → 主干调用的局部下标数组（按 line 升序的 calls 下标） */
 export interface KeyStepsResult {
   steps: Record<string, number[]>
+  batches: number
+  failedBatches: number
+}
+/** 内部步骤归一分批结果：steps 为 fnId → 有序内部步骤（按 blockIndexes 首块下标升序） */
+export interface InternalStepsResult {
+  steps: Record<string, InternalStep[]>
   batches: number
   failedBatches: number
 }
@@ -457,6 +501,141 @@ export async function aiKeySteps(graph: ProjectGraph): Promise<KeyStepsResult> {
       } catch (e) {
         console.warn(
           `[autodoc] AI 主干识别第 ${b + 1}/${batches.length} 批第 ${attempt} 次失败${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}：${e instanceof Error ? e.message : String(e)}`
+        )
+      }
+    }
+    if (!done) failedBatches++
+  }
+  return { steps: out, batches: batches.length, failedBatches }
+}
+
+/** 合法的内部步骤 kind 枚举（AI 输出其它值一律剔除该步） */
+const STEP_KINDS: InternalStep['kind'][] = ['step', 'banner', 'todo', 'deadcode']
+
+/** 注释/代码内的换行压平为单空格：保持 prompt「每块一行」的结构，便于模型对齐块下标 */
+function flattenOneLine(s: string): string {
+  return s.replace(/\s*\n\s*/g, ' ').trim()
+}
+
+/**
+ * AI 内部步骤归一：对 codeBlocks 非空的函数，把「注释 + 紧随代码块」归并成有序大纲步骤，
+ * 并按 kind 区分真步骤/横幅/TODO/注释掉的代码。仿 aiCategories/aiKeySteps：
+ * 分批（全局 idx 稳定映射）+ 重试 + 截断视为不完整 + 零有效条目不当成功。
+ * AI-first：失败/为空时不静态兜底，insight.functions[id].internalSteps 保持 undefined，前端回退原文展示。
+ */
+export async function aiInternalSteps(graph: ProjectGraph): Promise<InternalStepsResult> {
+  const ids = indexTable(graph)
+  const candidates = ids
+    .map((id, i) => ({ id, i, fn: graph.nodes.get(id)! }))
+    .filter((x) => x.fn.codeBlocks.length > 0)
+  if (candidates.length === 0) return { steps: {}, batches: 0, failedBatches: 0 }
+  const batches = chunkArray(candidates, INTERNAL_STEPS_CHUNK_SIZE)
+  const multi = batches.length > 1
+  const out: Record<string, InternalStep[]> = {}
+  let failedBatches = 0
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b]
+    // 仅接受本批范围内的全局 idx，避免 AI 幻觉越批污染
+    const batchIdx = new Set(batch.map((x) => x.i))
+    const byIdx = new Map(batch.map((x) => [x.i, x]))
+    const lines = batch
+      .map((x) => {
+        const blocks = x.fn.codeBlocks
+          .map((blk, bi) => {
+            const snippet =
+              blk.codeText.length > BLOCK_CODE_SNIPPET_MAX
+                ? `${blk.codeText.slice(0, BLOCK_CODE_SNIPPET_MAX)}…`
+                : blk.codeText
+            return `    ${bi}|L${blk.startLine}-${blk.endLine}|注释:${flattenOneLine(blk.commentText)}|代码:${flattenOneLine(snippet)}`
+          })
+          .join('\n')
+        return `${x.i}|${fnLabel(x.fn)}|${x.fn.signature}|${x.fn.purpose.slice(0, 40)}\n${blocks}`
+      })
+      .join('\n')
+    const scope = multi ? `（第 ${b + 1}/${batches.length} 批）` : ''
+    const user =
+      `以下函数的方法体内有注释块${scope}。每个函数先给「全局idx|函数名|签名|用途」，其后缩进的每行是它的一个注释块「块下标|行号范围|注释全文|代码片段(可能截断)」（块下标从0开始）：\n${lines}\n` +
+      `请把每个函数的注释块归一为有序「内部步骤」大纲：表达同一件事的相邻块合并为一步（blockIndexes 列出其全部块下标），每步给统一的动词短语标题 title 与可选一句补充 detail。` +
+      `kind 四选一：step(真步骤说明)、banner(横幅/分隔注释)、todo(TODO/FIXME 类)、deadcode(注释掉的代码)。` +
+      `键必须原样回填上面给出的全局idx数字；blockIndexes 只能填该函数自己的块下标且每个块至多归入一个步骤；不要输出 reason 等任何额外字段（以免输出过长被截断）。\n` +
+      `输出 JSON: {"<全局idx>":{"steps":[{"blockIndexes":[0,1],"title":"...","detail":"...","kind":"step"}]}}`
+    let done = false
+    for (let attempt = 1; attempt <= AI_PARSE_RETRIES && !done; attempt++) {
+      try {
+        const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+          maxTokens: INTERNAL_STEPS_MAX_TOKENS,
+          temperature: AI_STRUCTURE_TEMPERATURE
+        })
+        if (reply.truncated) {
+          console.warn(
+            `[autodoc] AI 内部步骤第 ${b + 1}/${batches.length} 批第 ${attempt} 次输出被截断(finish_reason=length)，视为不完整${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+          )
+          continue
+        }
+        const raw = extractJson<Record<string, { steps?: unknown }>>(reply.content)
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          console.warn(
+            `[autodoc] AI 内部步骤第 ${b + 1}/${batches.length} 批第 ${attempt} 次返回无法解析${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+          )
+          continue
+        }
+        let accepted = 0
+        for (const [key, v] of Object.entries(raw)) {
+          const idx = Number(key)
+          if (!batchIdx.has(idx)) continue
+          const item = byIdx.get(idx)
+          if (!item || !v || !Array.isArray(v.steps)) continue
+          const blockCount = item.fn.codeBlocks.length
+          // 跨步骤去重：同一源块只归首次出现的步骤（首次=AI 返回序，非源码序；后续步骤剥掉重复下标，剥空则整步丢弃）
+          const claimed = new Set<number>()
+          const steps: InternalStep[] = []
+          for (const rawStep of v.steps) {
+            if (!rawStep || typeof rawStep !== 'object') continue
+            const s = rawStep as Record<string, unknown>
+            if (!Array.isArray(s.blockIndexes)) continue
+            // title 非空串、kind 枚举内，否则整步剔除
+            if (typeof s.title !== 'string' || s.title.trim().length === 0) continue
+            if (typeof s.kind !== 'string' || !STEP_KINDS.includes(s.kind as InternalStep['kind'])) continue
+            const indexes = [...new Set(
+              s.blockIndexes
+                // Number(null/''/[]) 会强转成 0 误占块 0：仅接受 number 或可解析的非空字符串，其余置 NaN 由下方过滤剔除
+                .map((x) =>
+                  typeof x === 'number'
+                    ? x
+                    : typeof x === 'string' && x.trim().length > 0
+                      ? Number(x)
+                      : NaN
+                )
+                // 只保留合法块下标（整数、[0, blockCount) 内、未被前面步骤占用）
+                .filter((x) => Number.isInteger(x) && x >= 0 && x < blockCount && !claimed.has(x))
+            )].sort((p, q) => p - q)
+            if (indexes.length === 0) continue
+            for (const x of indexes) claimed.add(x)
+            const step: InternalStep = {
+              blockIndexes: indexes,
+              title: s.title.trim(),
+              kind: s.kind as InternalStep['kind']
+            }
+            if (typeof s.detail === 'string' && s.detail.trim().length > 0) step.detail = s.detail.trim()
+            steps.push(step)
+          }
+          if (steps.length === 0) continue
+          // 大纲顺序以源码顺序为准（按首块下标升序），不依赖 AI 返回顺序
+          steps.sort((p, q) => p.blockIndexes[0] - q.blockIndexes[0])
+          out[item.id] = steps
+          accepted++
+        }
+        // 结构可解析但零有效条目（idx 全被过滤/steps 全非法）：不静默当成功，重试耗尽计入 failedBatches
+        if (accepted === 0) {
+          console.warn(
+            `[autodoc] AI 内部步骤第 ${b + 1}/${batches.length} 批第 ${attempt} 次零有效条目（候选 ${batch.length} 个）${attempt < AI_PARSE_RETRIES ? '，重试' : '，计入降级批'}`
+          )
+          continue
+        }
+        done = true
+      } catch (e) {
+        console.warn(
+          `[autodoc] AI 内部步骤第 ${b + 1}/${batches.length} 批第 ${attempt} 次失败${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}：${e instanceof Error ? e.message : String(e)}`
         )
       }
     }
@@ -824,6 +1003,44 @@ function applyKeySteps(
 }
 
 /**
+ * 将 AI 内部步骤写入 insight.functions[fnId].internalSteps（深拷贝，避免与缓存对象共享引用）。
+ * AI-first：未产出/失败的函数不赋值，internalSteps 保持 undefined，前端回退注释块原文展示。
+ * 图指纹不含 codeBlocks：仅改函数体内注释（块数变少）指纹不变 → 缓存回读的 blockIndexes
+ * 可能超出当前 codeBlocks.length，前端按下标会取到 undefined/错块。故写入前一律按当前
+ * 块数过滤越界下标（剥空则整步丢弃、全丢则不赋值），只堵脏数据下发，不改缓存范式。
+ */
+function applyInternalSteps(
+  insight: ProjectInsight,
+  graph: ProjectGraph,
+  steps: Record<string, InternalStep[]>
+): void {
+  for (const [fnId, list] of Object.entries(steps)) {
+    const f = insight.functions[fnId]
+    if (!f || !Array.isArray(list)) continue
+    const blockCount = graph.nodes.get(fnId)?.codeBlocks.length ?? 0
+    const kept: InternalStep[] = []
+    for (const s of list) {
+      const indexes = (Array.isArray(s.blockIndexes) ? s.blockIndexes : []).filter(
+        (x) => Number.isInteger(x) && x >= 0 && x < blockCount
+      )
+      if (indexes.length === 0) continue
+      kept.push({ ...s, blockIndexes: indexes })
+    }
+    if (kept.length > 0) f.internalSteps = kept
+  }
+}
+
+/** blocks 状态判定：有产出=ok；有产出但存在降级批=partial；无产出且有候选=failed；无候选=skipped */
+function blocksStatusOf(
+  steps: Record<string, InternalStep[]>,
+  failedBatches: number,
+  hadBlockCandidates: boolean
+): AiPassStatus {
+  if (Object.keys(steps).length > 0) return failedBatches > 0 ? 'partial' : 'ok'
+  return hadBlockCandidates ? 'failed' : 'skipped'
+}
+
+/**
  * 将 AI 外部库补全结果写入 insight.externals（拷贝，避免与缓存对象共享引用）。
  * AI-first：失败/无内容时不赋值，insight.externals 保持缺省(undefined)，前端回退原文案；
  * 与 loadInsight 缓存回读路径一致（有内容才赋值）。
@@ -885,6 +1102,7 @@ function countFlowNodes(nodes: FlowNode[] | undefined): number {
  * 纯函数：从一份 insight + graph 计算结构化统计摘要（供历史列表与 diff，不下发整份载荷）。
  * - flowNodeCount：递归数 insight.flows 节点总数；
  * - coreCount：insight.functions 中 isCore 计数；
+ * - internalStepCount：insight.functions 中 internalSteps 条目总数（AI 内部步骤规模）；
  * - categoryCounts：按 graph.nodes 的 category 统计（三分类 + pending）；
  * - aiPassStatus：insight.aiStatus ?? {}。
  */
@@ -893,8 +1111,10 @@ export function computeSnapshotStats(
   graph: ProjectGraph
 ): InsightSnapshotStats {
   let coreCount = 0
+  let internalStepCount = 0
   for (const f of Object.values(insight.functions)) {
     if (f.isCore) coreCount++
+    internalStepCount += f.internalSteps?.length ?? 0
   }
   const categoryCounts: Partial<Record<FunctionCategory, number>> = {}
   for (const fn of graph.nodes.values()) {
@@ -905,6 +1125,7 @@ export function computeSnapshotStats(
     chainCount: insight.chains.length,
     flowNodeCount: countFlowNodes(insight.flows),
     coreCount,
+    internalStepCount,
     categoryCounts,
     aiPassStatus: insight.aiStatus ?? {}
   }
@@ -1006,6 +1227,11 @@ export function loadInsight(service: DocService, feedback = ''): InsightBundle {
     applyKeySteps(insight, graph, ks)
     touched = true
   }
+  const ist = normalizeInternalStepsCache(cache.get<unknown>(fp, 'internalSteps'))
+  if (ist) {
+    applyInternalSteps(insight, graph, ist.steps)
+    touched = true
+  }
   const ex = cache.get<Record<string, Record<string, ExternalSymbolInfo>>>(fp, 'externals')
   if (ex) {
     applyExternals(insight, ex)
@@ -1048,6 +1274,14 @@ export function loadInsight(service: DocService, feedback = ''): InsightBundle {
   if (cachedStatus) insight.aiStatus = cachedStatus
   // flows 状态以当前快照重算值覆盖陈旧缓存，避免退化树仍显示 ok
   if (flowsStatus) insight.aiStatus = { ...insight.aiStatus, flows: flowsStatus }
+  // blocks 状态以信封持久化的 failedBatches 重算覆盖陈旧缓存（与 flows 同理），保证回读与重新生成判定一致
+  if (ist) {
+    const hadBlockCandidates = [...graph.nodes.values()].some((f) => f.codeBlocks.length > 0)
+    insight.aiStatus = {
+      ...insight.aiStatus,
+      blocks: blocksStatusOf(ist.steps, ist.failedBatches, hadBlockCandidates)
+    }
+  }
   insight.aiGenerated = touched
   return { insight, graph }
 }
@@ -1250,6 +1484,36 @@ export async function refreshInsightAI(
   }
   applyExternals(insight, externals ?? {})
 
+  // 5d) 内部步骤归一（blocks，AI-first，无静态兜底）：把有注释块函数的 codeBlocks
+  // 归并为有序「内部步骤」大纲；失败/为空时 internalSteps 保持 undefined，前端回退原文展示
+  const hadBlockCandidates = [...graph.nodes.values()].some((f) => f.codeBlocks.length > 0)
+  const cachedSteps = opts.force ? null : normalizeInternalStepsCache(cache.get<unknown>(fp, 'internalSteps'))
+  let internalSteps: Record<string, InternalStep[]> | undefined
+  if (!cachedSteps) {
+    try {
+      const res = await aiInternalSteps(graph)
+      internalSteps = res.steps
+      // 降级信号随信封持久化：缓存命中回读时可重算 partial，不被冲销成 ok
+      if (Object.keys(internalSteps).length > 0) {
+        const envelope: InternalStepsCache = { steps: internalSteps, failedBatches: res.failedBatches }
+        cache.set(fp, 'internalSteps', envelope)
+      }
+      status.blocks = blocksStatusOf(internalSteps, res.failedBatches, hadBlockCandidates)
+      if (res.failedBatches > 0) {
+        console.warn(`[autodoc] AI 内部步骤 ${res.failedBatches}/${res.batches} 批降级（其余批已合并）`)
+      }
+    } catch (e) {
+      status.blocks = 'failed'
+      console.warn(`[autodoc] AI 内部步骤失败，前端将回退注释块原文：${e instanceof Error ? e.message : String(e)}`)
+      internalSteps = {}
+    }
+  } else {
+    internalSteps = cachedSteps.steps
+    // 缓存命中用信封持久化的 failedBatches 重算，与新鲜运行路径判定一致（不写死 0 冲销 partial）
+    status.blocks = blocksStatusOf(internalSteps, cachedSteps.failedBatches, hadBlockCandidates)
+  }
+  applyInternalSteps(insight, graph, internalSteps ?? {})
+
   // 6) 递归脉络架构树（依赖前 5 段的 modules/core/chains/narratives）
   const flowCfg = service.normalized.config.insight?.flow ?? {}
   const caps: FlowCaps = {
@@ -1354,6 +1618,7 @@ export async function refreshInsightAI(
     Object.keys(narr ?? {}).length ||
     Object.keys(keySteps ?? {}).length ||
     Object.keys(externals ?? {}).length ||
+    Object.keys(internalSteps ?? {}).length ||
     flowsAiOk
   )
   cache.set(fp, 'aiStatus', status)

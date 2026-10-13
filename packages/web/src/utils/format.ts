@@ -73,6 +73,7 @@ export const AI_PASS_ORDER: AiPassKey[] = [
   'narratives',
   'keySteps',
   'externals',
+  'blocks',
   'flows'
 ]
 
@@ -85,6 +86,7 @@ export const AI_PASS_LABELS: Record<AiPassKey, string> = {
   narratives: '链路叙事',
   keySteps: '主干识别',
   externals: '外部库补全',
+  blocks: '内部步骤',
   flows: '脉络树'
 }
 

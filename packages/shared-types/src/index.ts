@@ -375,6 +375,21 @@ export interface InsightChain {
   stepRoles: Record<string, string>
 }
 
+/**
+ * 函数内部步骤：AI 把 codeBlocks（注释 + 紧随代码块）归并成的有序大纲条目。
+ * 与自动生成的 CodeBlock 分离：CodeBlock 是原文提取，InternalStep 是 AI 归纳视图。
+ */
+export interface InternalStep {
+  /** 归并到本步骤的源 codeBlocks 下标（函数 codeBlocks 数组内，升序、跨步骤不重复） */
+  blockIndexes: number[]
+  /** 统一动词短语的一步标题 */
+  title: string
+  /** 可选一句补充说明 */
+  detail?: string
+  /** step=真步骤说明；banner=横幅/分隔注释；todo=TODO/FIXME 类；deadcode=注释掉的代码 */
+  kind: 'step' | 'banner' | 'todo' | 'deadcode'
+}
+
 /** 函数级图谱洞察 */
 export interface FunctionInsight {
   functionId: string
@@ -405,6 +420,11 @@ export interface FunctionInsight {
    * undefined=AI 未生成/失败（前端据此显示全部调用、不折叠）；存在（含空数组）则据此拆分主干/次要。
    */
   keyCallIndexes?: number[]
+  /**
+   * AI 把 codeBlocks 归一成的有序内部步骤（按 blockIndexes 首块下标升序）。
+   * undefined=AI 未生成/失败（前端据此回退注释块原文展示）；仅 codeBlocks 非空的函数会有。
+   */
+  internalSteps?: InternalStep[]
 }
 
 /**
@@ -447,6 +467,7 @@ export type AiPassKey =
   | 'narratives'
   | 'keySteps'
   | 'externals'
+  | 'blocks'
   | 'flows'
 
 /**
@@ -505,6 +526,8 @@ export interface InsightSnapshotStats {
   flowNodeCount: number
   /** 核心函数数 */
   coreCount: number
+  /** AI 内部步骤条目总数（可选：旧快照无此字段） */
+  internalStepCount?: number
   /** 三分类计数 */
   categoryCounts: Partial<Record<FunctionCategory, number>>
   /** 各 AI 段执行状态快照 */

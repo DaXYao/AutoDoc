@@ -2,6 +2,14 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-13 · S1：后端 E+ 内部步骤 AI pass（blocks） · server+shared-types+web 标签
+
+- **内容**：新增 AI pass「内部步骤」：把有注释块函数的 codeBlocks 归一为有序步骤大纲 `InternalStep { blockIndexes, title, detail?, kind: step|banner|todo|deadcode }`，写入 `FunctionInsight.internalSteps?`（undefined=AI 未生成/失败，**无静态兜底**，前端据此回退原文）。完整沿用 aiCategories/aiKeySteps 范式：全局 idx 稳定映射分批(chunk=30)+重试+截断(finish_reason=length)判不全+零有效条目判失败+按图指纹缓存+AiPassStatus 可观测（AiPassKey 'blocks'，web AI_PASS_LABELS/AI_PASS_ORDER 同步）。初审后补两处加固：降级信号 failedBatches 随缓存信封持久化（缓存命中回读仍 partial，不冲销成 ok）；applyInternalSteps 按当前 codeBlocks.length 过滤越界 blockIndexes（注释块变少而指纹不变时堵脏数据下发）。快照随 insight 自动入历史快照，stats 增 internalStepCount（旧快照无此字段兼容）。
+- **影响范围**：shared-types（InternalStep/FunctionInsight/AiPassKey/Stats）+ server/insight.ts（新 pass+apply+状态判定+编排 5d+缓存回读）+ web/utils/format.ts（标签与顺序）+ 新增 server/test/internalSteps.test.ts 18 例；不改 README/存储模型/FunctionCard。
+- **动机**：函数卡片「注释块」平铺注释原文+整段代码噪声大、价值低；用户确认以 AI 语义归一为「内部步骤」大纲（grill Q1=E+），服务「不打开文件即懂函数内部结构」。
+- **测试**：internalSteps.test.ts 18 例（归一/归并/越界/重复/非法 kind/空 title/非数字不盲转/零有效失败/截断不写缓存/partial 缓存不翻转/越界回读剥离/缓存命中/未参与 undefined/skipped/partial/管线 stats）；`pnpm lint` 与 `pnpm test` 全绿（core 136 / server 162 / web 37）。实机：blocks=ok，82 函数产出归一步骤（标题为统一动词短语、含 kind/detail）。
+- **关联 commit**：待提交。
+
 ## 2026-10-13 · fix：启动端口被占改为响亮报错退出（杜绝新旧版本错配） · server
 
 - **内容**：`cli.ts serve` 遇 EADDRINUSE 原为「打印一句+开浏览器+exit(0)」当成功处理；改为**打印三行醒目错误 + exit(1) + 不导浏览器到陈旧实例**。根因场景：旧 server 进程占着端口时重新双击启动器，新构建的 dist 落盘但新 serve 静默退出，旧进程又从磁盘读取新 web dist → 「新前端+旧后端」错配，典型症状为新接口（如 `PATCH /api/insight/history/:id`）落兜底 404 `not found`。
