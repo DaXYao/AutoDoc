@@ -16,10 +16,28 @@
 - [ ] 前端默认展开策略必须可配置，禁止写死。
 - [ ] ESLint ignores 必须覆盖所有构建产物目录（dist/ 与导出站点）。
 - [ ] pnpm 拦截依赖构建脚本时，在 pnpm-workspace.yaml 的 allowBuilds 里显式放行（如 esbuild: true）。
+- [ ] serve 遇 EADDRINUSE 必须响亮报错+非零退出，禁止静默当成功（否则「新前端+旧后端」错配、新接口 404 难定位）。
+- [ ] 浏览器复验 expand 门控 UI：设 localStorage 键后必须同脚本内 reload（expand store 深 watch 会全量回写覆盖外部写入）。
 
 ---
 
 ## 教训条目
+
+### 2026-10-13 · serve 遇端口占用静默 exit(0)，造成「新前端+旧后端」错配（新接口 404 not found）
+- **场景**：用户双击启动器重启服务，而旧 serve 进程仍占 7788。
+- **现象**：历史快照编辑保存报裸 `not found`（兜底 404），看似 H3 代码缺陷；实为旧进程无 H3 路由，却从磁盘读取了新构建的 web dist（静态资源按请求读盘），新前端调旧后端落兜底 404。
+- **根因**：cli serve 对 EADDRINUSE 打印一句「服务可能已在运行」后 exit(0) 当成功，新构建不生效且无醒目提示；serve 从磁盘读 web dist 放大了错配窗口。
+- **正确做法**：EADDRINUSE 必须响亮报错 + 非零退出 + 不把浏览器导向陈旧实例；提示用户关闭旧实例后重启（或换端口）。
+- **预防措施**：已改 cli.ts 并实机复验 PATCH 200；避坑清单加一条。
+- **关联**：packages/server/src/cli.ts；commit bf33a23。
+
+### 2026-10-13 · 浏览器复验 expand 门控 UI：外部写 localStorage 会被 expand store 全量回写覆盖
+- **场景**：浏览器实机复验「内部步骤/所在链路」等默认折叠区块，先 evaluate 写 localStorage 再哈希跳转。
+- **现象**：设置的展开键丢失、区块仍折叠。
+- **根因**：expand store 对 reactive map 深 watch，任何 toggle 都把**内存整份 map** 回写 localStorage，覆盖 Vue 之外写入的键；且哈希跳转不重载模块、store 不重读。
+- **正确做法**：设键与 `location.reload()` 放在同一次 evaluate 内（中间不留任何 store 写入），重载后 store 才读到新键。
+- **预防措施**：复验 expand 门控 UI 一律「设键+同脚本 reload」；勿依赖哈希跳转刷新 store。
+- **关联**：packages/web/src/store/expand.ts。
 
 ### 2026-08-13 · ESLint 误扫静态导出产物，一次报出 3000+ 错误
 - **场景**：执行 `docgen export` 生成 autodoc-site/ 后跑 `pnpm lint`。

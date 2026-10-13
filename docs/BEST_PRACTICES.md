@@ -24,11 +24,23 @@
 - [ ] **核心函数由 AI 按功能重要性判定，静态中心度只作证据与无 AI 兑底**（见 2026-09-17 条）。
 - [ ] **密钥只放 gitignore 的 .env / 环境变量，绝不进代码/文档/git**；提供 .env.example 模板（见 2026-09-14 条）。
 - [ ] **外部工具（Git）集成**：可注入只读抽象 + 双层测试（内存 Fake 算法层 + 真实 git 集成层，不可用自动 skip）+ watermark 增量 + 全程降级（见 2026-09-23 条）。
+- [ ] **新增 AI pass 用模板四件套 + 降级信号随缓存信封持久化 + 回读越界过滤**；前端三态（steps/fallback/empty）保证不丢内容（见 2026-10-13 条）。
 - [ ] （后续不断补充……）
 
 ---
 
 ## 成功经验条目
+
+### 2026-10-13 · 新增 AI pass 的复用范式：模板四件套 + 降级信号随缓存信封持久化 + 回读越界过滤
+- **场景**：为函数卡片新增「内部步骤」AI pass（blocks），要求与既有 pass 一致的可观测/缓存/快照待遇，且 AI-first 不静态兜底。
+- **做法**：
+  1. **模板四件套**照 aiCategories/aiKeySteps：全局 idx 稳定映射分批 + AI_PARSE_RETRIES 重试 + finish_reason=length 判不全 + 零有效条目判失败；状态四态 ok/partial/failed/skipped 由纯函数判定；
+  2. **降级信号持久化**：failedBatches 随缓存信封 `{ steps, failedBatches }` 存储，缓存命中与 loadInsight 回读都用持久化值重算 partial，避免「重新生成 vs 刷新」两路径状态翻转（flows 段同类先例）；
+  3. **回读越界过滤**：图指纹不覆盖函数体注释，注释块变少而指纹不变时回读的 blockIndexes 可能越界 ⇒ apply 时按当前 codeBlocks.length 过滤、剥空整步丢弃，堵脏数据下发；
+  4. **前端三态渲染**：steps / fallback（AI 缺失→灰字提示+原文平铺）/ empty；纯函数分组（非 step 条目优先认领、未覆盖块归 uncovered），保证任何注释块内容不丢。
+- **收益**：新 pass 零范式创新、32 例单测覆盖边界；实机 82 函数产出归一步骤、历史快照含 internalStepCount 且 blocks=ok。
+- **适用条件**：在 insight 体系新增任何 AI pass；或任何「缓存回读数据可能陈旧于当前图」的下标引用场景。
+- **关联**：packages/server/src/insight.ts（aiInternalSteps/applyInternalSteps/blocksStatusOf）、packages/web/src/utils/internalSteps.ts；commits e49cf24、b9a69ec。
 
 ### 2026-09-23 · 外部工具（Git）集成：可注入抽象 + 双层测试 + watermark 增量 + 全程降级
 - **场景**：要把 Git 提交历史回填成函数级变更记录，但真实 git 慢、依赖环境、CI/无 git 机器上不能跑；且历史可能很长、随时可能异常。
