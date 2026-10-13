@@ -6,6 +6,7 @@ import type {
   FlowNode,
   FunctionCategory
 } from '@autodoc/shared-types'
+import type { OtherBlockKind } from './internalSteps'
 
 /** naive-ui n-tag 的 type 取值（避免各处重复字面量联合） */
 export type TagType = 'default' | 'error' | 'info' | 'success' | 'warning' | 'primary'
@@ -96,6 +97,22 @@ export const AI_STATUS_META: Record<AiPassStatus, { label: string; type: TagType
   partial: { label: '部分成功', type: 'info' },
   failed: { label: '失败', type: 'error' },
   skipped: { label: '跳过', type: 'warning' }
+}
+
+/** 「其它注释」种类 → 中文徽标（内部步骤大纲用） */
+export const OTHER_KIND_LABELS: Record<OtherBlockKind, string> = {
+  banner: '横幅',
+  todo: 'TODO',
+  deadcode: '注释代码',
+  uncovered: '未归步'
+}
+
+/** 「其它注释」种类 → n-tag 配色（deadcode 醒目红 / todo 橙 / 未归步蓝 / 横幅灰） */
+export const OTHER_KIND_COLORS: Record<OtherBlockKind, TagType> = {
+  banner: 'default',
+  todo: 'warning',
+  deadcode: 'error',
+  uncovered: 'info'
 }
 
 /** ISO 时间 → 本地「年-月-日 时:分」 */

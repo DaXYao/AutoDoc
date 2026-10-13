@@ -46,7 +46,15 @@ export function categoryDefault(key: 'business' | 'implementation' | 'utility' |
 }
 
 export function expandDefault(
-  key: 'fileHeader' | 'callGraph' | 'codeBlocks' | 'changes' | 'annotations' | 'callChainNoise'
+  key:
+    | 'fileHeader'
+    | 'callGraph'
+    | 'codeBlocks'
+    | 'changes'
+    | 'annotations'
+    | 'callChainNoise'
+    | 'internalSteps'
+    | 'internalStepCode'
 ): boolean {
   return appState.meta?.ui.defaultExpand[key] ?? false
 }

@@ -32,6 +32,8 @@ export const DEFAULT_EXPAND: Required<DefaultExpandConfig> = {
   changes: false,
   annotations: true,
   callChainNoise: false,
+  internalSteps: true,
+  internalStepCode: false,
   // 业务脉络树默认全收起（渐进披露），配置可覆盖
   flowAutoExpandDepth: 0
 }

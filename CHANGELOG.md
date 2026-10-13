@@ -2,6 +2,14 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-13 · S2：函数卡片「内部步骤」大纲前端 · web+shared-types+core 配置
+
+- **内容**：函数卡片原「注释块」平铺区块改造为三态：`steps`=「内部步骤(N)」大纲（序号+AI 标题+detail 小字/title 悬浮+行号范围可跳源码+「M 行」单步展开代码）+「其它注释(K)」折叠（横幅/TODO/注释代码/未归步 四 kind 徽标+注释截断+行号+代码可展开，K=0 不渲染）；`fallback`=AI 未生成/失败时灰字提示+注释块原文平铺（沿用旧展开 key，老用户状态不受影响）；`empty`=不渲染。纯函数 `groupInternalSteps` 负责分组（越界/非整数过滤、同下标只归一步、**非 step 条目优先认领**、未覆盖块归 uncovered 保证不丢内容）；展开默认**可配置**（DefaultExpandConfig/DEFAULT_EXPAND 增 internalSteps=true、internalStepCode=false）；展开 key 拼行号增强稳定（AI 重生成后旧展开态不错位）。注释/代码一律纯文本插值渲染（防 XSS）。
+- **影响范围**：shared-types（DefaultExpandConfig）+ core/config.ts（DEFAULT_EXPAND）+ web（store/expand、utils/internalSteps 新、utils/format、components/FunctionCard、test/internalSteps 新 14 例）；不动图谱位置/docComment/调用链路、不改 README。
+- **动机**：grill Q1=E+：注释原文+整段代码平铺噪声大价值低，改为「不打开文件即懂内部结构」的步骤大纲；AI 失败守 AI-first 回退原文并标注。
+- **测试**：web/test/internalSteps.test.ts 14 例（分组/升序/越界/非数组守卫/条目内去重/step 与非 step 争抢/uncovered/全越界丢弃/fallback/empty/行数合计）；`pnpm lint` 与 `pnpm test` 全绿（core 136 / server 162 / web 51）。浏览器实机：diffFileSnapshots 见 3 步大纲+单步代码展开；generateDocs 见 4 步+「其它注释(2)」横幅徽标。
+- **关联 commit**：待提交。
+
 ## 2026-10-13 · S1：后端 E+ 内部步骤 AI pass（blocks） · server+shared-types+web 标签
 
 - **内容**：新增 AI pass「内部步骤」：把有注释块函数的 codeBlocks 归一为有序步骤大纲 `InternalStep { blockIndexes, title, detail?, kind: step|banner|todo|deadcode }`，写入 `FunctionInsight.internalSteps?`（undefined=AI 未生成/失败，**无静态兜底**，前端据此回退原文）。完整沿用 aiCategories/aiKeySteps 范式：全局 idx 稳定映射分批(chunk=30)+重试+截断(finish_reason=length)判不全+零有效条目判失败+按图指纹缓存+AiPassStatus 可观测（AiPassKey 'blocks'，web AI_PASS_LABELS/AI_PASS_ORDER 同步）。初审后补两处加固：降级信号 failedBatches 随缓存信封持久化（缓存命中回读仍 partial，不冲销成 ok）；applyInternalSteps 按当前 codeBlocks.length 过滤越界 blockIndexes（注释块变少而指纹不变时堵脏数据下发）。快照随 insight 自动入历史快照，stats 增 internalStepCount（旧快照无此字段兼容）。

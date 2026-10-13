@@ -6,9 +6,10 @@ import type { Annotation, CallEdge, FunctionDocView } from '@autodoc/shared-type
 import { appState, findFunctionEntry } from '../store/app'
 import { expandDefault, isExpanded, toggle } from '../store/expand'
 import { deleteAnnotation } from '../data/api'
-import { CHANGE_LABELS, CATEGORY_LABELS, ROLE_COLORS, ROLE_LABELS, editorLink, formatDate } from '../utils/format'
+import { CHANGE_LABELS, CATEGORY_LABELS, OTHER_KIND_COLORS, OTHER_KIND_LABELS, ROLE_COLORS, ROLE_LABELS, editorLink, formatDate } from '../utils/format'
 import { renderMarkdown } from '../utils/markdown'
 import { splitCallChain } from '../utils/callChain'
+import { groupInternalSteps } from '../utils/internalSteps'
 import AnnotationPanel from './AnnotationPanel.vue'
 import CallNode from './CallNode.vue'
 
@@ -73,12 +74,27 @@ function truncateText(text: string, max = 72): string {
   return text.length > max ? `${text.slice(0, max)}…` : text
 }
 
+/** 内部步骤大纲分组（AI 归纳视图）；未生成/失败时 mode='fallback' 回退注释块原文平铺 */
+const stepsGroup = computed(() => groupInternalSteps(props.fn.codeBlocks, fi.value?.internalSteps))
+
 /** 稳定 ID 首段即相对路径，用于拼编辑器跳转链接 */
+const sourceFile = computed(() => props.fn.id.split('::')[0] ?? '')
+
 const sourceHref = computed(() =>
-  editorLink(appState.meta?.editor.linkTemplate, props.fn.id.split('::')[0] ?? '', props.fn.startLine)
+  editorLink(appState.meta?.editor.linkTemplate, sourceFile.value, props.fn.startLine)
 )
 
+/** 指定行的源码跳转链接（内部步骤/其它注释的行号点击跳转） */
+function lineHref(line: number): string | null {
+  return editorLink(appState.meta?.editor.linkTemplate, sourceFile.value, line)
+}
+
 const blocksKey = (): string => `card:${props.fn.id}:blocks`
+const stepsKey = (): string => `card:${props.fn.id}:steps`
+// 展开 key 拼入源码行号而非列表下标：AI 重生成后步骤数变化时，避免 localStorage 旧展开态语义错位
+const stepCodeKey = (startLine: number): string => `card:${props.fn.id}:stepCode:${startLine}`
+const blocksOtherKey = (): string => `card:${props.fn.id}:blocksOther`
+const otherCodeKey = (startLine: number): string => `card:${props.fn.id}:otherCode:${startLine}`
 const callsKey = (): string => `card:${props.fn.id}:calls`
 const callsNoiseKey = (): string => `card:${props.fn.id}:callsNoise`
 const graphKey = (): string => `card:${props.fn.id}:graph`
@@ -149,23 +165,127 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
       </details>
     </header>
 
-    <!-- 注释块：方法体内「注释 + 紧随代码块」成对展示 -->
-    <div v-if="fn.codeBlocks.length > 0" class="border-t border-gray-100 px-4 py-2">
-      <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(blocksKey(), expandDefault('codeBlocks'))">
-        注释块（{{ fn.codeBlocks.length }}）
-        {{ isExpanded(blocksKey(), expandDefault('codeBlocks')) ? '▾' : '▸' }}
-      </button>
-      <div v-if="isExpanded(blocksKey(), expandDefault('codeBlocks'))" class="mt-2 flex flex-col gap-2">
-        <div
-          v-for="(block, i) in fn.codeBlocks"
-          :key="i"
-          class="rounded border border-gray-100 bg-gray-50 p-2"
-        >
-          <div class="text-xs text-gray-400 mb-1">L{{ block.startLine }}–{{ block.endLine }}</div>
-          <pre class="text-xs text-gray-600 whitespace-pre-wrap font-mono">{{ block.commentText }}</pre>
-          <pre class="mt-1 text-xs whitespace-pre-wrap font-mono overflow-x-auto bg-white rounded p-2 border border-gray-100">{{ block.codeText }}</pre>
+    <!-- 内部步骤：AI 把注释块归纳成低噪声大纲；未生成/失败时回退注释块原文平铺 -->
+    <div v-if="stepsGroup.mode !== 'empty'" class="border-t border-gray-100 px-4 py-2">
+      <template v-if="stepsGroup.mode === 'fallback'">
+        <p class="mb-1 text-xs text-gray-400">
+          内部步骤未生成（AI 未执行/失败），以下为注释块原文
+        </p>
+        <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(blocksKey(), expandDefault('codeBlocks'))">
+          注释块（{{ fn.codeBlocks.length }}）
+          {{ isExpanded(blocksKey(), expandDefault('codeBlocks')) ? '▾' : '▸' }}
+        </button>
+        <div v-if="isExpanded(blocksKey(), expandDefault('codeBlocks'))" class="mt-2 flex flex-col gap-2">
+          <div
+            v-for="(block, i) in fn.codeBlocks"
+            :key="i"
+            class="rounded border border-gray-100 bg-gray-50 p-2"
+          >
+            <div class="text-xs text-gray-400 mb-1">L{{ block.startLine }}–{{ block.endLine }}</div>
+            <pre class="text-xs text-gray-600 whitespace-pre-wrap font-mono">{{ block.commentText }}</pre>
+            <pre class="mt-1 text-xs whitespace-pre-wrap font-mono overflow-x-auto bg-white rounded p-2 border border-gray-100">{{ block.codeText }}</pre>
+          </div>
         </div>
-      </div>
+      </template>
+      <template v-else>
+        <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(stepsKey(), expandDefault('internalSteps'))">
+          内部步骤（{{ stepsGroup.steps.length }}）
+          {{ isExpanded(stepsKey(), expandDefault('internalSteps')) ? '▾' : '▸' }}
+        </button>
+        <ol v-if="isExpanded(stepsKey(), expandDefault('internalSteps'))" class="mt-2 flex flex-col gap-1.5">
+          <li v-for="(group, i) in stepsGroup.steps" :key="i" class="text-xs">
+            <div class="flex items-start gap-2">
+              <span class="mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gray-200 text-[10px] leading-none text-gray-600">
+                {{ i + 1 }}
+              </span>
+              <div class="min-w-0 flex-1">
+                <span class="text-gray-700">{{ group.step.title }}</span>
+                <span
+                  v-if="group.step.detail"
+                  class="ml-1 text-gray-400"
+                  :title="group.step.detail"
+                >{{ truncateText(group.step.detail, 48) }}</span>
+              </div>
+              <a
+                v-if="lineHref(group.startLine)"
+                :href="lineHref(group.startLine) ?? undefined"
+                class="shrink-0 font-mono text-blue-500 hover:underline"
+                target="_blank"
+                rel="noopener"
+                :title="`跳到源码 L${group.startLine}`"
+              >
+                L{{ group.startLine }}–{{ group.endLine }}
+              </a>
+              <span v-else class="shrink-0 font-mono text-gray-400">L{{ group.startLine }}–{{ group.endLine }}</span>
+              <button
+                class="shrink-0 text-gray-400 hover:text-gray-700"
+                @click="toggle(stepCodeKey(group.startLine), expandDefault('internalStepCode'))"
+              >
+                {{ group.codeLineCount }} 行
+                {{ isExpanded(stepCodeKey(group.startLine), expandDefault('internalStepCode')) ? '▾' : '▸' }}
+              </button>
+            </div>
+            <!-- 单步展开：各块原文注释 + 代码（一律纯文本插值渲染，防 XSS） -->
+            <div
+              v-if="isExpanded(stepCodeKey(group.startLine), expandDefault('internalStepCode'))"
+              class="mt-1 flex flex-col gap-1 pl-6"
+            >
+              <div
+                v-for="(block, bi) in group.blocks"
+                :key="bi"
+                class="rounded border border-gray-100 bg-gray-50 p-2"
+              >
+                <div class="text-gray-400 mb-1">L{{ block.startLine }}–{{ block.endLine }}</div>
+                <pre class="text-gray-600 whitespace-pre-wrap font-mono">{{ block.commentText }}</pre>
+                <pre class="mt-1 whitespace-pre-wrap font-mono overflow-x-auto bg-white rounded p-2 border border-gray-100">{{ block.codeText }}</pre>
+              </div>
+            </div>
+          </li>
+        </ol>
+        <!-- 其它注释：横幅/TODO/注释代码/未归步；K=0 时整折叠不渲染 -->
+        <div v-if="stepsGroup.others.length > 0" class="mt-2">
+          <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(blocksOtherKey(), expandDefault('internalStepCode'))">
+            其它注释（{{ stepsGroup.others.length }}）
+            {{ isExpanded(blocksOtherKey(), expandDefault('internalStepCode')) ? '▾' : '▸' }}
+          </button>
+          <ul v-if="isExpanded(blocksOtherKey(), expandDefault('internalStepCode'))" class="mt-2 flex flex-col gap-1.5">
+            <li v-for="(other, i) in stepsGroup.others" :key="i" class="text-xs">
+              <div class="flex items-start gap-2">
+                <n-tag size="tiny" :bordered="false" class="shrink-0" :type="OTHER_KIND_COLORS[other.kind]">
+                  {{ OTHER_KIND_LABELS[other.kind] }}
+                </n-tag>
+                <span class="min-w-0 flex-1 text-gray-500" :title="other.block.commentText">
+                  {{ truncateText(other.block.commentText, 60) }}
+                </span>
+                <a
+                  v-if="lineHref(other.block.startLine)"
+                  :href="lineHref(other.block.startLine) ?? undefined"
+                  class="shrink-0 font-mono text-blue-500 hover:underline"
+                  target="_blank"
+                  rel="noopener"
+                  :title="`跳到源码 L${other.block.startLine}`"
+                >
+                  L{{ other.block.startLine }}–{{ other.block.endLine }}
+                </a>
+                <span v-else class="shrink-0 font-mono text-gray-400">
+                  L{{ other.block.startLine }}–{{ other.block.endLine }}
+                </span>
+                <button
+                  class="shrink-0 text-gray-400 hover:text-gray-700"
+                  @click="toggle(otherCodeKey(other.block.startLine), expandDefault('internalStepCode'))"
+                >
+                  代码
+                  {{ isExpanded(otherCodeKey(other.block.startLine), expandDefault('internalStepCode')) ? '▾' : '▸' }}
+                </button>
+              </div>
+              <pre
+                v-if="isExpanded(otherCodeKey(other.block.startLine), expandDefault('internalStepCode'))"
+                class="mt-1 ml-6 whitespace-pre-wrap font-mono overflow-x-auto bg-white rounded p-2 border border-gray-100"
+              >{{ other.block.codeText }}</pre>
+            </li>
+          </ul>
+        </div>
+      </template>
     </div>
 
     <!-- 内部调用关系：按执行顺序的链路（角色着色 + 箭头 + 用途说明） -->

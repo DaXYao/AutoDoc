@@ -222,6 +222,10 @@ export interface DefaultExpandConfig {
   annotations?: boolean
   /** 调用链路「次要调用」区块默认是否展开，缺省 false=折叠 */
   callChainNoise?: boolean
+  /** 「内部步骤」大纲默认是否展开，缺省 true=展开（低噪声、面向初读者） */
+  internalSteps?: boolean
+  /** 单个内部步骤的代码 /「其它注释」区块默认是否展开，缺省 false=折叠 */
+  internalStepCode?: boolean
   /** 脉络架构树默认自动展开的层级深度（0=全部折叠） */
   flowAutoExpandDepth?: number
 }
