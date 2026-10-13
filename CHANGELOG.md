@@ -2,6 +2,14 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-13 · S3：函数卡片「所在链路」替换「图谱位置」 · web
+
+- **内容**：删除旧「图谱位置」（裸列上游/下游名单 + 不绑定链路的职责句子），替换为「所在链路」：每条链路一块=①AI 一句话叙事（空→灰字「叙事未生成」）②我的角色（chainRoles→stepRoles 回退，缺→灰字「角色未生成」）③紧凑路径（头2尾2窗口+「…」省略、me 加粗+底色高亮、节点可跳转）+「完整路径 ▸」展开全 path；默认 top3 按重要性（core 数*2+链长+叙事非空）排序、同分 id 升序稳定，其余「+N 更多」展开（同一有序数组切分保证衔接）。AI 失败时静态路径骨架照画+灰字标注（不伪造）。折叠标题保留上游/下游计数；沿用 graphKey 保留老展开态；chainIds 空或全脏→整区块不渲染。纯函数 chains.ts（roleOf/chainImportance/selectTopChains/compactPath）+ 22 单测。
+- **影响范围**：web（utils/chains 新、components/FunctionCard、test/chains 新 22 例）；不新增 AI pass（复用现有 chains/narrative/stepRoles）、不改 README、不动其它区块。
+- **动机**：grill Q3/Q4/Q5：旧区块"莫名其妙陈列方法"；改为「参与哪些链路+链路干什么+我承担什么角色」，默认 3 条+重要性排序控熵。
+- **测试**：chains.test.ts 22 例（roleOf 回退/空串、importance、selectTop 稳定与截断、compactPath 全量/中段/头/尾/贴边/me 缺失/脏数据）；`pnpm lint` 与 `pnpm test` 全绿（core 136 / server 162 / web 73）。浏览器实机：generateDocs 见 11 条链 top3+「+8 更多」、叙事/角色/紧凑路径/完整路径展开均正确，缺失处诚实标注。
+- **关联 commit**：待提交。
+
 ## 2026-10-13 · S2：函数卡片「内部步骤」大纲前端 · web+shared-types+core 配置
 
 - **内容**：函数卡片原「注释块」平铺区块改造为三态：`steps`=「内部步骤(N)」大纲（序号+AI 标题+detail 小字/title 悬浮+行号范围可跳源码+「M 行」单步展开代码）+「其它注释(K)」折叠（横幅/TODO/注释代码/未归步 四 kind 徽标+注释截断+行号+代码可展开，K=0 不渲染）；`fallback`=AI 未生成/失败时灰字提示+注释块原文平铺（沿用旧展开 key，老用户状态不受影响）；`empty`=不渲染。纯函数 `groupInternalSteps` 负责分组（越界/非整数过滤、同下标只归一步、**非 step 条目优先认领**、未覆盖块归 uncovered 保证不丢内容）；展开默认**可配置**（DefaultExpandConfig/DEFAULT_EXPAND 增 internalSteps=true、internalStepCode=false）；展开 key 拼行号增强稳定（AI 重生成后旧展开态不错位）。注释/代码一律纯文本插值渲染（防 XSS）。

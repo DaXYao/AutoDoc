@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import type { Annotation, CallEdge, FunctionDocView } from '@autodoc/shared-types'
+import type { Annotation, CallEdge, FunctionDocView, InsightChain } from '@autodoc/shared-types'
 import { appState, findFunctionEntry } from '../store/app'
 import { expandDefault, isExpanded, toggle } from '../store/expand'
 import { deleteAnnotation } from '../data/api'
@@ -10,6 +10,7 @@ import { CHANGE_LABELS, CATEGORY_LABELS, OTHER_KIND_COLORS, OTHER_KIND_LABELS, R
 import { renderMarkdown } from '../utils/markdown'
 import { splitCallChain } from '../utils/callChain'
 import { groupInternalSteps } from '../utils/internalSteps'
+import { compactPath, roleOf, selectTopChains } from '../utils/chains'
 import AnnotationPanel from './AnnotationPanel.vue'
 import CallNode from './CallNode.vue'
 
@@ -43,6 +44,42 @@ const callChain = computed(() => [...props.fn.calls].sort((a, b) => a.line - b.l
 
 /** 图谱洞察（核心度/上下游/链路职责） */
 const fi = computed(() => appState.insight?.functions[props.fn.id] ?? null)
+
+/** 默认展开的链路上限，其余收入「+N 更多」（一次陈列过多链路会变成新的噪音） */
+const CHAIN_TOP_LIMIT = 3
+
+/**
+ * 所在链路：当前函数参与的链路，按重要性排序（同分按 id 升序保证稳定）。
+ * fi 缺失、chainIds 为空、或 chainIds 全为脏 id（chains 无对应项）时返回 null
+ * → 整区块不渲染，避免「标题显 N 条但展开全空白」的假象。
+ */
+const chainView = computed(() => {
+  const insight = fi.value
+  if (!insight || insight.chainIds.length === 0) return null
+  const functions = appState.insight?.functions ?? {}
+  const chains = appState.insight?.chains ?? []
+  // 一次取全量排序再切分 top/rest，保证「+N 更多」展开后两段顺序衔接一致
+  const all = selectTopChains(chains, insight.chainIds, functions, Number.MAX_SAFE_INTEGER).top
+  if (all.length === 0) return null
+  return { top: all.slice(0, CHAIN_TOP_LIMIT), rest: all.slice(CHAIN_TOP_LIMIT) }
+})
+
+/** 「+N 更多」展开后实际渲染的链路列表 */
+const visibleChains = computed<InsightChain[]>(() => {
+  const view = chainView.value
+  if (!view) return []
+  return isExpanded(chainsMoreKey(), false) ? [...view.top, ...view.rest] : view.top
+})
+
+/** 我在该链路中的角色（null → 灰字「角色未生成」，不伪造句子） */
+function chainRole(chain: InsightChain): string | null {
+  return roleOf(fi.value, chain, props.fn.id)
+}
+
+/** 紧凑路径渲染段：头尾窗口 + gap 省略，me 一定出现且可高亮 */
+function chainSegments(chain: InsightChain): ReturnType<typeof compactPath> {
+  return compactPath(chain.path, props.fn.id)
+}
 
 /**
  * 主干 / 次要拆分（AI-first）：keyCallIndexes 为 undefined（AI 未生成/失败）时不拆分、
@@ -98,6 +135,8 @@ const otherCodeKey = (startLine: number): string => `card:${props.fn.id}:otherCo
 const callsKey = (): string => `card:${props.fn.id}:calls`
 const callsNoiseKey = (): string => `card:${props.fn.id}:callsNoise`
 const graphKey = (): string => `card:${props.fn.id}:graph`
+const chainsMoreKey = (): string => `card:${props.fn.id}:chainsMore`
+const chainPathKey = (chainId: string): string => `card:${props.fn.id}:chain:${chainId}`
 const changesKey = (): string => `card:${props.fn.id}:changes`
 const annotationsKey = (): string => `card:${props.fn.id}:annotations`
 const followupsKey = (): string => `card:${props.fn.id}:followups`
@@ -343,41 +382,73 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
       </div>
     </div>
 
-    <!-- 图谱位置：核心度 / 上游 / 下游 / 链路上下文职责 -->
-    <div v-if="fi" class="border-t border-gray-100 px-4 py-2">
+    <!-- 所在链路：参与了哪些链路、每条链路是干什么的、我在其中承担什么角色 -->
+    <!-- 沿用原图谱位置的 graphKey：老用户既有展开态不丢失；默认仍折叠 -->
+    <div v-if="chainView" class="border-t border-gray-100 px-4 py-2">
       <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(graphKey(), false)">
-        图谱位置（上游 {{ fi.callerIds.length }} / 下游 {{ fi.calleeIds.length }} / {{ fi.chainIds.length }} 链路）
+        所在链路（上游 {{ fi?.callerIds.length ?? 0 }} / 下游 {{ fi?.calleeIds.length ?? 0 }} / {{ fi?.chainIds.length ?? 0 }} 条）
         {{ isExpanded(graphKey(), false) ? '▾' : '▸' }}
       </button>
       <div v-if="isExpanded(graphKey(), false)" class="mt-2 flex flex-col gap-2 text-xs">
-        <div v-if="fi.callerIds.length > 0">
-          <span class="text-gray-500">上游（调用它）：</span>
-          <button
-            v-for="c in fi.callerIds.slice(0, 8)"
-            :key="c"
-            class="font-mono text-blue-600 hover:underline mr-1.5"
-            @click="goFunction(c)"
+        <div
+          v-for="chain in visibleChains"
+          :key="chain.id"
+          class="rounded border border-gray-100 bg-gray-50 p-2"
+        >
+          <!-- ① AI 链路叙事：缺失时灰字标注，静态路径骨架照画，不伪造句子（AI 失败降级） -->
+          <p v-if="chain.narrative" class="text-gray-700">{{ chain.narrative }}</p>
+          <p v-else class="text-gray-400">叙事未生成</p>
+          <!-- ② 我的角色：函数级 chainRoles → 链路级 stepRoles 回退，缺失同上灰字标注 -->
+          <p class="mt-1">
+            <span class="text-gray-500">我的角色：</span>
+            <span v-if="chainRole(chain)" class="text-gray-700">{{ chainRole(chain) }}</span>
+            <span v-else class="text-gray-400">角色未生成</span>
+          </p>
+          <!-- ③ 紧凑路径：头尾窗口 + gap 省略，me 加粗高亮；行尾可展开该链完整路径 -->
+          <div class="mt-1.5 flex flex-wrap items-center gap-y-1">
+            <template v-for="(node, ni) in chainSegments(chain)" :key="ni">
+              <span v-if="ni > 0" class="mx-1 text-gray-300">→</span>
+              <span v-if="node.kind === 'gap'" class="text-gray-400">…</span>
+              <button
+                v-else
+                class="rounded px-0.5 font-mono hover:underline"
+                :class="node.id === fn.id ? 'bg-amber-100 font-bold text-gray-900' : 'text-blue-600'"
+                @click="goFunction(node.id)"
+              >
+                {{ fnName(node.id) }}
+              </button>
+            </template>
+            <button
+              class="ml-2 shrink-0 text-gray-400 hover:text-gray-700"
+              @click="toggle(chainPathKey(chain.id), false)"
+            >
+              完整路径 {{ isExpanded(chainPathKey(chain.id), false) ? '▾' : '▸' }}
+            </button>
+          </div>
+          <div
+            v-if="isExpanded(chainPathKey(chain.id), false)"
+            class="mt-1 flex flex-wrap items-center gap-y-1 rounded border border-gray-100 bg-white p-1.5"
           >
-            {{ fnName(c) }}
-          </button>
+            <template v-for="(id, pi) in chain.path" :key="`${id}-${pi}`">
+              <span v-if="pi > 0" class="mx-1 text-gray-300">→</span>
+              <button
+                class="rounded px-0.5 font-mono hover:underline"
+                :class="id === fn.id ? 'bg-amber-100 font-bold text-gray-900' : 'text-blue-600'"
+                @click="goFunction(id)"
+              >
+                {{ fnName(id) }}
+              </button>
+            </template>
+          </div>
         </div>
-        <div v-if="fi.calleeIds.length > 0">
-          <span class="text-gray-500">下游（它调用）：</span>
-          <button
-            v-for="c in fi.calleeIds.slice(0, 8)"
-            :key="c"
-            class="font-mono text-blue-600 hover:underline mr-1.5"
-            @click="goFunction(c)"
-          >
-            {{ fnName(c) }}
-          </button>
-        </div>
-        <div v-if="Object.keys(fi.chainRoles).length > 0">
-          <span class="text-gray-500">在链路中的职责：</span>
-          <ul class="mt-1 flex flex-col gap-0.5 text-gray-600">
-            <li v-for="(role, cid) in fi.chainRoles" :key="cid">· {{ role }}</li>
-          </ul>
-        </div>
+        <!-- 其余链路：默认折叠，展开后与 top3 同渲染 -->
+        <button
+          v-if="chainView.rest.length > 0"
+          class="self-start text-xs text-gray-500 hover:text-gray-800"
+          @click="toggle(chainsMoreKey(), false)"
+        >
+          +{{ chainView.rest.length }} 更多 {{ isExpanded(chainsMoreKey(), false) ? '▾' : '▸' }}
+        </button>
       </div>
     </div>
 
