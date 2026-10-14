@@ -27,6 +27,16 @@ export class ParserRegistry {
   }
 }
 
+/**
+ * 解析层产物版本（手动维护），参与增量解析缓存 versionKey。
+ * 任何会改变「同一源码的 ParsedFile 输出」的变更都必须 bump：
+ * - JsFamilyParser / CSharpParser 的函数、callSites、codeBlocks、imports 提取逻辑变化；
+ * - 升级 @vscode/tree-sitter-wasm（grammar wasm）或 web-tree-sitter；
+ * - ParsedFile / ParsedFunction / ParsedImport / CodeBlock 结构调整。
+ * 仅改注释、重命名内部变量等不影响输出的变更无需 bump。
+ */
+export const PARSER_VERSION = 1
+
 export const parserRegistry = new ParserRegistry()
 
 let defaultsRegistered = false

@@ -10,6 +10,8 @@ import type {
   InsightSnapshotMetaPatch,
   NewAnnotationInput,
   NewChangeInput,
+  ParseCache,
+  ParseCacheEntry,
   StorageAdapter
 } from './StorageAdapter.js'
 import { toSnapshotMeta } from './StorageAdapter.js'
@@ -78,6 +80,10 @@ export class SqliteStorage implements StorageAdapter {
       CREATE TABLE IF NOT EXISTS app_state (
         key TEXT PRIMARY KEY,
         value TEXT
+      );
+      CREATE TABLE IF NOT EXISTS parse_cache (
+        versionKey TEXT PRIMARY KEY,
+        payloadJson TEXT NOT NULL
       );
     `)
     // 迁移前备份：仅升级已有库时触发，用 'premigrate' 类型命名（<base>.premigrate.<stamp>.bak），
@@ -383,6 +389,49 @@ export class SqliteStorage implements StorageAdapter {
         "INSERT INTO app_state (key, value) VALUES ('activeInsightSnapshotId', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
       )
       .run(id)
+  }
+
+  loadParseCache(): ParseCache | null {
+    // 读取失败/payload 损坏一律返回 null（调用方回退全量解析），不抛：缓存是可再生数据
+    try {
+      // ORDER BY rowid DESC：saveParseCache 已事务化、正常只剩一行；此排序仅兜底
+      // 历史遗留多行脏数据，确定性取最后写入的一行（rowid 单调递增即写入序）
+      const row = this.conn()
+        .prepare('SELECT versionKey, payloadJson FROM parse_cache ORDER BY rowid DESC LIMIT 1')
+        .get() as { versionKey?: unknown; payloadJson?: unknown } | undefined
+      if (!row || typeof row.versionKey !== 'string' || typeof row.payloadJson !== 'string') {
+        return null
+      }
+      const entries = JSON.parse(row.payloadJson) as unknown
+      if (entries === null || typeof entries !== 'object' || Array.isArray(entries)) return null
+      return { versionKey: row.versionKey, entries: entries as Record<string, ParseCacheEntry> }
+    } catch {
+      return null
+    }
+  }
+
+  saveParseCache(versionKey: string, entries: Record<string, ParseCacheEntry>): void {
+    // 刻意不调 backupOnce()：parse_cache 属可再生缓存（非批注/变更历史等用户数据），
+    // 丢失可由全量重解析恢复；若为其备份会白白消耗备份配额、把真正的用户数据回滚点轮转掉
+    const db = this.conn()
+    // UPSERT+DELETE 用事务包住（接口约定「单点原子」）：两条语句间崩溃会留下新旧版本
+    // 行并存，读取时 LIMIT 1 命中哪行不确定；事务化后中断只可能回到保存前的完整状态
+    db.exec('BEGIN')
+    try {
+      db.prepare(
+        'INSERT INTO parse_cache (versionKey, payloadJson) VALUES (?, ?) ON CONFLICT(versionKey) DO UPDATE SET payloadJson = excluded.payloadJson'
+      ).run(versionKey, JSON.stringify(entries))
+      // 整份替换语义：只保留当前 versionKey 一行，旧版本行删除（天然清理过期缓存）
+      db.prepare('DELETE FROM parse_cache WHERE versionKey != ?').run(versionKey)
+      db.exec('COMMIT')
+    } catch (error) {
+      try {
+        db.exec('ROLLBACK')
+      } catch {
+        // 事务可能已因错误自行结束（如 COMMIT 阶段失败），回滚报错时仍上抛原始异常
+      }
+      throw error
+    }
   }
 
   private rowToSnapshotMeta(row: Record<string, unknown>): InsightSnapshotMeta {

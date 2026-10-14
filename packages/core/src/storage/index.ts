@@ -16,6 +16,13 @@ export function createStorage(config: StorageConfig | undefined, rootDir: string
   return type === 'sqlite' ? new SqliteStorage(dataPath) : new JsonStorage(dataPath)
 }
 
-export type { StorageAdapter, NewAnnotationInput, AnnotationPatch, NewChangeInput } from './StorageAdapter.js'
+export type {
+  StorageAdapter,
+  NewAnnotationInput,
+  AnnotationPatch,
+  NewChangeInput,
+  ParseCache,
+  ParseCacheEntry
+} from './StorageAdapter.js'
 export { JsonStorage, pruneBackups } from './JsonStorage.js'
 export { SqliteStorage } from './SqliteStorage.js'

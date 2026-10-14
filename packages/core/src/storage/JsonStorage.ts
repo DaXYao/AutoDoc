@@ -9,6 +9,8 @@ import type {
   InsightSnapshotMetaPatch,
   NewAnnotationInput,
   NewChangeInput,
+  ParseCache,
+  ParseCacheEntry,
   StorageAdapter
 } from './StorageAdapter.js'
 import { toSnapshotMeta } from './StorageAdapter.js'
@@ -24,6 +26,8 @@ interface JsonData {
   insightHistory?: InsightSnapshot[]
   /** 当前生效（回滚/历史视图）快照 id；旧数据缺省视为 undefined（实时计算） */
   activeInsightSnapshotId?: string
+  /** 增量解析缓存（I1，可再生数据非用户数据）；旧数据缺省视为无缓存 */
+  parseCache?: ParseCache
 }
 
 /** 每次返回全新的空数据对象；避免 module 级单例的可变引用被写操作跨实例污染 */
@@ -300,6 +304,31 @@ export class JsonStorage implements StorageAdapter {
     this.mutate()
     if (id === null) delete this.data.activeInsightSnapshotId
     else this.data.activeInsightSnapshotId = id
+    this.save()
+  }
+
+  loadParseCache(): ParseCache | null {
+    this.init()
+    const cache = this.data.parseCache as ParseCache | undefined
+    // 形状校验失败视作无缓存（返回 null，调用方回退全量解析），不抛：缓存是可再生数据
+    if (
+      !cache ||
+      typeof cache !== 'object' ||
+      typeof cache.versionKey !== 'string' ||
+      typeof cache.entries !== 'object' ||
+      cache.entries === null ||
+      Array.isArray(cache.entries)
+    ) {
+      return null
+    }
+    return cache
+  }
+
+  saveParseCache(versionKey: string, entries: Record<string, ParseCacheEntry>): void {
+    // 刻意不走 mutate()（跳过 backupOnce）：parse 缓存属可再生数据（非批注/变更历史等用户数据），
+    // 丢失可由全量重解析恢复；落盘仍走 save() 的「临时文件 + 原子重命名」保证单点原子
+    this.init()
+    this.data.parseCache = { versionKey, entries }
     this.save()
   }
 }

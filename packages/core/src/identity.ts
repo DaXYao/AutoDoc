@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 
-const sha256 = (text: string): string =>
+export const sha256 = (text: string): string =>
   createHash('sha256').update(text).digest('hex')
 
 /** 参数签名哈希：稳定 ID 的组成部分，参数变化即 ID 变化 */

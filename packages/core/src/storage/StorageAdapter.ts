@@ -43,6 +43,27 @@ export interface InsightSnapshotMetaPatch {
   note?: string
 }
 
+/**
+ * 增量解析缓存（I1）单文件条目：文件内容 sha256 + 上次解析产物（ParsedFile 的 JSON 形态）。
+ * parsed 声明为 unknown：存储层不理解解析结构，形状校验由调用方（generate.ts）负责。
+ */
+export interface ParseCacheEntry {
+  contentHash: string
+  /**
+   * 写入时的函数个数（调用方回填）：functions 被整体截断为 [] 时形状仍合法、
+   * contentHash 也未变，仅靠形状校验会静默复用坏条目；对照该计数可识别截断损坏。
+   * 缺省（旧缓存）视为不可对照，跳过该检查。
+   */
+  functionCount?: number
+  parsed: unknown
+}
+
+/** 整份解析缓存：versionKey（解析器版本+配置指纹）→ relPath → 条目 */
+export interface ParseCache {
+  versionKey: string
+  entries: Record<string, ParseCacheEntry>
+}
+
 export interface NewChangeInput {
   targetId: string
   type: ChangeType
@@ -59,7 +80,7 @@ export interface NewChangeInput {
  * 元数据存储适配器接口：SQLite / 侧车 JSON 等后端均实现该接口。
  * 硬约束：
  * - 批注与变更历史通过稳定 ID 关联；
- * - 任何写操作前必须先备份（由实现内部保证）；
+ * - 任何写操作前必须先备份（由实现内部保证）；唯一例外：增量解析缓存属可再生数据，写前不备份；
  * - 变更历史全量保留（归档不删除）。
  */
 export interface StorageAdapter {
@@ -116,4 +137,15 @@ export interface StorageAdapter {
   getActiveInsightSnapshotId(): string | null
   /** 设置当前生效快照 id；传 null 回到实时计算视图（写操作，触发写前备份） */
   setActiveInsightSnapshotId(id: string | null): void
+
+  /* ------------------------- 增量解析缓存（I1，可再生数据：写前不备份，区别于批注/变更历史等用户数据） ------------------------- */
+
+  /** 读取整份解析缓存；无缓存/payload 损坏 → 返回 null（调用方回退全量解析），不抛 */
+  loadParseCache(): ParseCache | null
+  /**
+   * 保存整份解析缓存（整份替换语义：天然处理已删除文件的条目，单点原子——
+   * 实现必须保证保存过程不可分割：中断后要么旧缓存完整、要么新缓存完整，禁止半新半旧）。
+   * 可再生数据：丢失可由全量重解析恢复，实现不得为此触发写前备份。
+   */
+  saveParseCache(versionKey: string, entries: Record<string, ParseCacheEntry>): void
 }

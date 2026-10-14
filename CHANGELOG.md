@@ -2,6 +2,14 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-13 · I1：解析层增量（内容哈希缓存） · core+shared-types
+
+- **内容**：`generateDocs` 阶段一从每次全量 `parseFile` 改为按「文件内容 sha256」持久化复用上次 ParsedFile：存储层新增 `loadParseCache/saveParseCache`（整份替换语义，SQLite 单表 `parse_cache(versionKey,payloadJson)` UPSERT 本行+删它行，JsonStorage 侧车字段 `parseCache={versionKey,entries}`）；缓存属**可再生数据**，写前刻意不 backupOnce（区别于批注/变更历史），读取失败/形状损坏一律返回 null 回退全量、不抛。versionKey=sha256{parserVersion, configFingerprint}：`PARSER_VERSION` 手动维护常量（registry.ts，注明 bump 时机）；configFingerprint 只纳入影响解析/分类/注释块的配置子集（include/exclude/languages/classification，排除 ui/storage/editor/git/insight），稳定序列化（键递归排序）哈希。逐文件命中判定=contentHash 一致+最小形状校验（functions/imports 为数组）；阶段一结束整份保存。统计 `{reused,reparsed,added,removed}` 入 `GenerateOutput.incremental`（IncrementalParseStats 放 shared-types）并 console.log 一行。identity.ts 导出 sha256 复用。初审后补三处加固：①形状校验深至**条目级**——`isParsedFunctionShape`（name/params/bodyText/callSites/codeBlocks/startLine）与 `isParsedImportShape`（localName/importedName/source）逐项校验，且条目新增 `functionCount` 对照（functions 被截断为 [] 而 contentHash 未变时不静默复用）；复用路径消费阶段（buildFunctionDoc 等）整体 try/catch，任何字段级异常按未命中降级真解析并 console.warn，杜绝坏条目写回形成崩溃循环。②`SqliteStorage.saveParseCache` 的 UPSERT+DELETE 用 BEGIN/COMMIT（异常 ROLLBACK）事务包住，兑现接口「单点原子」注释；`loadParseCache` SELECT 加 `ORDER BY rowid DESC LIMIT 1` 消除历史多行脏数据的不确定性。③configFingerprint 注释补明「languages 当前实现未消费该键，保守纳入指纹」。
+- **影响范围**：core（generate/storage×4/parser registry/identity/storage index）+ shared-types（IncrementalParseStats）；不动 AI pass/server/web（I2/I3 后续）、不改 README、不新增依赖。
+- **动机**：服务重启/重新生成都全量重解析，大项目太重；按内容哈希增量后无改动二次生成 reused=全部、结果与全量深相等。
+- **测试**：core 新增 23 例（storage.test.ts +12：两适配器往返/versionKey 整份替换/同键 UPSERT 覆盖/写缓存不产生备份/SQLite payload 损坏→null 且可被替换清理/旧库无表幂等建表/JsonStorage 损坏与旧数据缺字段→null；incrementalParse.test.ts +11：首次全量、二次无改动 reused=3 且 files 深相等、改一文件仅该文件 reparsed、改分类规则全量、删文件 removed=1 且缓存不再含、单条目形状损坏仅重解析该文件、整份 payload 损坏全量不抛、ParsedFile JSON 往返深相等，初审后 +3：条目级损坏 functions:[{}] 逐项校验拦截、functions 截断为 [] 而 contentHash 未变时 functionCount 对照不静默复用、SQLite 存储端到端两轮 reused=全量）；`pnpm lint` 与 `pnpm test` 全绿（core 159 / server 162 / web 73）。
+- **关联 commit**：待提交。
+
 ## 2026-10-13 · S3：函数卡片「所在链路」替换「图谱位置」 · web
 
 - **内容**：删除旧「图谱位置」（裸列上游/下游名单 + 不绑定链路的职责句子），替换为「所在链路」：每条链路一块=①AI 一句话叙事（空→灰字「叙事未生成」）②我的角色（chainRoles→stepRoles 回退，缺→灰字「角色未生成」）③紧凑路径（头2尾2窗口+「…」省略、me 加粗+底色高亮、节点可跳转）+「完整路径 ▸」展开全 path；默认 top3 按重要性（core 数*2+链长+叙事非空）排序、同分 id 升序稳定，其余「+N 更多」展开（同一有序数组切分保证衔接）。AI 失败时静态路径骨架照画+灰字标注（不伪造）。折叠标题保留上游/下游计数；沿用 graphKey 保留老展开态；chainIds 空或全脏→整区块不渲染。纯函数 chains.ts（roleOf/chainImportance/selectTopChains/compactPath）+ 22 单测。

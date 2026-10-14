@@ -1,14 +1,14 @@
 import { readFile } from 'node:fs/promises'
 import { join, posix } from 'node:path'
-import type { CallEdge, FileDoc, FunctionDoc } from '@autodoc/shared-types'
+import type { CallEdge, FileDoc, FunctionDoc, IncrementalParseStats } from '@autodoc/shared-types'
 import { classifyFunction } from './classify.js'
 import { diffFileSnapshots, type DetectedChange, type FileSnapshot } from './changes.js'
 import type { NormalizedConfig } from './config.js'
 import { collectFiles } from './files.js'
-import { fingerprint, makeStableId } from './identity.js'
-import { ensureDefaultParsers, parserRegistry } from './parser/registry.js'
+import { fingerprint, makeStableId, sha256 } from './identity.js'
+import { ensureDefaultParsers, PARSER_VERSION, parserRegistry } from './parser/registry.js'
 import type { ParsedFile, ParsedFunction, ParsedImport } from './parser/types.js'
-import type { StorageAdapter } from './storage/StorageAdapter.js'
+import type { ParseCacheEntry, StorageAdapter } from './storage/StorageAdapter.js'
 
 export interface GenerateInput {
   rootDir: string
@@ -20,6 +20,8 @@ export interface GenerateInput {
 export interface GenerateOutput {
   files: FileDoc[]
   changes: DetectedChange[]
+  /** 阶段一增量解析统计（I1）；类型放 shared-types 供 server/web 复用 */
+  incremental?: IncrementalParseStats
 }
 
 /** 单个文件的解析中间产物（阶段一产出，供阶段二建图） */
@@ -56,27 +58,83 @@ function derivePurpose(parsed: ParsedFunction): string {
   return `${prefix} ${parsed.name}，参数（${paramsText}）${returnType}`
 }
 
-async function parseFile(
-  rootDir: string,
-  relPath: string,
-  warn: (message: string) => void
-): Promise<{ language: string; parsed: ParsedFile } | null> {
-  const parser = parserRegistry.forFile(relPath)
-  if (!parser) return null
-  let source: string
-  try {
-    source = await readFile(join(rootDir, relPath), 'utf-8')
-  } catch (error) {
-    warn(`读取失败，跳过 ${relPath}：${String(error)}`)
-    return null
+/**
+ * 稳定序列化：对象键递归排序后拼接，保证同一配置子集不受键书写顺序影响产出同一哈希。
+ * 仅用于指纹计算（不用于展示/存储还原），undefined 归一为 null 避免键值歧义。
+ */
+function stableStringify(value: unknown): string {
+  if (value === undefined || value === null) return 'null'
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>
+    const keys = Object.keys(obj).sort()
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`
   }
-  try {
-    return { language: parser.id, parsed: await parser.parse(source) }
-  } catch (error) {
-    // 容错：单文件解析失败降级跳过，不中断整体流程
-    warn(`解析失败，跳过 ${relPath}：${String(error)}`)
-    return null
-  }
+  return JSON.stringify(value)
+}
+
+/**
+ * 配置指纹：只纳入「影响解析/分类/注释块结果」的 normalized 配置子集。
+ * 纳入键与理由：
+ * - include / exclude：决定扫描范围，影响进入解析与缓存的文件集合；
+ * - languages：语言开关，影响启用哪些语言解析器。当前实现未消费该键，保守纳入指纹；
+ * - classification：三分类规则与 fallback。严格说分类发生在解析之后、不改变 ParsedFile，
+ *   但按保守策略纳入——规则变更时触发全量重解析，保证缓存产物与当前配置语义完全同步。
+ * 明确排除：ui.defaultExpand（前端展开策略）、storage（存储位置）、editor（跳转模板）、
+ * git（回填参数）、insight（AI 洞察参数）——均不影响解析/分类/注释块结果，
+ * 纳入只会造成无意义的全量重解析。
+ */
+function configFingerprint(normalized: NormalizedConfig): string {
+  const { include, exclude, languages, classification } = normalized.config
+  return sha256(stableStringify({ include, exclude, languages, classification }))
+}
+
+/** 缓存版本键：解析器版本或配置指纹任一变化 → 整份缓存视为过期 */
+function parseCacheVersionKey(normalized: NormalizedConfig): string {
+  return sha256(
+    stableStringify({ parserVersion: PARSER_VERSION, configFingerprint: configFingerprint(normalized) })
+  )
+}
+
+/** 单条 ParsedFunction 的最小形状校验：只查后续消费必然触碰的关键字段 */
+function isParsedFunctionShape(value: unknown): value is ParsedFunction {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const fn = value as Partial<ParsedFunction>
+  return (
+    typeof fn.name === 'string' &&
+    Array.isArray(fn.params) &&
+    typeof fn.bodyText === 'string' &&
+    Array.isArray(fn.callSites) &&
+    Array.isArray(fn.codeBlocks) &&
+    typeof fn.startLine === 'number'
+  )
+}
+
+/** 单条 ParsedImport 的最小形状校验：建索引/建图必然读取的字符串字段 */
+function isParsedImportShape(value: unknown): value is ParsedImport {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const imp = value as Partial<ParsedImport>
+  return (
+    typeof imp.localName === 'string' &&
+    typeof imp.importedName === 'string' &&
+    typeof imp.source === 'string'
+  )
+}
+
+/**
+ * 缓存条目 parsed 的最小形状校验：防损坏/手改 payload 混入阶段二（失败按未命中重解析）。
+ * 逐项校验 functions/imports：整份数组存在但条目损坏时，若不在此拦截，
+ * 坏条目会在消费阶段抛未捕获异常、且被写回缓存形成每次生成必崩的循环。
+ */
+function isParsedFileShape(value: unknown): value is ParsedFile {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const candidate = value as Partial<ParsedFile>
+  return (
+    Array.isArray(candidate.functions) &&
+    candidate.functions.every(isParsedFunctionShape) &&
+    Array.isArray(candidate.imports) &&
+    candidate.imports.every(isParsedImportShape)
+  )
 }
 
 /** 由解析中间结构构建 FunctionDoc（调用边留空，阶段二回填） */
@@ -238,9 +296,10 @@ function buildCallEdges(
 
 /**
  * 全量生成管线（两阶段）：
- * 阶段一 扫描 → 解析（函数 + 导入）→ 分类 → 注释块；
+ * 阶段一 扫描 → 增量解析（内容哈希缓存命中即复用上次 ParsedFile，否则真解析）→ 分类 → 注释块；
  * 阶段二 建全局导出索引 → 解析调用边（文件内 + 跨文件 import）→ 变更检测 → 落存储。
- * 写操作统一经由存储适配器，适配器内部保证写前备份。
+ * 写操作统一经由存储适配器；批注/变更历史等用户数据写前备份由适配器保证，
+ * 解析缓存属可再生数据、整份替换且不备份（见 StorageAdapter）。
  */
 export async function generateDocs(input: GenerateInput): Promise<GenerateOutput> {
   await ensureDefaultParsers()
@@ -254,21 +313,92 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
   )
   const knownPaths = new Set(relPaths)
 
-  // 阶段一：全量解析
+  // 阶段一：增量解析。versionKey 不符（解析器升级/配置指纹变化）视作空缓存 → 全量重解析
+  const versionKey = parseCacheVersionKey(normalized)
+  const loadedCache = storage.loadParseCache()
+  const cachedEntries =
+    loadedCache && loadedCache.versionKey === versionKey ? loadedCache.entries : {}
+  const nextEntries: Record<string, ParseCacheEntry> = {}
+  const stats: IncrementalParseStats = { reused: 0, reparsed: 0, added: 0, removed: 0 }
+
   const units: ParsedUnit[] = []
   for (const relPath of relPaths) {
-    const result = await parseFile(rootDir, relPath, warn)
-    if (!result) continue
+    const parser = parserRegistry.forFile(relPath)
+    if (!parser) continue
+    let source: string
+    try {
+      source = await readFile(join(rootDir, relPath), 'utf-8')
+    } catch (error) {
+      warn(`读取失败，跳过 ${relPath}：${String(error)}`)
+      continue
+    }
+    const contentHash = sha256(source)
+    const cached = cachedEntries[relPath]
+    // 尝试复用缓存条目：形状校验 + functionCount 对照 + 消费兜底，任一环节不过即返回 null。
+    // functionCount 校验的必要性：functions 被整体截断为 [] 时空数组仍是合法形状、
+    // contentHash 也未变，仅靠形状校验会静默复用坏条目产出空文档。
+    const tryReuse = (): { parsed: ParsedFile; functions: FunctionDoc[] } | null => {
+      if (
+        !cached ||
+        cached.contentHash !== contentHash ||
+        !isParsedFileShape(cached.parsed) ||
+        (cached.functionCount !== undefined &&
+          cached.functionCount !== cached.parsed.functions.length)
+      ) {
+        return null
+      }
+      // 消费阶段（buildFunctionDoc 等）整体兜底：形状校验只防结构性损坏，字段级异常
+      // 一律按未命中降级真解析（与 parseFile 容错同构），避免坏条目被写回形成崩溃循环
+      try {
+        return {
+          parsed: cached.parsed,
+          functions: cached.parsed.functions.map((fn) => buildFunctionDoc(relPath, fn, normalized))
+        }
+      } catch (error) {
+        console.warn(
+          `[autodoc] ${relPath} 缓存条目消费失败，降级为真解析：${String(error)}`
+        )
+        return null
+      }
+    }
+    const reuse = tryReuse()
+    let parsed: ParsedFile
+    let functions: FunctionDoc[]
+    if (reuse) {
+      // 命中缓存：ParsedFile 为纯 JSON 数据（无 Map/Set/函数），复用与重解析深相等
+      parsed = reuse.parsed
+      functions = reuse.functions
+      stats.reused++
+    } else {
+      try {
+        parsed = await parser.parse(source)
+      } catch (error) {
+        // 容错：单文件解析失败降级跳过，不中断整体流程；不入缓存，下次仍会重试
+        warn(`解析失败，跳过 ${relPath}：${String(error)}`)
+        continue
+      }
+      functions = parsed.functions.map((fn) => buildFunctionDoc(relPath, fn, normalized))
+      if (cached) stats.reparsed++
+      else stats.added++
+    }
+    nextEntries[relPath] = { contentHash, functionCount: parsed.functions.length, parsed }
     units.push({
       relPath,
-      language: result.language,
-      functions: result.parsed.functions.map((parsed) =>
-        buildFunctionDoc(relPath, parsed, normalized)
-      ),
-      parsed: result.parsed.functions,
-      imports: result.parsed.imports
+      language: parser.id,
+      functions,
+      parsed: parsed.functions,
+      imports: parsed.imports
     })
   }
+  // removed = 缓存有而本次扫描无（已删除/移出扫描范围）；随整份替换自然从缓存消失
+  for (const relPath of Object.keys(cachedEntries)) {
+    if (!knownPaths.has(relPath)) stats.removed++
+  }
+  // 整份替换保存（当前全部文件）：单点原子、天然清理已删除文件的条目
+  storage.saveParseCache(versionKey, nextEntries)
+  console.log(
+    `[autodoc] 增量解析：复用 ${stats.reused} / 重解析 ${stats.reparsed} / 新增 ${stats.added} / 删除 ${stats.removed}`
+  )
 
   // 全局导出索引：fileId → 导出名 → FunctionDoc（跨文件调用解析用）
   const exportedIndex = new Map<string, Map<string, FunctionDoc>>()
@@ -351,5 +481,5 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
     })
   }
 
-  return { files, changes: allChanges }
+  return { files, changes: allChanges, incremental: stats }
 }

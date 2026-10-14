@@ -383,6 +383,39 @@ function runAdapterSuite(create: (dir: string) => StorageAdapter): void {
     storage.addInsightSnapshot(mkSnapshot('s3', '2026-01-03T00:00:00.000Z', 'z'))
     expect(storage.listInsightSnapshots()).toHaveLength(3)
   })
+
+  it('parse_cache：save/load 整份往返一致；无缓存时返回 null', () => {
+    expect(storage.loadParseCache()).toBeNull()
+    const entries = {
+      'src/a.ts': { contentHash: 'hash-a', parsed: { functions: [], imports: [] } },
+      'src/b.ts': { contentHash: 'hash-b', parsed: { functions: [{ name: 'fn' }], imports: [] } }
+    }
+    storage.saveParseCache('v1', entries)
+    const loaded = storage.loadParseCache()
+    expect(loaded?.versionKey).toBe('v1')
+    expect(loaded?.entries).toEqual(entries)
+  })
+
+  it('parse_cache：保存新 versionKey 后整份替换，只剩最新一份（旧行被清理）', () => {
+    storage.saveParseCache('v1', { 'a.ts': { contentHash: 'h1', parsed: { functions: [], imports: [] } } })
+    storage.saveParseCache('v2', { 'b.ts': { contentHash: 'h2', parsed: { functions: [], imports: [] } } })
+    const loaded = storage.loadParseCache()
+    expect(loaded?.versionKey).toBe('v2')
+    expect(Object.keys(loaded?.entries ?? {})).toEqual(['b.ts'])
+  })
+
+  it('parse_cache：同 versionKey 重复保存为覆盖（UPSERT 不产生重复份）', () => {
+    storage.saveParseCache('v1', { 'a.ts': { contentHash: 'h1', parsed: { functions: [], imports: [] } } })
+    storage.saveParseCache('v1', { 'a.ts': { contentHash: 'h2', parsed: { functions: [], imports: [] } } })
+    const loaded = storage.loadParseCache()
+    expect(loaded?.versionKey).toBe('v1')
+    expect(loaded?.entries['a.ts']?.contentHash).toBe('h2')
+  })
+
+  it('parse_cache：属可再生数据，写前不产生备份（区别于用户数据惯例）', () => {
+    storage.saveParseCache('v1', { 'a.ts': { contentHash: 'h', parsed: { functions: [], imports: [] } } })
+    expect(existsSync(join(dir, 'backups'))).toBe(false)
+  })
 }
 
 describe('JsonStorage（侧车 JSON 适配器）', () => {
@@ -751,6 +784,120 @@ describe('存储层迁移与向后兼容', () => {
     const updated = storage.updateInsightSnapshotMeta('legacy-s1', { label: '命名' })
     expect(updated?.label).toBe('命名')
     expect(updated?.note).toBeUndefined()
+    storage.close()
+  })
+})
+
+describe('parse_cache 损坏容错与旧库兼容', () => {
+  it('SqliteStorage：payload 损坏 loadParseCache 返回 null 不抛，且可被下次保存整份替换', () => {
+    const dir = freshDir()
+    const dbPath = join(dir, 'autodoc.db')
+    const boot = new SqliteStorage(dbPath)
+    boot.init()
+    boot.close()
+
+    // 手动写坏缓存：payloadJson 非法 JSON
+    const db = new DatabaseSync(dbPath)
+    db.prepare('INSERT INTO parse_cache (versionKey, payloadJson) VALUES (?, ?)').run('v1', '{broken json')
+    db.close()
+
+    const reopened = new SqliteStorage(dbPath)
+    reopened.init()
+    expect(reopened.loadParseCache()).toBeNull()
+
+    // 损坏后仍可正常保存；整份替换顺带清掉损坏旧行（表内只剩一行）
+    reopened.saveParseCache('v2', { 'a.ts': { contentHash: 'h', parsed: { functions: [], imports: [] } } })
+    expect(reopened.loadParseCache()?.versionKey).toBe('v2')
+    reopened.close()
+
+    const raw = new DatabaseSync(dbPath)
+    const row = raw.prepare('SELECT COUNT(*) AS n FROM parse_cache').get() as { n: number | bigint }
+    expect(Number(row.n)).toBe(1)
+    raw.close()
+  })
+
+  it('SqliteStorage：旧库无 parse_cache 表，init 幂等建表且读取缺省 null', () => {
+    const dir = freshDir()
+    const dbPath = join(dir, 'autodoc.db')
+    // 手工构造「旧 schema」库：无 parse_cache 表
+    const old = new DatabaseSync(dbPath)
+    old.exec(`
+      CREATE TABLE annotations (
+        id TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_id TEXT NOT NULL,
+        author TEXT NOT NULL, content TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE changes (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+        target_id TEXT NOT NULL, date TEXT NOT NULL, type TEXT NOT NULL, description TEXT NOT NULL
+      );
+      CREATE TABLE snapshots (file_id TEXT PRIMARY KEY, json TEXT NOT NULL);
+    `)
+    old.close()
+
+    const upgraded = new SqliteStorage(dbPath)
+    expect(() => upgraded.init()).not.toThrow()
+    expect(upgraded.loadParseCache()).toBeNull()
+    // 建表后可正常写入读取
+    upgraded.saveParseCache('v1', { 'a.ts': { contentHash: 'h', parsed: { functions: [], imports: [] } } })
+    expect(upgraded.loadParseCache()?.versionKey).toBe('v1')
+    upgraded.close()
+  })
+
+  it('JsonStorage：侧车 parseCache 字段损坏/形状非法读出 null 不抛，可被下次保存覆盖', () => {
+    const dir = freshDir()
+    const dataPath = join(dir, 'autodoc.json')
+    // entries 非对象（手改/损坏）
+    writeFileSync(
+      dataPath,
+      JSON.stringify({
+        version: 1,
+        annotations: [],
+        changes: [],
+        snapshots: {},
+        parseCache: { versionKey: 'v1', entries: 'broken' }
+      }),
+      'utf-8'
+    )
+    const storage = new JsonStorage(dataPath)
+    storage.init()
+    expect(storage.loadParseCache()).toBeNull()
+
+    // 损坏后仍可正常保存覆盖，且不触发备份（可再生数据）
+    storage.saveParseCache('v2', { 'a.ts': { contentHash: 'h', parsed: { functions: [], imports: [] } } })
+    expect(storage.loadParseCache()?.versionKey).toBe('v2')
+    expect(existsSync(join(dir, 'backups'))).toBe(false)
+    storage.close()
+
+    // 缺 versionKey 的形状非法数据同样读出 null
+    writeFileSync(
+      dataPath,
+      JSON.stringify({
+        version: 1,
+        annotations: [],
+        changes: [],
+        snapshots: {},
+        parseCache: { entries: {} }
+      }),
+      'utf-8'
+    )
+    const reopened = new JsonStorage(dataPath)
+    reopened.init()
+    expect(reopened.loadParseCache()).toBeNull()
+    reopened.close()
+  })
+
+  it('JsonStorage：旧侧车数据无 parseCache 字段读出 null（向后兼容）', () => {
+    const dir = freshDir()
+    const dataPath = join(dir, 'autodoc.json')
+    writeFileSync(
+      dataPath,
+      JSON.stringify({ version: 1, annotations: [], changes: [], snapshots: {} }),
+      'utf-8'
+    )
+    const storage = new JsonStorage(dataPath)
+    storage.init()
+    expect(storage.loadParseCache()).toBeNull()
     storage.close()
   })
 })

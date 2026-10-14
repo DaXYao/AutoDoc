@@ -171,6 +171,20 @@ export interface FileSummary {
   counts: Record<FunctionCategory, number>
 }
 
+/* ------------------------- 增量解析（I1） ------------------------- */
+
+/** generateDocs 阶段一「内容哈希缓存」的增量解析统计 */
+export interface IncrementalParseStats {
+  /** 缓存命中（内容哈希一致且形状校验通过）、复用上次解析产物的文件数 */
+  reused: number
+  /** 缓存中存在但内容已变/形状校验失败，本次重新解析的文件数 */
+  reparsed: number
+  /** 缓存中不存在（含版本键不符视作空缓存）、本次全新解析的文件数 */
+  added: number
+  /** 缓存中存在但本次扫描不到（已删除/移出扫描范围）的文件数 */
+  removed: number
+}
+
 /** 搜索索引条目（前端 Fuse.js 使用） */
 export interface FunctionIndexEntry {
   functionId: string
