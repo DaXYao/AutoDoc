@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import type { FileDocView, FunctionCategory, FunctionDocView } from '@autodoc/shared-types'
 import { getFileView, invalidateFileView, appState } from '../store/app'
-import { expandDefault, isExpanded, toggle } from '../store/expand'
+import { expand, expandDefault, isExpanded, toggle } from '../store/expand'
+import { jumpHighlightId } from '../store/jump'
 import { editorLink } from '../utils/format'
 import AnnotationPanel from '../components/AnnotationPanel.vue'
 import CategorySection from '../components/CategorySection.vue'
@@ -14,6 +15,42 @@ const fileId = computed(() => decodeURIComponent(route.params.fileId as string))
 const view = ref<FileDocView | null>(null)
 const error = ref<string | null>(null)
 
+/**
+ * 跳转定位（?fn=<fnId>）：目标函数所在三分类区块默认折叠时 `#fn-` 锚点根本未渲染，
+ * 直接滚动会落空。故先展开对应 section（已展开不动），等 DOM 渲染 + 一帧布局完成后再
+ * 滚动到卡片，并短暂高亮闪烁确认落点（不强制展开卡片内部折叠区）。
+ */
+const HIGHLIGHT_MS = 1600
+let highlightTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearHighlight(): void {
+  if (highlightTimer !== null) {
+    clearTimeout(highlightTimer)
+    highlightTimer = null
+  }
+  jumpHighlightId.value = null
+}
+
+async function locateFn(fnId: string): Promise<void> {
+  const fn = view.value?.functions.find((f) => f.id === fnId)
+  if (!fn) return
+  expand(`section:${fileId.value}:${fn.category}`)
+  // v-if 展开需要一次渲染周期；再等一帧确保布局稳定后 scrollIntoView 才有正确目标位置
+  await nextTick()
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  const el = document.getElementById(`fn-${fnId}`)
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  clearHighlight()
+  jumpHighlightId.value = fnId
+  highlightTimer = setTimeout(() => {
+    jumpHighlightId.value = null
+    highlightTimer = null
+  }, HIGHLIGHT_MS)
+}
+
+onBeforeUnmount(clearHighlight)
+
 async function load(force = false): Promise<void> {
   if (force) {
     invalidateFileView(fileId.value)
@@ -23,18 +60,24 @@ async function load(force = false): Promise<void> {
   error.value = null
   try {
     view.value = await getFileView(fileId.value)
-    // 搜索跳转定位：滚动到目标函数卡片
+    // force=批注增删改后的数据刷新，不重新定位/高亮（避免用户操作时页面跳动）
     const target = route.query.fn
-    if (typeof target === 'string') {
-      await nextTick()
-      document.getElementById(`fn-${target}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
+    if (!force && typeof target === 'string') await locateFn(target)
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   }
 }
 
 watch(fileId, () => void load(), { immediate: true })
+
+// 同一文件内重复/切换跳转也要生效：跳转源在 query 附带一次性时间戳 _t（见 utils/nav.ts），
+// 同 fn 重复跳转时 fn 值不变，须把 _t 一并纳入 watch 源才能触发；_t 仅作触发用，不参与定位逻辑
+watch(
+  () => [route.query.fn, route.query._t] as const,
+  ([target]) => {
+    if (typeof target === 'string' && view.value) void locateFn(target)
+  }
+)
 
 /** 批注增删改后强制重拉当前文件视图 */
 function handleChanged(): void {

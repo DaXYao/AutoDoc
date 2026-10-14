@@ -44,7 +44,8 @@ interface PartitionEnvelope {
 interface CategoryEnvelope {
   [fnId: string]: { category: FunctionCategory; reason: string }
 }
-interface NarrativeEnvelope {
+/** 链路叙事信封（缓存单元）：chainId → 叙事 + 路径内各函数职责 */
+export interface NarrativeEnvelope {
   [chainKey: string]: { narrative?: string; stepRoles?: Record<string, string> }
 }
 
@@ -91,9 +92,21 @@ export interface ChunkCacheContext {
 }
 
 const MAX_AI_MODULES = 6
-const MAX_AI_CHAINS_PER_MODULE = 4
 const MAX_AI_CORES = 25
 const AI_MAX_TOKENS = 4000
+/**
+ * F3：链路叙事取消每模块链数上限后，模块内全部链路参与（图级 MAX_CHAINS=200 仍是总量天花板）。
+ * 输出为每链路一句叙事 + 路径内每函数一句职责，体量随链数线性增长，故按较小批切分请求；
+ * maxTokens 与其它结构化 pass 对齐(8000)，单批输出远低于上限不截断（截断仍判不全 + 重试）。
+ */
+const NARRATIVES_CHAIN_BATCH = 8
+const NARRATIVES_MAX_TOKENS = 8000
+/**
+ * narratives 缓存槽位名。F3 把「每模块至多 4 链」升级为全量叙事后，旧槽位下的信封是旧口径产物，
+ * 图指纹未变的项目会永远命中不完整旧结果、无法自动享受 F3 成果；改名 v2 使其整体失效，
+ * 下次刷新即重跑全量叙事（无需手动 force）。旧键成孤儿（可再生数据、量小无害，随缓存文件淘汰）。
+ */
+const NARRATIVES_CACHE_KEY = 'narratives:v2'
 /** 划分输出含全部成员索引，体量最大，单独给更高上限防截断 */
 const PARTITION_MAX_TOKENS = 8000
 /**
@@ -1063,52 +1076,88 @@ async function aiCoreRoles(graph: ProjectGraph): Promise<Record<string, string>>
   return parsed
 }
 
-/** 逐模块链路叙事 + 步骤上下文职责 */
-async function aiNarratives(graph: ProjectGraph): Promise<NarrativeEnvelope> {
+/**
+ * 逐模块链路叙事 + 步骤上下文职责。
+ * F3：取消每模块链数上限（原 slice(0,4) 导致大量链路「叙事/角色未生成」），模块内全部链路参与，
+ * 按 NARRATIVES_CHAIN_BATCH 分批请求；沿用「截断判不全 + 重试（AI_PARSE_RETRIES）」语义，
+ * 单批重试耗尽仅降级该批，不影响其余批合并。
+ * 批内成功判定含覆盖率：extractJson 非 null 但对本批 chainId 覆盖为 0（模型答非所问）同样视为失败重试；
+ * 部分覆盖则如实合并并告警输出覆盖率，便于排查「个别链路未生成」。
+ * 边界：有链模块数超过 MAX_AI_MODULES 时只取链数最多的前 N 个模块，其余不参与叙事（打 warn 明示）。
+ */
+export async function aiNarratives(graph: ProjectGraph): Promise<NarrativeEnvelope> {
   const out: NarrativeEnvelope = {}
-  const modulesWithChains = graph.modules
+  const chainModules = graph.modules
     .filter((m) => m.chainIds.length > 0)
     .sort((a, b) => b.chainIds.length - a.chainIds.length)
-    .slice(0, MAX_AI_MODULES)
+  if (chainModules.length > MAX_AI_MODULES) {
+    console.warn(
+      `[autodoc] ${chainModules.length} 个有链模块中 ${chainModules.length - MAX_AI_MODULES} 个未参与叙事（上限 ${MAX_AI_MODULES}）`
+    )
+  }
+  const modulesWithChains = chainModules.slice(0, MAX_AI_MODULES)
   for (const mod of modulesWithChains) {
-    const chainIds = mod.chainIds.slice(0, MAX_AI_CHAINS_PER_MODULE)
-    const blocks: string[] = []
-    const fnInfo = new Map<string, string>()
-    for (const cid of chainIds) {
-      const chain = graph.chains.find((c) => c.id === cid)
-      if (!chain) continue
-      const pathLabels = chain.path
-        .map((id) => {
-          const fn = graph.nodes.get(id)
-          if (!fn) return id
-          if (!fnInfo.has(id)) fnInfo.set(id, `${id}=${fnLabel(fn)}(${fn.purpose.slice(0, 40)})`)
-          return fnLabel(fn)
-        })
-        .join(' -> ')
-      blocks.push(`链路${cid}: ${pathLabels}`)
-    }
-    if (blocks.length === 0) continue
-    const user =
-      `模块「${mod.name}」的实现链路(入口→…→叶子)：\n${blocks.join('\n')}\n` +
-      `函数信息：\n${[...fnInfo.values()].join('\n')}\n` +
-      `输出 JSON: {"<链路id>":{"narrative":"这条链路完成了什么(一句话)","stepRoles":{"<函数id>":"该函数在本链路里的职责(一句话)"}}}`
-    try {
-      const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
-        maxTokens: AI_MAX_TOKENS
-      })
-      if (reply.truncated) {
-        console.warn(
-          `[autodoc] AI 链路叙事(模块 ${mod.name}) 输出被截断(finish_reason=length)，视为不完整，已忽略`
-        )
-        continue
+    const batches = chunkArray(mod.chainIds, NARRATIVES_CHAIN_BATCH)
+    for (let b = 0; b < batches.length; b++) {
+      const blocks: string[] = []
+      // 实际拼进 prompt 的链路 id（graph.chains 里不存在的脏 id 已被跳过），作为覆盖率分母
+      const batchIds: string[] = []
+      const fnInfo = new Map<string, string>()
+      for (const cid of batches[b]) {
+        const chain = graph.chains.find((c) => c.id === cid)
+        if (!chain) continue
+        batchIds.push(cid)
+        const pathLabels = chain.path
+          .map((id) => {
+            const fn = graph.nodes.get(id)
+            if (!fn) return id
+            if (!fnInfo.has(id)) fnInfo.set(id, `${id}=${fnLabel(fn)}(${fn.purpose.slice(0, 40)})`)
+            return fnLabel(fn)
+          })
+          .join(' -> ')
+        blocks.push(`链路${cid}: ${pathLabels}`)
       }
-      const parsed = extractJson<NarrativeEnvelope>(reply.content)
-      if (parsed) Object.assign(out, parsed)
-      else console.warn(`[autodoc] AI 链路叙事(模块 ${mod.name}) 返回无法解析，已忽略`)
-    } catch (e) {
-      console.warn(
-        `[autodoc] AI 链路叙事(模块 ${mod.name}) 失败：${e instanceof Error ? e.message : String(e)}`
-      )
+      if (blocks.length === 0) continue
+      const scope = batches.length > 1 ? `（第 ${b + 1}/${batches.length} 批）` : ''
+      const user =
+        `模块「${mod.name}」的实现链路${scope}(入口→…→叶子)：\n${blocks.join('\n')}\n` +
+        `函数信息：\n${[...fnInfo.values()].join('\n')}\n` +
+        `输出 JSON: {"<链路id>":{"narrative":"这条链路完成了什么(一句话)","stepRoles":{"<函数id>":"该函数在本链路里的职责(一句话)"}}}`
+      let done = false
+      for (let attempt = 1; attempt <= AI_PARSE_RETRIES && !done; attempt++) {
+        try {
+          const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
+            maxTokens: NARRATIVES_MAX_TOKENS,
+            temperature: AI_STRUCTURE_TEMPERATURE
+          })
+          if (reply.truncated) {
+            console.warn(
+              `[autodoc] AI 链路叙事(模块 ${mod.name})第 ${b + 1}/${batches.length} 批第 ${attempt} 次输出被截断(finish_reason=length)，视为不完整${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+            )
+            continue
+          }
+          const parsed = extractJson<NarrativeEnvelope>(reply.content)
+          // extractJson 非 null 不即成功：对本批链路覆盖为 0 时视为失败（否则答非所问的 JSON 会被当成果固化进缓存）
+          const covered = parsed ? batchIds.filter((cid) => parsed[cid] !== undefined).length : 0
+          if (!parsed || covered === 0) {
+            console.warn(
+              `[autodoc] AI 链路叙事(模块 ${mod.name})第 ${b + 1}/${batches.length} 批第 ${attempt} 次${parsed ? `返回对本批链路零覆盖(覆盖 0/${batchIds.length})` : '返回无法解析'}${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+            )
+            continue
+          }
+          Object.assign(out, parsed)
+          if (covered < batchIds.length) {
+            console.warn(
+              `[autodoc] AI 链路叙事(模块 ${mod.name})第 ${b + 1}/${batches.length} 批部分缺失（覆盖 ${covered}/${batchIds.length}），缺失链路将显示「叙事未生成」`
+            )
+          }
+          done = true
+        } catch (e) {
+          console.warn(
+            `[autodoc] AI 链路叙事(模块 ${mod.name})第 ${b + 1}/${batches.length} 批第 ${attempt} 次失败${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}：${e instanceof Error ? e.message : String(e)}`
+          )
+        }
+      }
     }
   }
   return out
@@ -1436,7 +1485,7 @@ export function loadInsight(service: DocService, feedback = ''): InsightBundle {
     applyRoles(insight, roles)
     touched = true
   }
-  const narr = cache.get<NarrativeEnvelope>(fp, 'narratives')
+  const narr = cache.get<NarrativeEnvelope>(fp, NARRATIVES_CACHE_KEY)
   if (narr) {
     applyNarratives(insight, narr)
     touched = true
@@ -1612,11 +1661,11 @@ export async function refreshInsightAI(
 
   // 5) 链路叙事
   const hadChainModules = graph.modules.some((m) => m.chainIds.length > 0)
-  let narr = opts.force ? undefined : cache.get<NarrativeEnvelope>(fp, 'narratives')
+  let narr = opts.force ? undefined : cache.get<NarrativeEnvelope>(fp, NARRATIVES_CACHE_KEY)
   if (!narr) {
     try {
       narr = await aiNarratives(graph)
-      if (Object.keys(narr).length > 0) cache.set(fp, 'narratives', narr)
+      if (Object.keys(narr).length > 0) cache.set(fp, NARRATIVES_CACHE_KEY, narr)
       status.narratives = Object.keys(narr).length > 0 ? 'ok' : hadChainModules ? 'failed' : 'skipped'
     } catch (e) {
       status.narratives = 'failed'

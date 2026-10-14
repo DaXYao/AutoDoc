@@ -2,6 +2,22 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-15 · F-初审修复：叙事缓存槽位 v2 / 跳转 _t 时间戳 / 覆盖率语义 / dogfood 配置去覆盖 · web+server+根配置
+
+- **内容**：🔴1 删除根目录 `autodoc.config.json` 的 `ui.defaultExpand.annotations=true` 显式覆盖——该文件是本工具分析自身（dogfood）用的 fixture 配置，覆盖会让 F2「批注默认收起」的新默认在用户实机（分析 AutoDoc 自身）永远不生效；删除后回落 core `DEFAULT_EXPAND.annotations=false`，不影响其它项目。🟡2 narratives 缓存槽位 `'narratives'` 改名 `'narratives:v2'`（常量 `NARRATIVES_CACHE_KEY`）：旧槽位信封是 F3 前「每模块至多 4 链」口径产物，图指纹未变的项目会永远命中不完整旧结果；改名使其整体失效，下次刷新即重跑全量叙事（无需手动 force），旧键成孤儿（可再生数据、量小无害）。🟡3 同文件同 fn 重复跳转不生效：新纯函数 `utils/nav.ts#fnJumpQuery(fnId)` 统一构造 `{ fn, _t: String(Date.now()) }`，六处跳转源（SearchBar/FunctionCard/FlowTree/CallNode/ModuleDetail/InsightHome）改用；FilePage 的 watch 源改为 `[query.fn, query._t]`——同 fn 重复跳转 fn 值不变，须纳入 _t 才能触发；_t 仅作触发用不参与定位逻辑。🟡4 narratives 批内成功判定补覆盖率：`extractJson` 非 null 不再即 done，parsed 对本批 chainId 覆盖为 0（答非所问）视为失败重试；部分覆盖如实合并并 warn「覆盖 N/M」，重试/降级日志同步输出覆盖率，便于排查个别链路未生成。🟡1 有链模块数超过 `MAX_AI_MODULES`(6) 时 console.warn「N 个有链模块中 M 个未参与叙事（上限 6）」，边界显式可见（该上限为 F3 保留的图级天花板之一）。🟢5 `expand(key)` 注释补持久化副作用：跳转定位会经 deep watch 永久展开该区块（与用户展开态持久化约定一致）。🟢7 narratives 的 deepseekChat 调用补 `temperature: AI_STRUCTURE_TEMPERATURE`(0.1)，与其它结构化 pass 对齐。
+- **影响范围**：根 autodoc.config.json（删一行覆盖）、server（insight.ts narratives pass + 常量）、web（utils/nav.ts 新、FilePage.vue watch、六处跳转源、store/expand.ts 注释）；不动 I1/I2/I3 增量语义（narratives 仍是图指纹 fp 门控缓存，仅槽位改名）、不改 README、不新增依赖。
+- **动机**：F 三项修复初审发现四处必修改动点与三处顺带项，核心是「新默认/新口径被旧配置、旧缓存、旧 watch 语义挡住」。
+- **测试**：server narratives.test.ts +4（零覆盖视为失败重试成功不固化、零覆盖重试耗尽降级不产出、部分覆盖如实合并且 warn「覆盖 1/3」、7 模块超上限 warn 且仅 6 模块发请求），既有用例补 temperature=0.1 断言；web 新增 test/nav.test.ts 2 例（fn+_t 构造、同 fn 连续两次 query 不同）。`pnpm lint` 与 `pnpm test` 全绿（core 159 / server 188 / web 81）。
+- **关联 commit**：待提交。
+
+## 2026-10-15 · F：三项修复（跳转定位 / 批注默认收起 / 叙事全量生成） · web+core+server
+
+- **内容**：F1 修复 `#/file/<fileId>?fn=<fnId>` 跳转常定位不到函数卡片：根因是目标函数所在三分类区块默认折叠、`#fn-` 锚点未渲染，原实现只 `scrollIntoView` 落空。FilePage 改为「先展开再滚动后闪烁」：按目标函数 category 把 `section:<fileId>:<category>` 展开键置 true（expand store 新增幂等 `expand(key)`，已展开不动）→ `nextTick` + 再等一帧（v-if 渲染与布局稳定后滚动位置才正确）→ `scrollIntoView({behavior:'smooth',block:'start'})` → 卡片加 `.fn-jump-highlight`（全局 style.css 的 box-shadow keyframes 闪烁）1.6s 后移除，定时器在 `onBeforeUnmount` 清理；`watch route.query.fn` 使同页重复/切换跳转也生效，批注增删改触发的 force 重拉**不**重新定位（避免用户操作时页面跳动）；不强制展开卡片内部折叠区。F2 `DEFAULT_EXPAND.annotations` true→false（批注区含输入框，默认展开噪声大；用户 localStorage 已有展开态仍优先，schema 自动派生无需改）。F3 链路叙事取消每模块上限：删除 `MAX_AI_CHAINS_PER_MODULE=4`，模块内全部链路参与（图级 MAX_CHAINS=200 与 MAX_AI_MODULES=6 不动）；防截断配套：按 `NARRATIVES_CHAIN_BATCH=8` 分批、maxTokens 从 4000 提到 `NARRATIVES_MAX_TOKENS=8000`（与其它结构化 pass 对齐），并把原「截断/畸形即整模块忽略且无重试」升级为既有范式「截断判不全 + AI_PARSE_RETRIES 重试，耗尽仅降级该批、其余批照常合并」；`aiNarratives`/`NarrativeEnvelope` 导出供单测。
+- **影响范围**：web（FilePage.vue、store/expand.ts、style.css）、core（config.ts 一行默认值）、server（insight.ts narratives pass + 常量）；不动 I1/I2/I3 增量语义（narratives 维持图指纹 fp 门控缓存，非 chunk pass）、不改 README、不新增依赖。
+- **动机**：用户实机反馈跳转找不到落点、批注区默认太吵、大量链路「叙事/角色未生成」。
+- **测试**：server 新增 narratives.test.ts 3 例（12 链>旧 cap 全部拿到叙事+按 8 分批 2 次请求+maxTokens=8000、单批截断重试成功不丢、重试耗尽仅降级该批其余合并）；既有断言无旧 cap 口径用例需改（flow.test 的 narratives 仅断言状态枚举）。`pnpm lint` 与 `pnpm test` 全绿（core 159 / server 184 / web 79）。
+- **关联 commit**：待提交。
+
 ## 2026-10-15 · I3：增量可观测 surfaced 到 API 与前端 · server+web+shared-types
 
 - **内容**：把 I1（解析层 incremental）与 I2（AI chunk 统计）从「只进日志/返回值」surface 到 API 与网页。shared-types：`AiChunkPass`/`AiChunkStats` 从 server/insight.ts 上移为共享类型（原处 re-export 兼容既有导入），新增 `InsightResponse extends ProjectInsight { parseStats?, aiChunkStats? }`。server：`DocService` 增 `lastParseStats?`/`lastAiChunkStats?`（内存态最近一次值，重启即失）；createDocService 首次生成与 regenerate 均捕获 generateDocs 的 `incremental` 存入；refreshInsightAI 完成时把 `aiChunkStats` 写入 service；`POST /api/refresh` 响应增 `incremental` 字段（保留 ok/generatedAt）；`GET /api/insight`、`POST /api/insight/ai|partition` 统一经 `toInsightResponse` 附带 `parseStats`（service 最近值）与 `aiChunkStats`（POST 优先本次新值，GET/降级路径回退 service 最近值，未跑过为 undefined）。既有 I1/I2 日志行保留、缓存语义不动。web：新纯函数 `utils/incremental.ts#formatIncrementalSummary(parseStats?, aiChunkStats?)` → 如「解析 复用38/重跑0 · AI chunk 复用9/重跑1」（added/removed 非零才追加括号说明；全缺省返回 null）；api.ts 的 fetchInsight/requestInsightAI/requestInsightPartition 返回类型改 `InsightResponse`、refreshDocs 返回 `IncrementalParseStats | undefined`；store 的 `appState.insight` 改 InsightResponse、regenerateActive 透传统计；App.vue「重新生成」成功后弹 message（App 自身渲染 n-message-provider 注入不到 useMessage，用 createDiscreteApi），摘要存在时追加；InsightHome AI 段状态面板下加灰字「最近增量：…」(v-if 有值)。

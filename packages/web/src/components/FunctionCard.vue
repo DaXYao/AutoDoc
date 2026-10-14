@@ -5,12 +5,14 @@ import { useMessage } from 'naive-ui'
 import type { Annotation, CallEdge, FunctionDocView, InsightChain } from '@autodoc/shared-types'
 import { appState, findFunctionEntry } from '../store/app'
 import { expandDefault, isExpanded, toggle } from '../store/expand'
+import { jumpHighlightId } from '../store/jump'
 import { deleteAnnotation } from '../data/api'
 import { CHANGE_LABELS, CATEGORY_LABELS, OTHER_KIND_COLORS, OTHER_KIND_LABELS, ROLE_COLORS, ROLE_LABELS, editorLink, formatDate } from '../utils/format'
 import { renderMarkdown } from '../utils/markdown'
 import { splitCallChain } from '../utils/callChain'
 import { groupInternalSteps } from '../utils/internalSteps'
 import { compactPath, roleOf, selectTopChains } from '../utils/chains'
+import { fnJumpQuery } from '../utils/nav'
 import AnnotationPanel from './AnnotationPanel.vue'
 import CallNode from './CallNode.vue'
 
@@ -99,7 +101,7 @@ function fnName(id: string): string {
 function goFunction(id: string): void {
   const entry = findFunctionEntry(id)
   if (!entry) return
-  void router.push({ name: 'file', params: { fileId: entry.fileId }, query: { fn: id } })
+  void router.push({ name: 'file', params: { fileId: entry.fileId }, query: fnJumpQuery(id) })
 }
 
 function chainKey(edge: CallEdge, i: number): string {
@@ -143,7 +145,11 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
 </script>
 
 <template>
-  <article :id="`fn-${fn.id}`" class="rounded-lg border border-gray-200 bg-white scroll-mt-16">
+  <article
+    :id="`fn-${fn.id}`"
+    class="rounded-lg border border-gray-200 bg-white scroll-mt-16"
+    :class="{ 'fn-jump-highlight': jumpHighlightId === fn.id }"
+  >
     <!-- 卡片头：签名 + 用途说明 -->
     <header class="px-4 py-3">
       <div class="flex flex-wrap items-center gap-2">

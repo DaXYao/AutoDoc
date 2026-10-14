@@ -29,3 +29,20 @@
   padding-left: 1.4em;
   margin: 0.35em 0;
 }
+
+/* 跳转定位落点确认：函数卡片被滚动到位后短暂闪烁一圈光晕（class 由 FilePage 定时移除） */
+@keyframes fn-jump-flash {
+  0% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+  }
+  15%,
+  55% {
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+  }
+}
+.fn-jump-highlight {
+  animation: fn-jump-flash 1.6s ease-out;
+}

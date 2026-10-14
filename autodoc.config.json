@@ -35,8 +35,7 @@
   "ui": {
     "defaultExpand": {
       "business": true,
-      "implementation": false,
-      "annotations": true
+      "implementation": false
     }
   },
   "storage": {

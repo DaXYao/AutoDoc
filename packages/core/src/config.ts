@@ -30,7 +30,8 @@ export const DEFAULT_EXPAND: Required<DefaultExpandConfig> = {
   callGraph: false,
   codeBlocks: false,
   changes: false,
-  annotations: true,
+  // 批注区含输入框与操作按钮，默认展开噪声大 → 默认收起（用户 localStorage 已有展开态仍优先）
+  annotations: false,
   callChainNoise: false,
   internalSteps: true,
   internalStepCode: false,
