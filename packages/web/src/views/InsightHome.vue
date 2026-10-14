@@ -5,6 +5,7 @@ import { useMessage } from 'naive-ui'
 import { appState, ensureInsightAI, findFunctionEntry, regenerateInsightAI, repartitionInsight } from '../store/app'
 import { AI_PASS_LABELS, AI_PASS_ORDER, AI_STATUS_META } from '../utils/format'
 import { formatIncrementalSummary } from '../utils/incremental'
+import { fnJumpQuery } from '../utils/nav'
 import FlowTree from '../components/FlowTree.vue'
 import InsightHistory from '../components/InsightHistory.vue'
 
@@ -111,7 +112,7 @@ function fnName(id: string): string {
 function goFunction(id: string): void {
   const entry = findFunctionEntry(id)
   if (!entry) return
-  void router.push({ name: 'file', params: { fileId: entry.fileId }, query: { fn: id } })
+  void router.push({ name: 'file', params: { fileId: entry.fileId }, query: fnJumpQuery(id) })
 }
 
 function goModule(id: string): void {

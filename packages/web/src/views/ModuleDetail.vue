@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { appState, findFunctionEntry } from '../store/app'
+import { fnJumpQuery } from '../utils/nav'
 
 const route = useRoute()
 const router = useRouter()
@@ -26,7 +27,7 @@ function fnInsight(id: string) {
 function goFunction(id: string): void {
   const entry = findFunctionEntry(id)
   if (!entry) return
-  void router.push({ name: 'file', params: { fileId: entry.fileId }, query: { fn: id } })
+  void router.push({ name: 'file', params: { fileId: entry.fileId }, query: fnJumpQuery(id) })
 }
 
 function goFile(fileId: string): void {

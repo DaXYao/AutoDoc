@@ -9,6 +9,7 @@ import { CATEGORY_LABELS, ROLE_COLORS, ROLE_LABELS, formatDate } from '../utils/
 import { formatAskMeta } from '../utils/ask'
 import { externalSymbolInfo } from '../utils/externals'
 import { renderMarkdown } from '../utils/markdown'
+import { fnJumpQuery } from '../utils/nav'
 
 const props = defineProps<{
   edge: CallEdge
@@ -46,7 +47,7 @@ function goToCallee(edge: CallEdge): void {
   if (!edge.calleeId) return
   const entry = findFunctionEntry(edge.calleeId)
   if (!entry) return
-  void router.push({ name: 'file', params: { fileId: entry.fileId }, query: { fn: edge.calleeId! } })
+  void router.push({ name: 'file', params: { fileId: entry.fileId }, query: fnJumpQuery(edge.calleeId!) })
 }
 
 async function handleAsk(): Promise<void> {

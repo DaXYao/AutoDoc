@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router'
 import type { FunctionIndexEntry } from '@autodoc/shared-types'
 import { appState } from '../store/app'
 import { CATEGORY_LABELS } from '../utils/format'
+import { fnJumpQuery } from '../utils/nav'
 
 const router = useRouter()
 const keyword = ref('')
@@ -45,7 +46,7 @@ watch(appState, () => {
 
 function goTo(entry: FunctionIndexEntry): void {
   keyword.value = ''
-  void router.push({ name: 'file', params: { fileId: entry.fileId }, query: { fn: entry.functionId } })
+  void router.push({ name: 'file', params: { fileId: entry.fileId }, query: fnJumpQuery(entry.functionId) })
 }
 
 function handleSelect(value: string): void {

@@ -10,6 +10,7 @@ import { FLOW_KIND_COLORS, FLOW_KIND_LABELS, formatDate } from '../utils/format'
 import { formatAskMeta } from '../utils/ask'
 import { renderMarkdown } from '../utils/markdown'
 import { filterFollowups, splitFlowChildren } from '../utils/flow'
+import { fnJumpQuery } from '../utils/nav'
 
 /**
  * 递归脉络架构树节点（U2 渐进披露）：把扁平的 modules/chains 组织成可下钻的业务主线。
@@ -256,7 +257,7 @@ async function handleDeleteFollowup(followup: Annotation): Promise<void> {
 function goFunction(): void {
   const e = entry.value
   if (!e) return
-  void router.push({ name: 'file', params: { fileId: e.fileId }, query: { fn: fnId.value } })
+  void router.push({ name: 'file', params: { fileId: e.fileId }, query: fnJumpQuery(fnId.value) })
 }
 
 function goModule(id: string): void {
