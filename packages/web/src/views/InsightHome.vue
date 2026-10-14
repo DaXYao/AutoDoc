@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { appState, ensureInsightAI, findFunctionEntry, regenerateInsightAI, repartitionInsight } from '../store/app'
 import { AI_PASS_LABELS, AI_PASS_ORDER, AI_STATUS_META } from '../utils/format'
+import { formatIncrementalSummary } from '../utils/incremental'
 import FlowTree from '../components/FlowTree.vue'
 import InsightHistory from '../components/InsightHistory.vue'
 
@@ -82,6 +83,15 @@ const aiPasses = computed(() => {
     status: st[key]
   }))
 })
+
+/**
+ * I3：最近一次增量统计摘要（解析层 + AI chunk）；全缺省为 null，灰字行隐藏。
+ * 统计为服务端最近一次运行口径：历史快照回滚态下响应仍附最近统计，
+ * 与当前查看的快照内容无关，文案前缀（formatIncrementalSummary 内）已点明。
+ */
+const incrementalSummary = computed(() =>
+  formatIncrementalSummary(insight.value?.parseStats, insight.value?.aiChunkStats)
+)
 
 /** 全项目核心函数（按 coreScore 降序） */
 const coreFunctions = computed(() => {
@@ -191,6 +201,9 @@ function goModule(id: string): void {
             {{ p.status ? AI_STATUS_META[p.status].label : '未执行' }}
           </n-tag>
         </div>
+        <p v-if="incrementalSummary" class="mt-1.5 text-xs text-gray-400">
+          {{ incrementalSummary }}
+        </p>
       </section>
 
       <!-- 模块划分反馈（AI 主导划分 + 用户建议迭代） -->

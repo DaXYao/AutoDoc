@@ -2,9 +2,9 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { AnnotationKind, AnnotationTargetType, AskFunctionRequest, AskRequest, InsightHistoryResponse, NewProjectInput, ProjectsResponse } from '@autodoc/shared-types'
+import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, NewProjectInput, ProjectInsight, ProjectsResponse } from '@autodoc/shared-types'
 import { resolveShowRecent } from '@autodoc/core'
-import { regenerate } from './context.js'
+import { regenerate, type DocService } from './context.js'
 import { pickFolder } from './pickFolder.js'
 import type { ProjectManager } from './projects.js'
 import { loadInsight, refreshInsightAI } from './insight.js'
@@ -22,6 +22,23 @@ export interface BuildAppOptions {
 }
 
 const TARGET_TYPES: AnnotationTargetType[] = ['function', 'file', 'module', 'call']
+
+/**
+ * I3：把洞察载荷与「最近一次增量统计」拼成 InsightResponse。
+ * fresh 用于 POST 生成为主的路由（本次刚产出的 aiChunkStats 优先于 service 里的旧值）；
+ * GET 免网络路径不传 fresh，aiChunkStats 取 service 最近一次值（未跑过则 undefined）。
+ */
+function toInsightResponse(
+  service: DocService,
+  insight: ProjectInsight,
+  freshAiChunkStats?: Record<AiChunkPass, AiChunkStats>
+): InsightResponse {
+  return {
+    ...insight,
+    parseStats: service.lastParseStats,
+    aiChunkStats: freshAiChunkStats ?? service.lastAiChunkStats
+  }
+}
 
 interface AnnotationBody {
   targetType?: unknown
@@ -105,7 +122,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
     const { feedback } = req.query as { feedback?: string }
-    return loadInsight(service, feedback ?? '').insight
+    return toInsightResponse(service, loadInsight(service, feedback ?? '').insight)
   })
 
   // 按需生成 AI 洞察（force=true 忽略缓存）；无 key/失败降级为静态
@@ -114,11 +131,11 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
     const body = (req.body ?? {}) as { force?: unknown; feedback?: unknown }
-    const { insight } = await refreshInsightAI(service, {
+    const { insight, aiChunkStats } = await refreshInsightAI(service, {
       force: body.force === true,
       feedback: typeof body.feedback === 'string' ? body.feedback : ''
     })
-    return insight
+    return toInsightResponse(service, insight, aiChunkStats)
   })
 
   // 按用户建议重新划分模块（仅重生成划分，其余 AI 结果走缓存）
@@ -127,12 +144,12 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
     const body = (req.body ?? {}) as { feedback?: unknown; force?: unknown }
-    const { insight } = await refreshInsightAI(service, {
+    const { insight, aiChunkStats } = await refreshInsightAI(service, {
       forcePartition: true,
       force: body.force === true,
       feedback: typeof body.feedback === 'string' ? body.feedback : ''
     })
-    return insight
+    return toInsightResponse(service, insight, aiChunkStats)
   })
 
   /* ------------------------- 历史 AI 洞察快照（H1） ------------------------- */
@@ -397,7 +414,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
     await regenerate(service, (message) => console.warn(`[autodoc] ${message}`))
-    return { ok: true, generatedAt: service.generatedAt }
+    // I3：附带本次解析层增量统计，前端在成功提示里展示「复用/重跑」确认增量生效
+    return { ok: true, generatedAt: service.generatedAt, incremental: service.lastParseStats }
   })
 
   // 托管前端静态产物（serve 模式下生产形态；SPA 回退 index.html）

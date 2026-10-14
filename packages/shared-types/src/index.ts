@@ -185,6 +185,17 @@ export interface IncrementalParseStats {
   removed: number
 }
 
+/* ------------------------- 增量可观测（I2/I3） ------------------------- */
+
+/** I2：纳入「文件级 chunk 增量」的 per函数 AI pass（输入纯局部者；其余 pass 维持图指纹门控） */
+export type AiChunkPass = 'categories' | 'keySteps' | 'blocks'
+
+/** I2：单个 AI pass 的文件级 chunk 统计：reused=命中缓存直接复用（零 AI 请求）；rerun=本次实际发起 AI */
+export interface AiChunkStats {
+  reused: number
+  rerun: number
+}
+
 /** 搜索索引条目（前端 Fuse.js 使用） */
 export interface FunctionIndexEntry {
   functionId: string
@@ -528,6 +539,17 @@ export interface ProjectInsight {
    * 与自动生成的 FunctionDoc/CallEdge 分离，只存于洞察层。AI 未生成/失败时缺省（前端保持既有文案）。
    */
   externals?: Record<string, Record<string, ExternalSymbolInfo>>
+}
+
+/**
+ * /api/insight 与 /api/insight/ai|partition 的响应（I3）：洞察载荷 + 最近一次增量可观测统计。
+ * 统计取自服务端内存的「最近一次值」，服务重启前未跑过则为 undefined（前端据此隐藏摘要）。
+ */
+export interface InsightResponse extends ProjectInsight {
+  /** 最近一次 generateDocs 的解析层增量统计 */
+  parseStats?: IncrementalParseStats
+  /** 最近一次 refreshInsightAI 的 AI chunk 增量统计（AI 未启用/未跑过时缺省） */
+  aiChunkStats?: Record<AiChunkPass, AiChunkStats>
 }
 
 /* ------------------------- 历史 AI 洞察快照（H1） ------------------------- */

@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { createDiscreteApi } from 'naive-ui'
 import { getMode } from './data/api'
 import { appState, bootstrap, regenerateActive, switchProject } from './store/app'
 import { formatDate } from './utils/format'
+import { formatIncrementalSummary } from './utils/incremental'
 import SearchBar from './components/SearchBar.vue'
 
 const router = useRouter()
+
+// App.vue 自身渲染 n-message-provider（组件树在其上方），useMessage 注入不到；用离散 API 弹提示
+const { message } = createDiscreteApi(['message'])
 
 onMounted(async () => {
   await bootstrap()
@@ -42,7 +47,14 @@ function goHub(): void {
 }
 
 async function handleRefresh(): Promise<void> {
-  await regenerateActive()
+  try {
+    const incremental = await regenerateActive()
+    // I3：成功提示追加增量摘要（若有），让用户确认「增量真生效」而非全量重跑
+    const summary = formatIncrementalSummary(incremental)
+    message.success(summary ? `重新生成完成 · ${summary}` : '重新生成完成')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error))
+  }
 }
 </script>
 

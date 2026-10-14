@@ -1,6 +1,6 @@
 import { applyGitHistory, createBackfillGuard, createStorage, generateDocs, loadConfig, parserRegistry } from '@autodoc/core'
 import type { NormalizedConfig, StorageAdapter } from '@autodoc/core'
-import type { FileDoc } from '@autodoc/shared-types'
+import type { AiChunkPass, AiChunkStats, FileDoc, IncrementalParseStats } from '@autodoc/shared-types'
 
 /** 服务层上下文：配置、存储与最近一次生成结果 */
 export interface DocService {
@@ -9,6 +9,10 @@ export interface DocService {
   storage: StorageAdapter
   files: FileDoc[]
   generatedAt: string
+  /** I3：最近一次 generateDocs 的解析层增量统计（/api/refresh 与 /api/insight 据此下发，重启即失） */
+  lastParseStats?: IncrementalParseStats
+  /** I3：最近一次 refreshInsightAI 的 AI chunk 增量统计（AI 未启用/未跑过时缺省） */
+  lastAiChunkStats?: Record<AiChunkPass, AiChunkStats>
 }
 
 export type WarnFn = (message: string) => void
@@ -69,13 +73,14 @@ export async function createDocService(
   const normalized = await loadConfig(rootDir, configPath)
   const storage = createStorage(normalized.config.storage, rootDir)
   storage.init()
-  const { files } = await generateDocs({ rootDir, normalized, storage, onWarn })
+  const { files, incremental } = await generateDocs({ rootDir, normalized, storage, onWarn })
   const service: DocService = {
     rootDir,
     normalized,
     storage,
     files,
-    generatedAt: new Date().toISOString()
+    generatedAt: new Date().toISOString(),
+    lastParseStats: incremental
   }
   // 首次全量生成完成后，后台异步回填 Git 历史（不阻塞 API 首次可用）
   scheduleGitBackfill(service, onWarn)
@@ -84,7 +89,7 @@ export async function createDocService(
 
 /** 重新全量生成（--watch 与 /api/refresh 共用），只替换生成结果，不动用户数据 */
 export async function regenerate(service: DocService, onWarn?: WarnFn): Promise<void> {
-  const { files } = await generateDocs({
+  const { files, incremental } = await generateDocs({
     rootDir: service.rootDir,
     normalized: service.normalized,
     storage: service.storage,
@@ -92,6 +97,8 @@ export async function regenerate(service: DocService, onWarn?: WarnFn): Promise<
   })
   service.files = files
   service.generatedAt = new Date().toISOString()
+  // I3：留下本次解析层增量统计，供 /api/refresh 响应与 /api/insight 附带下发
+  if (incremental) service.lastParseStats = incremental
   // 增量拾取 watermark 之后的新提交（后台异步、不阻塞）
   scheduleGitBackfill(service, onWarn)
 }

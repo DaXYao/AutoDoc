@@ -6,13 +6,14 @@ import type {
   FileDocView,
   FileSummary,
   FunctionIndexEntry,
+  IncrementalParseStats,
   InsightDiff,
   InsightHistoryResponse,
+  InsightResponse,
   InsightSnapshot,
   InsightSnapshotMeta,
   NewProjectInput,
   ProjectInfo,
-  ProjectInsight,
   ProjectsResponse,
   ServerMeta
 } from '@autodoc/shared-types'
@@ -112,12 +113,12 @@ export async function pickFolder(): Promise<string | null> {
 
 /* ------------------------- 项目洞察 / 代码图谱 ------------------------- */
 
-/** 静态洞察 + 命中缓存的 AI（快，不触发网络）；feedback 读取对应建议版本 */
-export async function fetchInsight(feedback = ''): Promise<ProjectInsight | null> {
+/** 静态洞察 + 命中缓存的 AI（快，不触发网络）；feedback 读取对应建议版本。I3：响应附带最近增量统计 */
+export async function fetchInsight(feedback = ''): Promise<InsightResponse | null> {
   if (mode !== 'api') return null
   try {
     const qs = feedback ? `?feedback=${encodeURIComponent(feedback)}` : ''
-    return await fetchJson<ProjectInsight>(`/api/insight${qs}`)
+    return await fetchJson<InsightResponse>(`/api/insight${qs}`)
   } catch {
     return null
   }
@@ -127,7 +128,7 @@ export async function fetchInsight(feedback = ''): Promise<ProjectInsight | null
 export async function requestInsightAI(
   force = false,
   feedback = ''
-): Promise<ProjectInsight | null> {
+): Promise<InsightResponse | null> {
   if (mode !== 'api') return null
   const res = await fetch('/api/insight/ai', {
     method: 'POST',
@@ -135,11 +136,11 @@ export async function requestInsightAI(
     body: JSON.stringify({ force, feedback })
   })
   if (!res.ok) return null
-  return (await res.json()) as ProjectInsight
+  return (await res.json()) as InsightResponse
 }
 
 /** 按用户建议重新划分模块（仅重生成划分，其余走缓存） */
-export async function requestInsightPartition(feedback: string): Promise<ProjectInsight | null> {
+export async function requestInsightPartition(feedback: string): Promise<InsightResponse | null> {
   if (mode !== 'api') return null
   const res = await fetch('/api/insight/partition', {
     method: 'POST',
@@ -147,7 +148,7 @@ export async function requestInsightPartition(feedback: string): Promise<Project
     body: JSON.stringify({ feedback })
   })
   if (!res.ok) return null
-  return (await res.json()) as ProjectInsight
+  return (await res.json()) as InsightResponse
 }
 
 /* ------------------------- 历史 AI 洞察快照（H2） ------------------------- */
@@ -344,7 +345,10 @@ export async function fetchAnnotations(targetId: string): Promise<Annotation[]> 
   }
 }
 
-export async function refreshDocs(): Promise<void> {
+/** I3：重新生成文档，返回本次解析层增量统计（服务端未给出时 undefined，成功提示不追加摘要） */
+export async function refreshDocs(): Promise<IncrementalParseStats | undefined> {
   const res = await fetch('/api/refresh', { method: 'POST' })
   if (!res.ok) throw new Error(`重新生成失败：${res.status}`)
+  const data = (await res.json().catch(() => ({}))) as { incremental?: IncrementalParseStats }
+  return data.incremental
 }

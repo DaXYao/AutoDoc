@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import type {
+  AiChunkPass,
+  AiChunkStats,
   AiPassKey,
   AiPassStatus,
   ExternalSymbolInfo,
@@ -62,8 +64,8 @@ interface FlowTreeCache {
   salvagedCount?: number
 }
 
-/** I2：纳入「文件级 chunk 增量」的 per函数 AI pass（输入纯局部者；其余 pass 维持图指纹门控） */
-export type AiChunkPass = 'categories' | 'keySteps' | 'blocks'
+/** I2：纳入「文件级 chunk 增量」的 per函数 AI pass 与其统计（I3 起为共享类型，前后端同一份定义） */
+export type { AiChunkPass, AiChunkStats }
 
 /**
  * I2：各 chunk pass 的 prompt 版本号，拌入 chunkHash（见 chunkHashOf）。
@@ -75,12 +77,6 @@ export const PROMPT_VERSIONS: Record<AiChunkPass, number> = {
   categories: 1,
   keySteps: 1,
   blocks: 1
-}
-
-/** I2：chunk 增量统计：reused=命中缓存直接复用的 chunk 数（零 AI 请求）；rerun=本次实际发起 AI 的 chunk 数 */
-export interface AiChunkStats {
-  reused: number
-  rerun: number
 }
 
 /**
@@ -1808,12 +1804,13 @@ export async function refreshInsightAI(
   )
   cache.set(fp, 'aiStatus', status)
   insight.aiStatus = status
-  // I2：chunk 增量统计先入日志与返回值（I3 将 surfaced 到 API）
+  // I2：chunk 增量统计入日志与返回值；I3：同时记入 service，供 /api/insight 家族响应附带下发
   console.log(
     `[autodoc] AI chunk 增量：categories 复用 ${aiChunkStats.categories.reused}/重跑 ${aiChunkStats.categories.rerun}、` +
       `keySteps 复用 ${aiChunkStats.keySteps.reused}/重跑 ${aiChunkStats.keySteps.rerun}、` +
       `blocks 复用 ${aiChunkStats.blocks.reused}/重跑 ${aiChunkStats.blocks.rerun}`
   )
+  service.lastAiChunkStats = aiChunkStats
   // H1：AI 启用路径成功末尾保存一整份快照入历史，并清空回滚指针（activeId=null，回到实时视图；
   // !aiEnabled 的提前 return 分支不存）。trigger 区分普通刷新与按建议重新划分。
   // saveInsightSnapshot 内部 try/catch，失败不影响主流程。

@@ -3,9 +3,10 @@ import type {
   FileDocView,
   FileSummary,
   FunctionIndexEntry,
+  IncrementalParseStats,
+  InsightResponse,
   NewProjectInput,
   ProjectInfo,
-  ProjectInsight,
   ServerMeta
 } from '@autodoc/shared-types'
 import {
@@ -37,8 +38,8 @@ export interface AppState {
   hubEnabled: boolean
   summaries: FileSummary[]
   functionIndex: FunctionIndexEntry[]
-  /** 项目洞察/代码图谱（静态+可选AI） */
-  insight: ProjectInsight | null
+  /** 项目洞察/代码图谱（静态+可选AI）；I3：响应类型附带最近增量统计（parseStats/aiChunkStats） */
+  insight: InsightResponse | null
   /** fileId → 视图（serve 模式下按需拉取） */
   fileViews: Map<string, FileDocView>
 }
@@ -204,10 +205,11 @@ export async function removeProject(id: string): Promise<void> {
   }
 }
 
-/** 重新生成当前活动项目文档 */
-export async function regenerateActive(): Promise<void> {
-  await refreshDocs()
+/** 重新生成当前活动项目文档；I3：返回本次解析层增量统计供成功提示展示 */
+export async function regenerateActive(): Promise<IncrementalParseStats | undefined> {
+  const incremental = await refreshDocs()
   await reloadAll()
+  return incremental
 }
 
 export async function getFileView(fileId: string): Promise<FileDocView> {
