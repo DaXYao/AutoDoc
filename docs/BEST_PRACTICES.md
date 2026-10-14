@@ -25,11 +25,22 @@
 - [ ] **密钥只放 gitignore 的 .env / 环境变量，绝不进代码/文档/git**；提供 .env.example 模板（见 2026-09-14 条）。
 - [ ] **外部工具（Git）集成**：可注入只读抽象 + 双层测试（内存 Fake 算法层 + 真实 git 集成层，不可用自动 skip）+ watermark 增量 + 全程降级（见 2026-09-23 条）。
 - [ ] **新增 AI pass 用模板四件套 + 降级信号随缓存信封持久化 + 回读越界过滤**；前端三态（steps/fallback/empty）保证不丢内容（见 2026-10-13 条）。
+- [ ] **增量生成两层缓存**：解析层按「文件内容哈希+parser版本+配置指纹」持久化复用 ParsedFile；per函数 AI pass 按「文件级 chunk 内容哈希+prompt 版本盐」跨图指纹复用；可再生缓存不备份、整份替换天然清理删除文件（见 2026-10-15 条）。
 - [ ] （后续不断补充……）
 
 ---
 
 ## 成功经验条目
+
+### 2026-10-15 · 增量生成两层缓存：解析层内容哈希 + per函数 AI 文件级 chunk 哈希
+- **场景**：每次重新生成全量重解析+全量重跑 AI，大项目分钟级；用户要求增量。
+- **做法**：
+  1. **解析层**：存储适配器持久化 parse_cache（relPath→contentHash+ParsedFile），versionKey=sha256{PARSER_VERSION, 配置指纹(影响解析/分类/注释块的配置子集)}；命中+逐项形状校验+functionCount 对照+消费 try/catch 兜底才复用；整份替换天然清理已删文件；可再生数据不 backupOnce；
+  2. **per函数 AI pass**：候选按文件分组整文件装 chunk（单文件超限自切），chunkHash=sha256(与 prompt 同一数据源的输入行+promptVersion 盐)；键不带图指纹 → fp 变而 chunk 未变零 AI 请求；依赖全局输入的 pass（划分/核心/叙事/脉络/externals）维持 fp 门控；失败块不写缓存、live 集合 prune 陈旧键；
+  3. **可观测**：parse 四数与 chunk 复用/重跑进日志+API+前端摘要（「最近一次运行增量：…」）。
+- **收益**：实机 AutoDoc 自身——无改动重新生成解析 691ms→24ms；改一文件仅 1 个 blocks chunk 重跑（categories/keySteps 全复用）；叙事全量后 200 链 109 条有叙事（旧上限 16）。
+- **适用条件**：任何「重跑贵、输入可按文件/chunk 切分、结果可内容寻址」的生成管线；prompt 措辞变更必须 bump 版本盐否则旧结果永久复用。
+- **关联**：packages/core/src/generate.ts、storage/*；packages/server/src/insight.ts（fileChunks/chunkHashOf/runChunkedPass/pruneChunkCache）；commits 761ae6e、e89cd20、9b36e66。
 
 ### 2026-10-13 · 新增 AI pass 的复用范式：模板四件套 + 降级信号随缓存信封持久化 + 回读越界过滤
 - **场景**：为函数卡片新增「内部步骤」AI pass（blocks），要求与既有 pass 一致的可观测/缓存/快照待遇，且 AI-first 不静态兜底。

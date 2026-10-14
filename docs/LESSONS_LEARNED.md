@@ -18,10 +18,19 @@
 - [ ] pnpm 拦截依赖构建脚本时，在 pnpm-workspace.yaml 的 allowBuilds 里显式放行（如 esbuild: true）。
 - [ ] serve 遇 EADDRINUSE 必须响亮报错+非零退出，禁止静默当成功（否则「新前端+旧后端」错配、新接口 404 难定位）。
 - [ ] 浏览器复验 expand 门控 UI：设 localStorage 键后必须同脚本内 reload（expand store 深 watch 会全量回写覆盖外部写入）。
+- [ ] 浏览器实机复验前端改动必须 ignoreCache 强制重载文档：哈希跳转不重载 SPA，验的会是旧 bundle 并得出错误结论（高亮/默认折叠等「看似没生效」）。
 
 ---
 
 ## 教训条目
+
+### 2026-10-15 · 哈希跳转不重载 SPA：实机复验前端改动验到旧 bundle，得出「功能没生效」的错误结论
+- **场景**：F 阶段浏览器复验「跳转高亮/批注默认收起」，多次 navigate 到带 query 的哈希 URL 后采样 DOM。
+- **现象**：高亮 class 永不出现、批注仍默认展开，一度怀疑实现缺陷；实际 dist 已是新 bundle。
+- **根因**：vue-router hash 模式下同源哈希跳转**不重载文档**，浏览器一直跑首次加载的旧 bundle（script src 哈希与 dist 不符）；`navigate_page` 的 url 类型对同源哈希也不强制重载。
+- **正确做法**：复验前端改动一律 `navigate_page {type:'reload', ignoreCache:true}`（或对比 `document` 内 script src 与 dist 资产哈希确认 bundle 新鲜）；瞬时 UI（1.6s 高亮）用 MutationObserver 记录 class 出现，别靠轮询采样。
+- **预防措施**：已加入避坑清单；本轮高亮最终改为共享 ref 绑定 class（重渲染不丢），并经 observer 证实生效。
+- **关联**：packages/web/src/store/jump.ts、views/FilePage.vue；commits 12df9b4、be1b28e。
 
 ### 2026-10-13 · serve 遇端口占用静默 exit(0)，造成「新前端+旧后端」错配（新接口 404 not found）
 - **场景**：用户双击启动器重启服务，而旧 serve 进程仍占 7788。
