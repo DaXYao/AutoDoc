@@ -78,8 +78,10 @@ interface CallInfo {
   maxTokens?: number
   /** 本批数据行数（用于断言单批函数数受控 → 不截断） */
   lineCount: number
-  /** 本批首个全局 idx */
+  /** 本批首个 idx（I2 后 categories 为 chunk 内局部序号，coreJudgment 仍为全局 idx） */
   firstIdx: number
+  /** 完整 user prompt（供按内容识别目标 chunk） */
+  content: string
 }
 
 let calls: CallInfo[] = []
@@ -100,7 +102,7 @@ function mockChat(responder: (info: CallInfo) => string): void {
   vi.mocked(deepseekChat).mockImplementation(async (messages, opts) => {
     const user = messages[messages.length - 1].content
     const { lineCount, firstIdx } = parseUser(user)
-    const info: CallInfo = { maxTokens: opts?.maxTokens, lineCount, firstIdx }
+    const info: CallInfo = { maxTokens: opts?.maxTokens, lineCount, firstIdx, content: user }
     calls.push(info)
     return reply(responder(info))
   })
@@ -197,7 +199,7 @@ describe('aiCoreJudgment 分批', () => {
       attempt++
       const user = messages[messages.length - 1].content
       const first = Number((user.match(/(\d+)\|f\d{4}\|/) ?? [])[1])
-      calls.push({ lineCount: 1, firstIdx: first, maxTokens: undefined })
+      calls.push({ lineCount: 1, firstIdx: first, maxTokens: undefined, content: user })
       return reply(attempt === 1 ? 'oops malformed no json' : JSON.stringify({ core: [{ idx: first, reason: 'r' }] }))
     })
     const res = await aiCoreJudgment(graph)
@@ -225,29 +227,33 @@ describe('aiCoreJudgment 分批', () => {
   })
 })
 
-/* ------------------------- aiCategories：分批 / 合并 / 降级 ------------------------- */
+/* ------------------------- aiCategories：文件级 chunk / 合并 / 降级 ------------------------- */
 
-describe('aiCategories 分批', () => {
-  it('250 pending 触发 3 批，按 fnId 合并，maxTokens=8000', async () => {
+describe('aiCategories 文件级 chunk', () => {
+  it('250 pending（5 文件×50）按文件装 chunk（cap=120）触发 3 块，按 fnId 合并，maxTokens=8000', async () => {
     const graph = bigGraph(250, 1) // 全部 pending
     const ids = sortedIds(graph)
+    // I2：文件级 chunk——[g0+g1]=100、[g2+g3]=100、[g4]=50；idx 为 chunk 内局部序号（各块首行都是 0）
     mockChat((info) => JSON.stringify({ [info.firstIdx]: { category: 'business', reason: `r-${info.firstIdx}` } }))
 
     const res = await aiCategories(graph)
     expect(res.batches).toBe(3)
     expect(res.failedBatches).toBe(0)
+    expect(res.chunk).toEqual({ reused: 0, rerun: 3 })
     expect(calls).toHaveLength(3)
     for (const c of calls) expect(c.maxTokens).toBe(8000)
+    // 各 chunk 首函数（f0000/f0100/f0200）被回填
     const keys = Object.keys(res.categories).sort()
-    expect(keys).toEqual([ids[0], ids[120], ids[240]].sort())
+    expect(keys).toEqual([ids[0], ids[100], ids[200]].sort())
     expect(res.categories[ids[0]].category).toBe('business')
   })
 
-  it('单批失败只降级该批（categories）', async () => {
+  it('单块失败只降级该块（categories）', async () => {
     const graph = bigGraph(250, 1)
     const ids = sortedIds(graph)
+    // 第 2 块（含 f0100）返回无法解析的文本，其余块正常
     mockChat((info) =>
-      info.firstIdx === 120
+      info.content.includes('|f0100|')
         ? 'oops no json here'
         : JSON.stringify({ [info.firstIdx]: { category: 'utility', reason: 'r' } })
     )
@@ -256,8 +262,8 @@ describe('aiCategories 分批', () => {
     expect(res.batches).toBe(3)
     expect(res.failedBatches).toBe(1)
     const keys = Object.keys(res.categories).sort()
-    expect(keys).toEqual([ids[0], ids[240]].sort())
-    expect(keys).not.toContain(ids[120])
+    expect(keys).toEqual([ids[0], ids[200]].sort())
+    expect(keys).not.toContain(ids[100])
   })
 
   it('无 pending 直接返回空、不调用 AI', async () => {
@@ -266,7 +272,7 @@ describe('aiCategories 分批', () => {
 
     const res = await aiCategories(graph)
     expect(res.batches).toBe(0)
-    expect(res.categories).toEqual({})
+    expect(res).toEqual({ categories: {}, batches: 0, failedBatches: 0, chunk: { reused: 0, rerun: 0 } })
     expect(calls).toHaveLength(0)
   })
 

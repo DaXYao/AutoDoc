@@ -135,7 +135,7 @@ describe('aiKeySteps', () => {
     expect(res.steps[ids[0]]).toEqual([0, 2, 4])
     expect(Object.keys(res.steps)).toEqual([ids[0]])
     // 输出 schema 为无 reason 版；prompt 不再要求输出 "reason" 字段（仅保留「不要输出 reason」的告诫）
-    expect(prompt).toContain('{"<全局idx>":{"keySteps":[0,2,3]}}')
+    expect(prompt).toContain('{"<函数idx>":{"keySteps":[0,2,3]}}')
     expect(prompt).toContain('{"keySteps":[0,2,3]}')
     expect(prompt).not.toContain('"reason"')
     expect(prompt).not.toContain('"reason":')
@@ -151,18 +151,20 @@ describe('aiKeySteps', () => {
     expect(calls).toHaveLength(0)
   })
 
-  it('250 函数触发 7 批（KEY_STEPS_CHUNK_SIZE=40），按 fnId 合并', async () => {
+  it('250 函数（5 文件×50）按文件级 chunk（cap=40）触发 10 块，按 fnId 合并', async () => {
     const g = graph(250, 5)
     const ids = sortedIds(g)
     mockChat((info) => JSON.stringify({ [info.firstIdx]: { keySteps: [1] } }))
 
     const res = await aiKeySteps(g)
-    // ceil(250/40) = 7 批
-    expect(res.batches).toBe(7)
+    // I2：单文件 50 > cap 40 → 每文件独自切成 [40,10] 两块，共 5×2=10 块；idx 为块内局部序号
+    expect(res.batches).toBe(10)
     expect(res.failedBatches).toBe(0)
-    expect(calls).toHaveLength(7)
+    expect(res.chunk).toEqual({ reused: 0, rerun: 10 })
+    expect(calls).toHaveLength(10)
+    // 各块首函数被回填（文件边界 50/100/150/200 + 块内 40 切分）
     expect(Object.keys(res.steps).sort()).toEqual(
-      [0, 40, 80, 120, 160, 200, 240].map((i) => ids[i]).sort()
+      [0, 40, 50, 90, 100, 140, 150, 190, 200, 240].map((i) => ids[i]).sort()
     )
   })
 

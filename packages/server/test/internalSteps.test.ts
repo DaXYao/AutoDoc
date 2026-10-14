@@ -125,7 +125,7 @@ describe('aiInternalSteps', () => {
       { blockIndexes: [2], title: '// ===== 分隔 =====', kind: 'banner' }
     ])
     expect(prompts[0]).toContain(
-      '{"<全局idx>":{"steps":[{"blockIndexes":[0,1],"title":"...","detail":"...","kind":"step"}]}}'
+      '{"<函数idx>":{"steps":[{"blockIndexes":[0,1],"title":"...","detail":"...","kind":"step"}]}}'
     )
     expect(prompts[0]).not.toContain('"reason"')
     // 输入含块下标、行号范围、注释全文与代码片段
@@ -137,22 +137,22 @@ describe('aiInternalSteps', () => {
     mockChat((user) => respondAll(user, () => []))
 
     const res = await aiInternalSteps(g)
-    expect(res).toEqual({ steps: {}, batches: 0, failedBatches: 0 })
+    expect(res).toEqual({ steps: {}, batches: 0, failedBatches: 0, chunk: { reused: 0, rerun: 0 } })
     expect(prompts).toHaveLength(0)
   })
 
-  it('70 个候选触发 3 批（INTERNAL_STEPS_CHUNK_SIZE=30），按 fnId 合并', async () => {
+  it('70 个候选触发 3 块（单文件超 INTERNAL_STEPS_CHUNK_SIZE=30 独自切块），按 fnId 合并', async () => {
     const fns = Array.from({ length: 70 }, (_, i) =>
       mkFn(`f${String(i).padStart(4, '0')}`, 1)
     )
     const g = graphOf(fns)
-    // 每批只回填本批首个 idx
+    // 每块只回填本块首个 idx（块内局部序号 0）
     mockChat((user) =>
       JSON.stringify({ [firstIdxOf(user)]: { steps: [{ blockIndexes: [0], title: 't', kind: 'step' }] } })
     )
 
     const res = await aiInternalSteps(g)
-    expect(res.batches).toBe(3) // ceil(70/30)
+    expect(res.batches).toBe(3) // 单文件 70 超限独自切成 30/30/10
     expect(res.failedBatches).toBe(0)
     expect(prompts).toHaveLength(3)
     expect(Object.keys(res.steps).sort()).toEqual(['f0000', 'f0030', 'f0060'])
@@ -449,8 +449,9 @@ describe('refreshInsightAI：内部步骤管线集成', () => {
     service.storage.close()
   })
 
-  it('partial 写入缓存后：二次非 force 刷新与 loadInsight 回读仍 partial（不翻转为 ok）', async () => {
-    // 31 个候选 → 2 批；第 2 批畸形产出 partial，降级信号须随缓存信封持久化
+  it('partial 后：二次非 force 刷新只重发失败块（成功块命中 chunk 缓存），状态仍 partial 不翻转', async () => {
+    // 31 个候选（单文件超限切成 30+1 两块）；第 2 块畸形产出 partial。
+    // I2：失败块不写缓存 → 二次刷新重试该块（自愈语义）；成功块命中 chunk 缓存零请求
     const fns = Array.from({ length: 31 }, (_, i) => mkFn(`g${String(i).padStart(3, '0')}`, 1))
     vi.mocked(deepseekChat).mockImplementation(async (messages) => {
       const user = messages[messages.length - 1].content
@@ -466,32 +467,33 @@ describe('refreshInsightAI：内部步骤管线集成', () => {
     expect(first.insight.aiStatus!.blocks).toBe('partial')
     const afterFirst = blocksCalls()
 
-    // 二次非 force 刷新：blocks 命中缓存不重发，状态用持久化 failedBatches 重算，仍 partial
+    // 二次非 force 刷新：成功块（第 1 块）命中缓存不重发；失败块（第 2 块）重试 2 次仍畸形 → 仍 partial
     const second = await refreshInsightAI(service, {})
-    expect(blocksCalls()).toBe(afterFirst)
+    expect(blocksCalls()).toBe(afterFirst + 2) // AI_PARSE_RETRIES=2，仅失败块重发
+    expect(second.aiChunkStats!.blocks).toEqual({ reused: 1, rerun: 1 })
     expect(second.insight.aiStatus!.blocks).toBe('partial')
     expect(second.insight.functions.g000.internalSteps).toHaveLength(1)
 
-    // 页面刷新路径（loadInsight 免网络回读）判定同样一致
+    // 页面刷新路径（loadInsight 免网络回读）：命中块合并 + 未命中块计为降级信号，判定同样 partial
     const loaded = loadInsight(service)
     expect(loaded.insight.aiStatus!.blocks).toBe('partial')
     service.storage.close()
   })
 
-  it('缓存 blockIndexes 越界（注释块变少而指纹不变）：回读剥掉越界下标、剥空整步丢弃', async () => {
+  it('缓存 blockIndexes 越界（脏 chunk 条目）：回读剥掉越界下标、剥空整步丢弃', async () => {
     const service = await makeService(freshDir(), [mkFn('fnA', 2), mkFn('fnB', 1)])
-    const fp = buildGraph(service.files).fingerprint
-    // 直接写缓存模拟「旧 internalSteps 信封在新 codeBlocks 下越界」的脏数据
+    mockPipeline()
+    await refreshInsightAI(service, { force: true })
+    // 直接篡改 chunk 缓存条目，模拟「缓存中 blockIndexes 相对当前 codeBlocks 越界」的脏数据
     const cache = new AiCache(dirname(service.storage.dataPath))
-    cache.set(fp, 'internalSteps', {
-      steps: {
-        fnA: [
-          { blockIndexes: [0, 5], title: '部分越界', kind: 'step' },
-          { blockIndexes: [2, 3], title: '整体越界', kind: 'step' }
-        ],
-        fnB: [{ blockIndexes: [1], title: '全部越界', kind: 'step' }]
-      },
-      failedBatches: 0
+    const live = cache.getGlobal<string[]>('chunkLive:blocks')!
+    expect(live).toHaveLength(1)
+    cache.setGlobal(`chunk:blocks:${live[0]}`, {
+      fnA: [
+        { blockIndexes: [0, 5], title: '部分越界', kind: 'step' },
+        { blockIndexes: [2, 3], title: '整体越界', kind: 'step' }
+      ],
+      fnB: [{ blockIndexes: [1], title: '全部越界', kind: 'step' }]
     })
 
     const { insight } = loadInsight(service)
@@ -500,9 +502,8 @@ describe('refreshInsightAI：内部步骤管线集成', () => {
     ])
     expect(insight.functions.fnB.internalSteps).toBeUndefined()
 
-    // refresh 缓存命中路径（applyInternalSteps 共用）同样过滤
+    // refresh 缓存命中路径（applyInternalSteps 共用）同样过滤；chunkHash 未变 → 不重发请求
     prompts = []
-    mockPipeline()
     const refreshed = await refreshInsightAI(service, {})
     expect(blocksCalls()).toBe(0)
     expect(refreshed.insight.functions.fnA.internalSteps).toEqual([

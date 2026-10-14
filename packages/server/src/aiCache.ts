@@ -42,6 +42,28 @@ export class AiCache {
     this.flush()
   }
 
+  /**
+   * I2：全局键读取（不带指纹前缀）——供「chunk 级缓存」使用（键如 `chunk:<pass>:<hash>`）。
+   * chunk 缓存的存在意义就是跨图指纹复用：键只含 chunk 输入的内容哈希，
+   * 输入变→哈希变→自动未命中，无需指纹失效；陈旧键由 chunkLive 存活集合清理（见 insight.ts）。
+   */
+  getGlobal<T>(key: string): T | undefined {
+    return this.data[key] as T | undefined
+  }
+
+  setGlobal(key: string, value: unknown): void {
+    this.data[key] = value
+    this.flush()
+  }
+
+  /** 删除单个全局键；返回是否确实删除了存在的键 */
+  deleteGlobal(key: string): boolean {
+    if (!(key in this.data)) return false
+    delete this.data[key]
+    this.flush()
+    return true
+  }
+
   clear(fingerprint?: string): void {
     if (!fingerprint) {
       this.data = {}
