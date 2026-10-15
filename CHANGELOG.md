@@ -2,6 +2,14 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-16 · V3：链路路径图入口+导出收口 · web
+
+- **内容**：FunctionCard「所在链路」每条链路卡片（含 +N 更多）头部行加「图 ▸/▾」按钮（与「完整路径」并列），展开内联渲染 chainPathModel 横向路径图（dagre-LR、me 高亮、「我」单色图例、fn 节点跳转复用）；展开键 `card:<fnId>:chainviz:<chainId>`（固定 false 默认+持久化、展开才挂载按需生成）；scopeKey=`chain:<chain.id>` 播种 on:false/layoutType dagre-LR（仅展开且 cfg 缺失）；path 去重后 <2 节点不渲染按钮与图。导出收口核查：V1/V2/V3 三处 GraphView 导出按钮均基座自带可用、无缺失参数。初审后修：路径图模型按 chain.id computed 记忆化（模板直调函数会每次重渲染产新对象→重布局+fitView 重置用户视口）。
+- **影响范围**：仅 FunctionCard.vue；基座/server/core/README 零改动、无新增依赖。
+- **动机**：grill 确认「有链路的地方都可可选生成可视化」三入口之链路级；持久化=配置+布局缓存+导出（V0 基座语义）。
+- **测试**：chainPathModel 既有 3 例覆盖（顺序/sub 角色/me 高亮/重复 id 去重）；组件胶水由 vue-tsc 覆盖（仓库无 DOM 测试基建）；`pnpm lint` 与 `pnpm test` 全绿（core 159 / server 188 / web 159）。浏览器实机：链路内联图渲染+图例+导出按钮可见（终审复验）。
+- **关联 commit**：待提交。
+
 ## 2026-10-16 · V2：函数卡片「可视化」双 tab 图（调用链 / 所在链路） · web
 
 - **内容**：FunctionCard 新增可折叠区块「可视化」（固定默认收起 + 用户态经 expand store `card:<fnId>:viz` 持久化，followups 同范式，不新增 expandDefault 配置键），标题带轻量计数「可视化（调用链 N 节点 / 所在链路 M 链）」；区块内 n-radio-group 切「调用链 / 所在链路」双 tab（tab 为会话内浏览态本地 ref，不持久化）。调用链 tab 渲染 `functionCallsModel(fn)`（me 高亮、边按 ROLE_HEX 角色着色、外部灰节点无 fnId 不可跳），图例=ROLE_LABELS×ROLE_HEX 三语义色（与边着色同源，图例与图必对齐）；所在链路 tab 渲染 `chainsOverlayModel(fn.id, 链, topN=3)`，链取文字区 chainView 的 selectTopChains 排序结果截 top3（图与文字陈列顺序一致），图例=CHAIN_PALETTE 前 N 色（对应节点 sub ①②③ 链序号前缀）+ ME_COLOR「我」。scopeKey=`fn:<fnId>:<tab>` 按 tab 隔离布局记忆，on/layoutType 经 graphPersist 持久化；展开/切 tab 时才 setGraphCfg 播种 on:false 初值（规避 patchGraphCfg 的 on 兜底 true，V1 InsightHome 同范式；折叠卡片不预写存储键），GraphView :key=scopeKey 切 tab 强制重挂载、展开才挂载（按需生成，布局有缓存）。空态：calls 空→「无内部调用」、vizChains 空（含 fi 缺失/chainIds 全脏 id）→「未参与链路」，均 n-empty 不渲染空图；标题节点数在 calls 空时记 0（如实报 me 单节点会与空态矛盾）。fn 节点 click=jump 复用卡片既有 goFunction（fnJumpQuery 定位高亮）。

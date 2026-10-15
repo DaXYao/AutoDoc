@@ -8,7 +8,7 @@ import { expandDefault, isExpanded, toggle } from '../store/expand'
 import { jumpHighlightId } from '../store/jump'
 import { deleteAnnotation } from '../data/api'
 import { CHANGE_LABELS, CATEGORY_LABELS, OTHER_KIND_COLORS, OTHER_KIND_LABELS, ROLE_COLORS, ROLE_LABELS, editorLink, formatDate } from '../utils/format'
-import { CHAIN_PALETTE, EXTERNAL_COLOR, ME_COLOR, ROLE_HEX, chainsOverlayModel, functionCallsModel } from '../utils/graphModel'
+import { CHAIN_PALETTE, EXTERNAL_COLOR, ME_COLOR, ROLE_HEX, chainPathModel, chainsOverlayModel, functionCallsModel, type GraphModel } from '../utils/graphModel'
 import { getGraphCfg, setGraphCfg } from '../utils/graphPersist'
 import { renderMarkdown } from '../utils/markdown'
 import { splitCallChain } from '../utils/callChain'
@@ -168,6 +168,56 @@ watch(
   },
   { immediate: true }
 )
+
+/* ------------------------- V3：链路级路径图（每条链路卡片内联横向图） ------------------------- */
+
+/**
+ * 链路路径图展开态键：固定 false 默认 + 用户态持久化（与 V2 viz 区块同范式）。
+ * 每条链路独立键，展开才挂载 GraphView（按需生成，布局有缓存）。
+ */
+const chainVizKey = (chainId: string): string => `card:${props.fn.id}:chainviz:${chainId}`
+
+/** 图配置作用域键：按 chain.id 隔离（各链路各自记住布局），与展开态键空间互不冲突 */
+const chainVizScopeKey = (chain: InsightChain): string => `chain:${chain.id}`
+
+/**
+ * path 仅 1 节点（异常数据）时不渲染图按钮：单节点路径图无阅读价值。
+ * 用去重后的节点数判定——path 可能含重复 id（chainPathModel 会去重），
+ * 只要有效节点 ≥2 才有「路径」语义。
+ */
+function chainVizAvailable(chain: InsightChain): boolean {
+  return new Set(Array.isArray(chain.path) ? chain.path : []).size >= 2
+}
+
+/**
+ * 路径图模型按 chain.id 记忆化：模板直调函数会在每次重渲染产出新对象，
+ * 触发 GraphView 的 model watch → 重布局+fitView，把用户缩放/平移过的视口重置（V2 用 computed 的同范式）。
+ */
+const chainVizModels = computed(() => {
+  const map = new Map<string, GraphModel>()
+  for (const c of visibleChains.value) {
+    if (chainVizAvailable(c)) map.set(c.id, chainPathModel(c, props.fn.id))
+  }
+  return map
+})
+
+/** 路径图图例 = 「我」单色项（chainPathModel 只对 me 高亮，其余节点不着色） */
+const CHAIN_VIZ_LEGEND: { color: string; label: string }[] = [{ color: ME_COLOR, label: '我' }]
+
+/**
+ * 展开某条链路路径图时播种 on:false 初值（仅在展开后且 cfg 缺失时）：
+ * patchGraphCfg 对缺失配置的 on 兜底是 true，不播种会导致 GraphView 首次写回布局时
+ * 把 on 意外置 true（V1/V2 同范式）；横向路径图默认 dagre-LR。
+ * 折叠态链路不预写存储键，播种时机放在用户实际展开的点击处。
+ */
+function toggleChainViz(chain: InsightChain): void {
+  const key = chainVizKey(chain.id)
+  const willExpand = !isExpanded(key, false)
+  toggle(key, false)
+  if (!willExpand) return
+  const scopeKey = chainVizScopeKey(chain)
+  if (!getGraphCfg(scopeKey)) setGraphCfg(scopeKey, { on: false, layoutType: 'dagre-LR' })
+}
 
 /**
  * 主干 / 次要拆分（AI-first）：keyCallIndexes 为 undefined（AI 未生成/失败）时不拆分、
@@ -516,6 +566,14 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
             >
               完整路径 {{ isExpanded(chainPathKey(chain.id), false) ? '▾' : '▸' }}
             </button>
+            <!-- V3：链路路径图入口；path 有效节点 <2（异常数据）时不渲染，单节点路径图无意义 -->
+            <button
+              v-if="chainVizAvailable(chain)"
+              class="ml-2 shrink-0 text-gray-400 hover:text-gray-700"
+              @click="toggleChainViz(chain)"
+            >
+              图 {{ isExpanded(chainVizKey(chain.id), false) ? '▾' : '▸' }}
+            </button>
           </div>
           <div
             v-if="isExpanded(chainPathKey(chain.id), false)"
@@ -531,6 +589,19 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
                 {{ fnName(id) }}
               </button>
             </template>
+          </div>
+          <!-- V3：链路路径图（内联渲染在链路卡片下方，展开才挂载 GraphView；fn 节点点击=跳转复用） -->
+          <div
+            v-if="chainVizAvailable(chain) && isExpanded(chainVizKey(chain.id), false)"
+            class="mt-1.5 h-[320px]"
+          >
+            <GraphView
+              :model="chainVizModels.get(chain.id)!"
+              layout-type="dagre-LR"
+              :scope-key="chainVizScopeKey(chain)"
+              :legend="CHAIN_VIZ_LEGEND"
+              @jump="goFunction"
+            />
           </div>
         </div>
         <!-- 其余链路：默认折叠，展开后与 top3 同渲染 -->
