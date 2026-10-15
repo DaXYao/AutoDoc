@@ -10,7 +10,12 @@
     "typecheck": "vue-tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@antv/layout": "^2.0.0",
     "@autodoc/shared-types": "workspace:*",
+    "@vue-flow/background": "^1.3.2",
+    "@vue-flow/controls": "^1.1.3",
+    "@vue-flow/core": "^1.48.2",
+    "@vue-flow/minimap": "^1.5.4",
     "fuse.js": "^7.0.0",
     "markdown-it": "^14.1.0",
     "naive-ui": "^2.40.1",
