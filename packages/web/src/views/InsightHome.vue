@@ -1,12 +1,16 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { appState, ensureInsightAI, findFunctionEntry, regenerateInsightAI, repartitionInsight } from '../store/app'
 import { AI_PASS_LABELS, AI_PASS_ORDER, AI_STATUS_META } from '../utils/format'
 import { formatIncrementalSummary } from '../utils/incremental'
 import { fnJumpQuery } from '../utils/nav'
+import { drillTargetId, toggleGraphGroup } from '../utils/flow'
+import { flowTreeModel } from '../utils/graphModel'
+import { getGraphCfg, patchGraphCfg, setGraphCfg } from '../utils/graphPersist'
 import FlowTree from '../components/FlowTree.vue'
+import GraphView from '../components/graph/GraphView.vue'
 import InsightHistory from '../components/InsightHistory.vue'
 
 const router = useRouter()
@@ -73,6 +77,60 @@ const flowAutoExpandDepth = computed(
 
 /** 展开态持久化命名空间：区分不同项目 */
 const flowProjectId = computed(() => appState.activeProjectId ?? 'static')
+
+/* ------------------------- V1：业务脉络图视图（树/图切换） ------------------------- */
+
+/**
+ * 图配置作用域键：按项目隔离（hub 无活动项目时兜底 'active'）。
+ * 兜底名与树展开态的 flowProjectId 兜底 'static' 不同属刻意：图配置存
+ * `graph:cfg:flow:<key>`（graphPersist），树展开态存 store/expand 的
+ * `flow:<projectId>:<nodeId>` 键空间，两者命名空间不同、互不冲突。
+ */
+const graphScopeKey = computed(() => `flow:${appState.activeProjectId ?? 'active'}`)
+
+/**
+ * localStorage 非响应式，用本地 ref 镜像 cfg 的 on / expandedGroups 驱动视图。
+ * 镜像只在 scopeKey 切换时同步：多标签页下外部改动 localStorage 不会反映到
+ * 本视图（未监听 storage 事件），按单标签页使用假设设计。
+ */
+const graphOn = ref(false)
+const expandedGroups = ref<string[]>([])
+
+/**
+ * 首次进入/切换项目时播种配置初值并同步本地镜像。
+ * 必须先 setGraphCfg 写 on:false 初值：patchGraphCfg 对缺失配置的 on 兜底是 true，
+ * 本视图默认关，不播种会导致用户首次切布局时图被意外置为开启。
+ */
+watch(
+  graphScopeKey,
+  (key) => {
+    if (!getGraphCfg(key)) {
+      setGraphCfg(key, { on: false, layoutType: 'dagre-TB', expandedGroups: [] })
+    }
+    const cfg = getGraphCfg(key)
+    graphOn.value = cfg?.on ?? false
+    expandedGroups.value = cfg?.expandedGroups ?? []
+  },
+  { immediate: true }
+)
+
+/** 树/图开关：写入合并回持久化 cfg（layoutType 等其余字段由 GraphView 维护，不在此覆盖） */
+const flowViewMode = computed<'tree' | 'graph'>({
+  get: () => (graphOn.value ? 'graph' : 'tree'),
+  set: (mode) => {
+    graphOn.value = mode === 'graph'
+    patchGraphCfg(graphScopeKey.value, { on: graphOn.value })
+  }
+})
+
+/** flows + expandedGroups 任一变化即重建图模型（drill 通过更新 expandedGroups 触发重算） */
+const flowGraphModel = computed(() => flowTreeModel(flows.value, new Set(expandedGroups.value)))
+
+/** 结构/聚合节点点击：在 expandedGroups 中切换（折叠子树 ↔ 展开函数叶子与子结构） */
+function onGraphDrill(nodeId: string): void {
+  expandedGroups.value = toggleGraphGroup(expandedGroups.value, drillTargetId(nodeId))
+  patchGraphCfg(graphScopeKey.value, { expandedGroups: expandedGroups.value })
+}
 
 /** AI 各段执行状态（可观测性）：六段固定顺序，status 缺失视为未执行 */
 const aiPasses = computed(() => {
@@ -231,12 +289,41 @@ function goModule(id: string): void {
         </div>
       </section>
 
-      <!-- ============ 递归脉络架构树（flows 就绪时的主区） ============ -->
-      <section v-if="hasFlows" class="mb-5">
-        <h3 class="text-sm font-semibold text-gray-700 mb-2">
-          业务脉络（{{ flows.length }} 条主线）
-        </h3>
-        <div class="rounded-lg border border-gray-200 bg-white py-2">
+      <!-- ============ 业务脉络：树/图双视图（树=递归渐进披露；图=V1 GraphView） ============ -->
+      <section v-if="hasFlows || graphOn" class="mb-5">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-sm font-semibold text-gray-700">
+            业务脉络<template v-if="hasFlows">（{{ flows.length }} 条主线）</template>
+          </h3>
+          <n-radio-group v-model:value="flowViewMode" size="small">
+            <n-radio-button value="tree">树</n-radio-button>
+            <n-radio-button value="graph">图</n-radio-button>
+          </n-radio-group>
+        </div>
+
+        <!-- 图模式：flows 未就绪时只给空态提示，不渲染空图 -->
+        <template v-if="graphOn">
+          <template v-if="hasFlows">
+            <p class="mb-1.5 text-xs text-gray-400">
+              节点=脉络结构/函数聚合；点击结构节点展开/折叠子树；点击函数节点跳转
+            </p>
+            <div class="h-[560px]">
+              <!-- :key=scopeKey：切换项目时强制重挂载，GraphView 只在 setup 读一次持久化布局配置 -->
+              <GraphView
+                :key="graphScopeKey"
+                :model="flowGraphModel"
+                layout-type="dagre-TB"
+                :scope-key="graphScopeKey"
+                @jump="goFunction"
+                @drill="onGraphDrill"
+              />
+            </div>
+          </template>
+          <n-empty v-else description="脉络数据未就绪，暂无法渲染图视图" class="my-6" />
+        </template>
+
+        <!-- 树模式：原有递归脉络树渲染 -->
+        <div v-else class="rounded-lg border border-gray-200 bg-white py-2">
           <template v-for="(root, i) in flows" :key="root.id">
             <FlowTree
               :node="root"
@@ -256,8 +343,9 @@ function goModule(id: string): void {
         </div>
       </section>
 
-      <!-- ============ 降级：flows 缺失（旧缓存/静态导出/未生成）时回退扁平呈现 ============ -->
-      <template v-if="!hasFlows">
+      <!-- ============ 降级：flows 缺失（旧缓存/静态导出/未生成）时回退扁平呈现 ============
+           graphOn 时不渲染：图模式无 flows 上方已给 n-empty 空态，避免同屏双份降级内容 -->
+      <template v-if="!hasFlows && !graphOn">
       <!-- 核心函数 -->
       <section v-if="coreFunctions.length" class="mb-5">
         <h3 class="text-sm font-semibold text-gray-700 mb-2">

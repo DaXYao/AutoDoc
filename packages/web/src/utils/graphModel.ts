@@ -140,7 +140,9 @@ export function firstSentence(text: string | null | undefined, max = 60): string
  * - 函数叶子默认聚合为父 phase 节点的 count 徽标（不铺叶子，避免大图爆炸）；
  *   expandedGroupIds 命中的组才展开出 fn 叶子节点 + 父→fn 边（下钻语义由调用方驱动）；
  * - 父子边（实线）+ 同层结构孩子的顺序边（虚线，表达阅读次序而非调用）；
- * - 超过 GRAPH_CAP 时按父组聚合为 group 超级节点（aggregateIfOverCap）。
+ * - 超过 GRAPH_CAP 时按父组聚合为 group 超级节点（aggregateIfOverCap），
+ *   但 expandedGroupIds 命中的组豁免聚合——否则 drill 展开的 fn 叶子会被聚合器
+ *   立刻吃回 group，用户永远下钻不到函数层。
  */
 export function flowTreeModel(roots: FlowNode[], expandedGroupIds: Set<string>): GraphModel {
   const nodes: GraphNode[] = []
@@ -208,7 +210,7 @@ export function flowTreeModel(roots: FlowNode[], expandedGroupIds: Set<string>):
   }
 
   for (const root of roots) walk(root)
-  return aggregateIfOverCap({ nodes, edges }, GRAPH_CAP).model
+  return aggregateIfOverCap({ nodes, edges }, GRAPH_CAP, expandedGroupIds).model
 }
 
 /* ------------------------- 函数调用（me + 直接 callees） ------------------------- */
@@ -396,14 +398,18 @@ export function chainPathModel(chain: InsightChain, meId?: string): GraphModel {
 /**
  * 节点数超 cap 时，把挂在同一结构父节点（phase/group）下的 fn 叶子折叠为
  * 一个 group 超级节点（count 徽标，点击下钻语义由调用方处理）：
+ * - exemptGroupIds 命中的父组豁免折叠（=调用方当前已展开下钻的组）：drill 展开
+ *   的 fn 叶子必须保留，否则用户点了展开却被聚合器吃回，永远见不到函数层；
  * - 只折叠有结构父节点的 fn（按边推导）；孤立 fn（如调用图里的 me/callee）不折叠，
  *   否则纯调用图会被聚成一坨失去意义；
  * - 被折叠 fn 的对外边改接到 group 节点并按 (source,target) 去重，自环丢弃；
- * - 折叠后仍超 cap 属尽力而为（结构节点本身超限的场景交给调用方换布局/过滤）。
+ * - 折叠后仍超 cap 属尽力而为（豁免组保留叶子、结构节点本身超限的场景交给
+ *   调用方换布局/过滤），aggregated 标记如实返回。
  */
 export function aggregateIfOverCap(
   model: GraphModel,
-  cap = GRAPH_CAP
+  cap = GRAPH_CAP,
+  exemptGroupIds?: Set<string>
 ): { model: GraphModel; aggregated: boolean } {
   if (model.nodes.length <= cap) return { model, aggregated: false }
 
@@ -432,6 +438,8 @@ export function aggregateIfOverCap(
   const groupNodes: GraphNode[] = []
   for (const [parentId, fnIds] of buckets) {
     if (fnIds.length < 2) continue
+    // 豁免组不折叠：调用方已 drill 展开，fn 叶子必须可见
+    if (exemptGroupIds?.has(parentId)) continue
     const parent = model.nodes.find((n) => n.id === parentId)
     if (!parent) continue
     const groupId = `agg:${parentId}`

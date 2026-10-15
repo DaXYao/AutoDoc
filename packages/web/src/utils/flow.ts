@@ -30,3 +30,20 @@ export function splitFlowChildren(children: FlowNode[]): {
 export function filterFollowups(annotations: Annotation[]): Annotation[] {
   return annotations.filter((a) => a.kind === 'followup' && a.targetType === 'function')
 }
+
+/**
+ * 图模式 drill 目标归一（V1）：aggregateIfOverCap 产出的 group 超级节点 id 形如
+ * `agg:<父结构节点id>`，需映射回父结构节点才能统一走 expandedGroups 的展开/折叠；
+ * phase 节点本身即目标 id，原样返回。
+ */
+export function drillTargetId(nodeId: string): string {
+  return nodeId.startsWith('agg:') ? nodeId.slice('agg:'.length) : nodeId
+}
+
+/**
+ * 在 expandedGroups 中切换组 id：已在则移除（折叠子树），不在则追加（展开其函数叶子）。
+ * 返回新数组，不改入参（保持 Vue 响应式与调用方状态不可变）。
+ */
+export function toggleGraphGroup(groups: readonly string[], id: string): string[] {
+  return groups.includes(id) ? groups.filter((g) => g !== id) : [...groups, id]
+}

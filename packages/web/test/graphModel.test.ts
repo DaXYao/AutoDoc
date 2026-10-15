@@ -181,7 +181,7 @@ describe('flowTreeModel', () => {
     expect(model.nodes.find((n) => n.id === 'r')?.count).toBeUndefined()
   })
 
-  it('展开后超 300 节点 → 按父组折叠为 group 超级节点（count 徽标）', () => {
+  it('展开后超 300 节点 → 展开组豁免聚合，fn 叶子保留（drill 不被吃回）', () => {
     const leaves = Array.from({ length: GRAPH_CAP + 10 }, (_, i) =>
       Object.assign(flowNode(`leaf${i}`, 'leaf'), {
         relatedFunctionIds: [`src/a.ts::-::f${i}@hash00000001`]
@@ -189,13 +189,9 @@ describe('flowTreeModel', () => {
     )
     const roots = [flowNode('big', 'module', leaves)]
     const model = flowTreeModel(roots, new Set(['big']))
-    const group = model.nodes.find((n) => n.kind === 'group')
-    expect(group).toBeDefined()
-    expect(group?.id).toBe('agg:big')
-    expect(group?.count).toBe(GRAPH_CAP + 10)
-    expect(model.nodes.filter((n) => n.kind === 'fn')).toHaveLength(0)
-    expect(model.edges.some((e) => e.source === 'big' && e.target === 'agg:big')).toBe(true)
-    expect(model.nodes.length).toBeLessThanOrEqual(GRAPH_CAP)
+    expect(model.nodes.filter((n) => n.kind === 'fn')).toHaveLength(GRAPH_CAP + 10)
+    expect(model.nodes.some((n) => n.kind === 'group')).toBe(false)
+    expect(model.edges.some((e) => e.source === 'big' && e.target.startsWith('src/'))).toBe(true)
   })
 })
 
@@ -396,5 +392,46 @@ describe('aggregateIfOverCap', () => {
     const { model, aggregated } = aggregateIfOverCap({ nodes, edges: [] })
     expect(aggregated).toBe(false)
     expect(model.nodes).toHaveLength(GRAPH_CAP + 1)
+  })
+
+  describe('exemptGroupIds 豁免', () => {
+    const P_COUNT = GRAPH_CAP + 5
+    const R_COUNT = 10
+
+    function twoParentModel(): GraphModel {
+      // 豁免组 P 独占 cap+5 个 fn：即便普通组 R 全折叠，节点数仍超 cap（验证尽力而为语义）
+      const nodes: GraphNode[] = [phase('P'), phase('R')]
+      const edges: GraphModel['edges'] = []
+      for (const [parent, count] of [['P', P_COUNT], ['R', R_COUNT]] as const) {
+        for (let i = 0; i < count; i++) {
+          const id = `${parent}-f${i}`
+          nodes.push(fn(id))
+          edges.push({ id: `e:${parent}->${id}`, source: parent, target: id })
+        }
+      }
+      return { nodes, edges }
+    }
+
+    it('豁免组的 fn 叶子保留，非豁免组照常折叠为 group', () => {
+      const { model, aggregated } = aggregateIfOverCap(twoParentModel(), GRAPH_CAP, new Set(['P']))
+      expect(aggregated).toBe(true)
+      expect(model.nodes.filter((n) => n.id.startsWith('P-f'))).toHaveLength(P_COUNT)
+      expect(model.nodes.some((n) => n.id === 'agg:P')).toBe(false)
+      expect(model.nodes.find((n) => n.id === 'agg:R')?.count).toBe(R_COUNT)
+      expect(model.nodes.some((n) => n.id === 'R-f0')).toBe(false)
+    })
+
+    it('豁免后仍超 cap → 尽力而为折叠非豁免组，aggregated=true', () => {
+      const { model, aggregated } = aggregateIfOverCap(twoParentModel(), GRAPH_CAP, new Set(['P']))
+      expect(aggregated).toBe(true)
+      expect(model.nodes.length).toBeGreaterThan(GRAPH_CAP)
+    })
+
+    it('全部父组均豁免 → 无可折叠，原模型返回、aggregated=false', () => {
+      const input = twoParentModel()
+      const { model, aggregated } = aggregateIfOverCap(input, GRAPH_CAP, new Set(['P', 'R']))
+      expect(aggregated).toBe(false)
+      expect(model).toBe(input)
+    })
   })
 })

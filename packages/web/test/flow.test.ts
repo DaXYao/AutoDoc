@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { Annotation, FlowNode } from '@autodoc/shared-types'
-import { filterFollowups, splitFlowChildren } from '../src/utils/flow'
+import {
+  drillTargetId,
+  filterFollowups,
+  splitFlowChildren,
+  toggleGraphGroup
+} from '../src/utils/flow'
 
 function node(id: string, kind: FlowNode['kind']): FlowNode {
   return {
@@ -92,5 +97,37 @@ describe('filterFollowups', () => {
       annotation('2', 'followup')
     ]
     expect(filterFollowups(list).map((a) => a.id)).toEqual(['1', '2'])
+  })
+})
+
+describe('drillTargetId', () => {
+  it('聚合组节点 agg:<id> → 映射回父结构节点 id', () => {
+    expect(drillTargetId('agg:flow:m1')).toBe('flow:m1')
+  })
+
+  it('phase 节点 id 原样返回', () => {
+    expect(drillTargetId('flow:m1')).toBe('flow:m1')
+  })
+
+  it('仅剥离首个 agg: 前缀（id 内部含 agg: 不误伤）', () => {
+    expect(drillTargetId('agg:x:agg:y')).toBe('x:agg:y')
+  })
+})
+
+describe('toggleGraphGroup', () => {
+  it('不在列表中 → 追加到末尾', () => {
+    expect(toggleGraphGroup([], 'a')).toEqual(['a'])
+    expect(toggleGraphGroup(['a', 'b'], 'c')).toEqual(['a', 'b', 'c'])
+  })
+
+  it('已在列表中 → 移除（其余保持原顺序）', () => {
+    expect(toggleGraphGroup(['a', 'b', 'c'], 'b')).toEqual(['a', 'c'])
+  })
+
+  it('不修改入参数组，返回新数组', () => {
+    const src = ['a']
+    const out = toggleGraphGroup(src, 'b')
+    expect(src).toEqual(['a'])
+    expect(out).not.toBe(src)
   })
 })

@@ -153,7 +153,9 @@ function onNodeClick(event: NodeMouseEvent): void {
   const data = event.node.data as GraphNode | undefined
   if (!data) return
   if (data.kind === 'fn' && data.fnId) emit('jump', data.fnId)
-  else if (data.kind === 'group') emit('drill', event.node.id)
+  // phase 也分发 drill：V1 脉络图的结构节点点击=展开/折叠其函数叶子子树
+  // （V2/V3 的调用图模型只产 fn 节点，不受影响）
+  else if (data.kind === 'group' || data.kind === 'phase') emit('drill', event.node.id)
 }
 
 function miniNodeColor(node: Node): string {
