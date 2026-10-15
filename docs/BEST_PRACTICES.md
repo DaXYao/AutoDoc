@@ -26,11 +26,24 @@
 - [ ] **外部工具（Git）集成**：可注入只读抽象 + 双层测试（内存 Fake 算法层 + 真实 git 集成层，不可用自动 skip）+ watermark 增量 + 全程降级（见 2026-09-23 条）。
 - [ ] **新增 AI pass 用模板四件套 + 降级信号随缓存信封持久化 + 回读越界过滤**；前端三态（steps/fallback/empty）保证不丢内容（见 2026-10-13 条）。
 - [ ] **增量生成两层缓存**：解析层按「文件内容哈希+parser版本+配置指纹」持久化复用 ParsedFile；per函数 AI pass 按「文件级 chunk 内容哈希+prompt 版本盐」跨图指纹复用；可再生缓存不备份、整份替换天然清理删除文件（见 2026-10-15 条）。
+- [ ] **图可视化基座范式**：纯函数图模型构建器（三 scope+聚合上限+豁免组）+ 布局 runner（库真实 API 查证+降级标记+指纹缓存 LRU）+ 配置播种规避 patch 兜底 + 自绘 SVG/独立 HTML 双导出；入口按需挂载、computed 记忆化模型（见 2026-10-16 条）。
 - [ ] （后续不断补充……）
 
 ---
 
 ## 成功经验条目
+
+### 2026-10-16 · 图可视化基座范式：纯构建器+布局 runner+配置播种+双导出，三入口按需挂载
+- **场景**：为业务脉络/函数调用链/链路路径三类视图提供统一交互式图（Vue Flow + @antv/layout），要求可选生成、持久化、可导出、与既有跳转体系联动。
+- **做法**：
+  1. **纯函数图模型构建器**（graphModel.ts）：flowTree（叶子聚合 count 徽标+expandedGroups 展开+超 300 按父组聚合超级节点+豁免已展开组）、functionCalls（me 高亮+角色着色+外部灰节点）、chainsOverlay（top N 链合并去重+固定调色板）、chainPath（LR 路径+角色/叙事 sub）；全部可单测、与组件解耦；
+  2. **布局 runner**（graphLayout.ts）：先查库 d.ts 确认真实 API 再适配；'tree' 无现成算法时自研紧凑树+非树降级 dagre-TB 带 degraded 标记；nodeSize 传真实卡片尺寸；布局结果按「scope+模型指纹+类型」localStorage LRU 缓存；
+  3. **配置播种**：接入方展开时才 setGraphCfg({on:false,…}) 初值，规避 patchGraphCfg 的 on 兜底 true；scopeKey 按视图/tab/链隔离；
+  4. **导出**：modelToSvg 自绘矢量（转义/viewBox/箭头/链色）+ modelToHtml 独立交互页（CDN importmap+JSON 转义防逃逸），不依赖 DOM 转换；
+  5. **入口按需挂载**：expand store 固定 false 默认+用户态持久化，展开才 v-if 挂载 GraphView；模型 computed 记忆化防视口重置。
+- **收益**：三入口（脉络切换/函数双 tab/链路内联）共用一套基座零重复；65+ 单测覆盖构建器/布局/缓存/导出；实机 71 节点脉络图、32 节点调用链、路径图均流畅。
+- **适用条件**：任何「多 scope 复用同一图渲染、数据来自既有模型、需持久化偏好与导出」的可视化需求；库 API 大版本断裂期务必先查 d.ts。
+- **关联**：packages/web/src/utils/graph{Model,Layout,Persist,Export}.ts、components/graph/{GraphView,FlowNodeCard}.vue；commits ffb70da、cf51aea、fdc433e、1bdf1ba。
 
 ### 2026-10-15 · 增量生成两层缓存：解析层内容哈希 + per函数 AI 文件级 chunk 哈希
 - **场景**：每次重新生成全量重解析+全量重跑 AI，大项目分钟级；用户要求增量。

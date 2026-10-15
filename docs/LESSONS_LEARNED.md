@@ -15,7 +15,9 @@
 - [ ] 写操作前先备份用户数据（批注、变更历史）。
 - [ ] 前端默认展开策略必须可配置，禁止写死。
 - [ ] ESLint ignores 必须覆盖所有构建产物目录（dist/ 与导出站点）。
-- [ ] pnpm 拦截依赖构建脚本时，在 pnpm-workspace.yaml 的 allowBuilds 里显式放行（如 esbuild: true）。
+- [ ] pnpm 拦截依赖构建脚本时，在 pnpm-workspace.yaml 的 allowBuilds 里显式放行（如 esbuild: true、vue-demi: true）。
+- [ ] 模板里把「函数直调返回值」当 prop 传子组件：每次重渲染产新对象会触发子组件 watch 重置内部状态（视口/布局）；必须 computed 记忆化。
+- [ ] 第三方布局库默认参数不可信：@antv/layout v2 dagre 默认 nodeSize=[0,0] 会按零尺寸排版致卡片重叠，必须传真实卡片尺寸。
 - [ ] serve 遇 EADDRINUSE 必须响亮报错+非零退出，禁止静默当成功（否则「新前端+旧后端」错配、新接口 404 难定位）。
 - [ ] 浏览器复验 expand 门控 UI：设 localStorage 键后必须同脚本内 reload（expand store 深 watch 会全量回写覆盖外部写入）。
 - [ ] 浏览器实机复验前端改动必须 ignoreCache 强制重载文档：哈希跳转不重载 SPA，验的会是旧 bundle 并得出错误结论（高亮/默认折叠等「看似没生效」）。
@@ -23,6 +25,22 @@
 ---
 
 ## 教训条目
+
+### 2026-10-16 · 模板函数直调当 prop：子组件 watch 每次重渲染被触发，用户视口被重置
+- **场景**：V3 链路内联图 `:model="chainVizModel(chain)"` 在模板直调构建函数。
+- **现象**：同卡片任意状态变化（展开/切 tab/高亮）都重渲染 → 每次产新 GraphModel 对象 → GraphView 的 model watch 触发重布局+fitView → 用户缩放/平移过的视口被重置。
+- **根因**：Vue 模板直调函数无记忆化，引用身份每渲染必变；子组件以 props 引用变化为失效信号。
+- **正确做法**：computed 按 id 记忆化（Map<chainId, GraphModel>），模板取 `map.get(id)`；仅数据源变化才重建。
+- **预防措施**：已加入避坑清单；V2 即用 computed 范式，V3 初版回退被初审抓出。
+- **关联**：packages/web/src/components/FunctionCard.vue（chainVizModels）；commit 1bdf1ba。
+
+### 2026-10-16 · @antv/layout v2 与 v1 API 断裂：无 CompactBoxLayout、dagre 默认 nodeSize=[0,0]
+- **场景**：V0 图基座接 @antv/layout 做六型布局。
+- **现象**：若照 v1 记忆写 CompactBoxLayout 直接编译失败；dagre 不传 nodeSize 时同层节点按零宽排版、卡片大面积重叠。
+- **根因**：v2 导出清单与 v1 不同（树布局需自研或换算法）；dagre 默认 nodeSize=[0,0]，preventOverlap/间距全按零尺寸算。
+- **正确做法**：先查 node_modules d.ts/源码确认真实 API（execute+forEachNode、中心坐标换算、animate:false 同步分支）；nodeSize 传真实卡片尺寸常量并与 SVG 导出共用。
+- **预防措施**：已加入避坑清单（布局库默认参数不可信）；审查员实测重叠风险定为 🔴 后修复。
+- **关联**：packages/web/src/utils/graphLayout.ts；commit ffb70da。
 
 ### 2026-10-15 · 哈希跳转不重载 SPA：实机复验前端改动验到旧 bundle，得出「功能没生效」的错误结论
 - **场景**：F 阶段浏览器复验「跳转高亮/批注默认收起」，多次 navigate 到带 query 的哈希 URL 后采样 DOM。
