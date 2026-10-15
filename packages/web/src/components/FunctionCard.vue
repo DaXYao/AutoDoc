@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import type { Annotation, CallEdge, FunctionDocView, InsightChain } from '@autodoc/shared-types'
+import type { Annotation, CallEdge, CallRole, FunctionDocView, InsightChain } from '@autodoc/shared-types'
 import { appState, findFunctionEntry } from '../store/app'
 import { expandDefault, isExpanded, toggle } from '../store/expand'
 import { jumpHighlightId } from '../store/jump'
 import { deleteAnnotation } from '../data/api'
 import { CHANGE_LABELS, CATEGORY_LABELS, OTHER_KIND_COLORS, OTHER_KIND_LABELS, ROLE_COLORS, ROLE_LABELS, editorLink, formatDate } from '../utils/format'
+import { CHAIN_PALETTE, EXTERNAL_COLOR, ME_COLOR, ROLE_HEX, chainsOverlayModel, functionCallsModel } from '../utils/graphModel'
+import { getGraphCfg, setGraphCfg } from '../utils/graphPersist'
 import { renderMarkdown } from '../utils/markdown'
 import { splitCallChain } from '../utils/callChain'
 import { groupInternalSteps } from '../utils/internalSteps'
@@ -15,6 +17,7 @@ import { compactPath, roleOf, selectTopChains } from '../utils/chains'
 import { fnJumpQuery } from '../utils/nav'
 import AnnotationPanel from './AnnotationPanel.vue'
 import CallNode from './CallNode.vue'
+import GraphView from './graph/GraphView.vue'
 
 const props = defineProps<{ fn: FunctionDocView }>()
 
@@ -82,6 +85,89 @@ function chainRole(chain: InsightChain): string | null {
 function chainSegments(chain: InsightChain): ReturnType<typeof compactPath> {
   return compactPath(chain.path, props.fn.id)
 }
+
+/* ------------------------- V2：可视化（调用链 / 所在链路 双 tab 图） ------------------------- */
+
+/** 叠加上图的链路上限（与文字区 CHAIN_TOP_LIMIT 同值但独立：调文字陈列数不应隐性改图） */
+const VIZ_CHAIN_TOP_N = 3
+
+/** tab 选择属会话内浏览态，本地 ref 即可（不持久化，展开态才走 expand store） */
+const vizTab = ref<'calls' | 'chains'>('calls')
+
+/** 展开态键（固定 false 默认 + 用户态持久化，与 followups 区块同范式，不新增 expandDefault 配置键）。
+ *  定义在 V2 区块内而非底部键列表：immediate watch 在 setup 期同步求值，须先于 watcher 声明 */
+const vizKey = (): string => `card:${props.fn.id}:viz`
+
+/**
+ * 图配置作用域键：按 fn + tab 隔离（两个 tab 各自记住布局）。
+ * on/layoutType 经 graphPersist 存 `graph:cfg:fn:<fnId>:<tab>`，
+ * 与区块展开态（store/expand 的 `card:<fnId>:viz` 键空间）互不冲突。
+ */
+const vizScopeKey = computed(() => `fn:${props.fn.id}:${vizTab.value}`)
+
+/** 上图链路：复用文字区 chainView 的 selectTopChains 全量排序结果再截 topN，图与文字陈列顺序一致。
+ *  注：「独立于 CHAIN_TOP_LIMIT」仅成立于 ≤ 方向——chainView.top 已受其截断，若日后该上限调小于
+ *  VIZ_CHAIN_TOP_N，图会跟随变小；真独立需从 selectTopChains 全量重切，当前复用排序结果是有意的取舍 */
+const vizChains = computed<InsightChain[]>(() =>
+  (chainView.value?.top ?? []).slice(0, VIZ_CHAIN_TOP_N)
+)
+
+const vizCallsModel = computed(() => functionCallsModel(props.fn))
+const vizChainsModel = computed(() => chainsOverlayModel(props.fn.id, vizChains.value, VIZ_CHAIN_TOP_N))
+
+const vizModel = computed(() => (vizTab.value === 'calls' ? vizCallsModel.value : vizChainsModel.value))
+
+/**
+ * 标题的调用链节点数：calls 为空时图里仍会剩 me 一个节点，如实报 1 会与
+ * tab 内「无内部调用」空态自相矛盾，故空调用直接记 0。
+ */
+const vizCallsNodeCount = computed(() =>
+  props.fn.calls.length === 0 ? 0 : vizCallsModel.value.nodes.length
+)
+
+/** 调用链 tab 图例 = ROLE 语义色（hex 与 functionCallsModel 的边着色同源，图例与图必对齐）+「我/外部」节点色 */
+const CALLS_LEGEND: { color: string; label: string }[] = [
+  ...(Object.keys(ROLE_LABELS) as CallRole[]).map((role) => ({
+    color: ROLE_HEX[role],
+    label: ROLE_LABELS[role]
+  })),
+  { color: ME_COLOR, label: '我' },
+  { color: EXTERNAL_COLOR, label: '外部' }
+]
+
+/** 所在链路 tab 图例 = CHAIN_PALETTE 前 N 色（按链序号，与节点 sub 的 ①②③ 前缀对应）+「我」色 */
+const vizChainsLegend = computed(() => [
+  ...vizChains.value.map((_, i) => ({
+    color: CHAIN_PALETTE[i % CHAIN_PALETTE.length],
+    label: `链${i + 1}`
+  })),
+  { color: ME_COLOR, label: '我' }
+])
+
+const vizLegend = computed(() => (vizTab.value === 'calls' ? CALLS_LEGEND : vizChainsLegend.value))
+
+/** 空态判定：calls 空 / 未参与链路（含 fi 缺失、chainIds 全为脏 id）→ n-empty，不渲染空图 */
+const vizEmpty = computed(() =>
+  vizTab.value === 'calls' ? props.fn.calls.length === 0 : vizChains.value.length === 0
+)
+
+const vizExpanded = computed(() => isExpanded(vizKey(), false))
+
+/**
+ * 展开/切 tab 时播种 on:false 初值：patchGraphCfg 对缺失配置的 on 兜底是 true，
+ * 不播种会导致 GraphView 首次写回布局时把 on 意外置 true（V1 InsightHome 同范式）。
+ * V2 自身不消费 cfg.on（展开态走 expand store），播种纯为让后续 patch 合并出干净 on 值。
+ * 播种时机放在「用户实际展开后」，不给整页折叠卡片预写存储键。
+ */
+watch(
+  [vizExpanded, vizScopeKey],
+  ([expandedNow]) => {
+    if (!expandedNow) return
+    const key = vizScopeKey.value
+    if (!getGraphCfg(key)) setGraphCfg(key, { on: false, layoutType: 'dagre-TB' })
+  },
+  { immediate: true }
+)
 
 /**
  * 主干 / 次要拆分（AI-first）：keyCallIndexes 为 undefined（AI 未生成/失败）时不拆分、
@@ -455,6 +541,37 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
         >
           +{{ chainView.rest.length }} 更多 {{ isExpanded(chainsMoreKey(), false) ? '▾' : '▸' }}
         </button>
+      </div>
+    </div>
+
+    <!-- V2：可视化（调用链 / 所在链路 双 tab 图）：默认收起，展开才挂载 GraphView（布局有缓存） -->
+    <div class="border-t border-gray-100 px-4 py-2">
+      <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(vizKey(), false)">
+        可视化（调用链 {{ vizCallsNodeCount }} 节点 / 所在链路 {{ vizChains.length }} 链）
+        {{ vizExpanded ? '▾' : '▸' }}
+      </button>
+      <div v-if="vizExpanded" class="mt-2">
+        <n-radio-group v-model:value="vizTab" size="small" class="mb-2">
+          <n-radio-button value="calls">调用链</n-radio-button>
+          <n-radio-button value="chains">所在链路</n-radio-button>
+        </n-radio-group>
+        <!-- 空态：不渲染空图（calls 空 / 未参与链路各自独立判定，另一 tab 不受影响） -->
+        <n-empty
+          v-if="vizEmpty"
+          :description="vizTab === 'calls' ? '无内部调用' : '未参与链路'"
+          class="my-6"
+        />
+        <div v-else class="h-[420px]">
+          <!-- :key=scopeKey：切 tab 强制重挂载，GraphView 只在 setup 读一次持久化布局配置（V1 同范式） -->
+          <GraphView
+            :key="vizScopeKey"
+            :model="vizModel"
+            layout-type="dagre-TB"
+            :scope-key="vizScopeKey"
+            :legend="vizLegend"
+            @jump="goFunction"
+          />
+        </div>
       </div>
     </div>
 

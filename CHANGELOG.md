@@ -2,6 +2,14 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-16 · V2：函数卡片「可视化」双 tab 图（调用链 / 所在链路） · web
+
+- **内容**：FunctionCard 新增可折叠区块「可视化」（固定默认收起 + 用户态经 expand store `card:<fnId>:viz` 持久化，followups 同范式，不新增 expandDefault 配置键），标题带轻量计数「可视化（调用链 N 节点 / 所在链路 M 链）」；区块内 n-radio-group 切「调用链 / 所在链路」双 tab（tab 为会话内浏览态本地 ref，不持久化）。调用链 tab 渲染 `functionCallsModel(fn)`（me 高亮、边按 ROLE_HEX 角色着色、外部灰节点无 fnId 不可跳），图例=ROLE_LABELS×ROLE_HEX 三语义色（与边着色同源，图例与图必对齐）；所在链路 tab 渲染 `chainsOverlayModel(fn.id, 链, topN=3)`，链取文字区 chainView 的 selectTopChains 排序结果截 top3（图与文字陈列顺序一致），图例=CHAIN_PALETTE 前 N 色（对应节点 sub ①②③ 链序号前缀）+ ME_COLOR「我」。scopeKey=`fn:<fnId>:<tab>` 按 tab 隔离布局记忆，on/layoutType 经 graphPersist 持久化；展开/切 tab 时才 setGraphCfg 播种 on:false 初值（规避 patchGraphCfg 的 on 兜底 true，V1 InsightHome 同范式；折叠卡片不预写存储键），GraphView :key=scopeKey 切 tab 强制重挂载、展开才挂载（按需生成，布局有缓存）。空态：calls 空→「无内部调用」、vizChains 空（含 fi 缺失/chainIds 全脏 id）→「未参与链路」，均 n-empty 不渲染空图；标题节点数在 calls 空时记 0（如实报 me 单节点会与空态矛盾）。fn 节点 click=jump 复用卡片既有 goFunction（fnJumpQuery 定位高亮）。
+- **影响范围**：仅 web（components/FunctionCard.vue）；不改基座 GraphView/graphModel/graphPersist、不改 server/core/README、不新增依赖。
+- **动机**：V0 基座三入口之二（V2）：函数卡片内直接可视化「我调用了谁」（角色着色星型图）与「我在哪些链路里」（top3 链叠加 DAG），服务快速理解单个函数的上下游与链路职责。
+- **测试**：未新增纯函数——标题计数与图模型直接取自 `functionCallsModel`/`chainsOverlayModel`（graphModel.test.ts 29 例已覆盖 me 高亮/外部灰节点/角色着色/链合并去重/topN 截断），计数口径与构建器单一来源不重复实现；组件不做单测（仓库无 DOM 测试基建，V0/V1 同口径），由 vue-tsc 严格类型检查覆盖。`pnpm lint` 与 `pnpm test` 全绿（core 159 / server 188 / web 159）。
+- **关联 commit**：待提交。
+
 ## 2026-10-16 · V1：洞察页业务脉络「树/图」可视化切换 · web
 
 - **内容**：洞察页脉络区加「树/图」切换（n-radio-group，默认树、开关态经 graphPersist 持久化）；图模式用 V0 基座渲染 flowTreeModel（scopeKey=`flow:<activeProjectId>`，项目切换 :key 重挂载）；fn 节点点击=复用现有跳转（fnJumpQuery _t+定位高亮），group/phase 节点点击=drill（expandedGroups toggle 展开/折叠子树，超级节点 `agg:` 前缀经 drillTargetId 归一）；接入时先 setGraphCfg 播种初值规避 patchGraphCfg 的 on 兜底 true 语义；图模式无 flows 显 n-empty 不渲染空图、树模式行为不变。基座最小补缺：GraphView onNodeClick 对 phase 也发 drill。初审修复：aggregateIfOverCap 增 exemptGroupIds（已展开组豁免聚合，超 300 大图 drill 不再被「吃回」、fn 叶子可见）；图模式无 flows 时扁平降级区不再与 n-empty 双份渲染；scopeKey/镜像同步注释补命名空间与单标签页假设说明。
