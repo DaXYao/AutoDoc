@@ -77,6 +77,23 @@ export interface NewChangeInput {
 }
 
 /**
+ * 跨 target 的函数级变更记录（C1 变更影响分析用）。
+ * functionId 是 targetId 的语义别名：变更记录的 targetId 恒为函数稳定 ID，
+ * 单独具名让消费方（server/impact）不必依赖「targetId 即函数 ID」这一隐含约定。
+ */
+export interface FunctionChangeRecord extends ChangeRecord {
+  functionId: string
+}
+
+/** listChangeRecords 的可选过滤参数 */
+export interface ListChangeRecordsOptions {
+  /** 按来源过滤；旧数据缺省 source 的记录语义等同 'snapshot'，按 snapshot 命中 */
+  source?: ChangeSource
+  /** 最多返回前 N 条（新→旧序下的最近 N 条）；非正数视为 0 */
+  limit?: number
+}
+
+/**
  * 元数据存储适配器接口：SQLite / 侧车 JSON 等后端均实现该接口。
  * 硬约束：
  * - 批注与变更历史通过稳定 ID 关联；
@@ -105,6 +122,11 @@ export interface StorageAdapter {
   /** 返回某函数全部变更记录（含归档），新→旧排序 */
   listChanges(targetId: string): ChangeRecord[]
   appendChange(input: NewChangeInput): ChangeRecord
+  /**
+   * 跨 target 返回函数级变更记录（C1 变更影响分析），新→旧排序，与 listChanges 同序语义。
+   * 纯只读方法：不触发写前备份。
+   */
+  listChangeRecords(opts?: ListChangeRecordsOptions): FunctionChangeRecord[]
 
   getSnapshot(fileId: string): FileSnapshot | null
   saveSnapshot(snapshot: FileSnapshot): void

@@ -7,7 +7,9 @@ import type { FileSnapshot } from '../changes.js'
 import { backupBaseName, pruneBackups } from './JsonStorage.js'
 import type {
   AnnotationPatch,
+  FunctionChangeRecord,
   InsightSnapshotMetaPatch,
+  ListChangeRecordsOptions,
   NewAnnotationInput,
   NewChangeInput,
   ParseCache,
@@ -220,6 +222,29 @@ export class SqliteStorage implements StorageAdapter {
       .prepare('SELECT * FROM changes WHERE target_id = ? ORDER BY seq DESC')
       .all(targetId)
     return rows.map((row) => this.rowToChange(row))
+  }
+
+  listChangeRecords(opts?: ListChangeRecordsOptions): FunctionChangeRecord[] {
+    const params: (string | number)[] = []
+    let sql = 'SELECT * FROM changes'
+    if (opts?.source !== undefined) {
+      // 旧行（ALTER 补列前写入）source 为 NULL，语义等同 'snapshot'（与 rowToChange 归一一致）
+      sql += " WHERE COALESCE(source, 'snapshot') = ?"
+      params.push(opts.source)
+    }
+    // seq 为插入序（git 回填按提交旧→新写入、快照对比按生成序写入），倒序即「新→旧」
+    sql += ' ORDER BY seq DESC'
+    if (opts?.limit !== undefined) {
+      sql += ' LIMIT ?'
+      // 非有限数（NaN/Infinity）统一归 0：node:sqlite 绑定 NaN 会抛 datatype mismatch，
+      // 与 JsonStorage 的 slice 语义对齐（接口契约：两适配器一致）
+      params.push(Number.isFinite(opts.limit) ? Math.max(0, Math.trunc(opts.limit)) : 0)
+    }
+    const rows = this.conn().prepare(sql).all(...params)
+    return rows.map((row) => {
+      const record = this.rowToChange(row)
+      return { ...record, functionId: record.targetId }
+    })
   }
 
   appendChange(input: NewChangeInput): ChangeRecord {

@@ -9,6 +9,13 @@ import { pickFolder } from './pickFolder.js'
 import type { ProjectManager } from './projects.js'
 import { loadInsight, refreshInsightAI } from './insight.js'
 import { diffInsightSnapshots } from './insightDiff.js'
+import {
+  IMPACT_COMMITS_DEFAULT_LIMIT,
+  IMPACT_COMMITS_MAX_LIMIT,
+  ImpactInputError,
+  getChangeset,
+  listImpactCommits
+} from './impact.js'
 import { AskInputError, askCallStep, askFunction } from './ask.js'
 import { getDeepSeekConfig } from './env.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
@@ -249,6 +256,40 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     if (!service) return reply.code(409).send({ error: 'no active project' })
     service.storage.setActiveInsightSnapshotId(null)
     return { ok: true, activeId: null }
+  })
+
+  /* ------------------------- 变更影响分析（C1，纯读，不受 readOnly 拦截） ------------------------- */
+
+  // 提交候选列表：git 来源变更记录按 commit.hash 聚合，date 降序；limit 缺省 50、上限 200
+  app.get('/api/impact/commits', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const { limit } = req.query as { limit?: string }
+    let resolved = IMPACT_COMMITS_DEFAULT_LIMIT
+    if (limit !== undefined) {
+      const parsed = Number(limit)
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        return reply.code(400).send({ error: 'limit 必须为正整数' })
+      }
+      resolved = Math.min(parsed, IMPACT_COMMITS_MAX_LIMIT)
+    }
+    return listImpactCommits(service, resolved)
+  })
+
+  // 某一范围（workspace / commit:<hash> / range:<hashA>..<hashB>）的函数级变更集
+  app.get('/api/impact/changeset', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const { scope } = req.query as { scope?: string }
+    if (typeof scope !== 'string' || scope.trim().length === 0) {
+      return reply.code(400).send({ error: '缺少 scope（workspace / commit:<hash> / range:<hashA>..<hashB>）' })
+    }
+    try {
+      return getChangeset(service, scope)
+    } catch (error) {
+      if (error instanceof ImpactInputError) return reply.code(400).send({ error: error.message })
+      throw error
+    }
   })
 
   /* ------------------------- 文档数据路由（作用于活动项目） ------------------------- */

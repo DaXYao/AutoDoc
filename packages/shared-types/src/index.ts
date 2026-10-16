@@ -640,6 +640,43 @@ export interface InsightHistoryResponse {
   showRecent: number
 }
 
+/* ------------------------- 变更影响分析（C1） ------------------------- */
+
+/** 从 git 来源变更记录聚合出的提交条目（变更影响分析的提交候选列表） */
+export interface ImpactCommit {
+  hash: string
+  author: string
+  /** 该提交下最新一条变更记录的日期（ISO） */
+  date: string
+  subject: string
+  /** 该提交涉及的函数数（按稳定 ID 去重） */
+  functionCount: number
+}
+
+/** 变更集内的单个变更函数引用（由函数稳定 ID 派生的轻量视图，供前端做链路波及计算） */
+export interface ChangedFunctionRef {
+  functionId: string
+  type: ChangeType
+  /** 稳定 ID 首段（项目相对路径，POSIX 风格） */
+  filePath: string
+  /** 由稳定 ID 解析出的函数/方法名 */
+  name: string
+}
+
+/** GET /api/impact/changeset 响应：某一范围（scope）的函数级变更集 */
+export interface ImpactChangeset {
+  /** 原始 scope 参数：'workspace' | 'commit:<hash>' | 'range:<hashA>..<hashB>'。
+   *  hash 须取自 GET /api/impact/commits 返回的完整 hash：commit: 为全 hash 精确匹配，
+   *  短前缀/大小写差异返回空变更集（200），range: 端点无法定位则 400 */
+  scope: string
+  /** 涉及的提交 hash（新→旧）；workspace 范围无提交，为空数组 */
+  commits: string[]
+  /** 变更函数（按 functionId 去重，同函数保留最新一条记录的 type） */
+  changedFunctions: ChangedFunctionRef[]
+  /** 当前文档生成时间（与 /api/meta 一致） */
+  generatedAt: string
+}
+
 /* ------------------------- 就地追问（轴 B） ------------------------- */
 
 /** POST /api/ask 请求：在某个调用步骤（stepId）上就地提问 */

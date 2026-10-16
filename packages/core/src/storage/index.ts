@@ -21,6 +21,8 @@ export type {
   NewAnnotationInput,
   AnnotationPatch,
   NewChangeInput,
+  FunctionChangeRecord,
+  ListChangeRecordsOptions,
   ParseCache,
   ParseCacheEntry
 } from './StorageAdapter.js'

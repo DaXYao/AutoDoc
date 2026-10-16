@@ -418,6 +418,11 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
   const files: FileDoc[] = []
   const allChanges: DetectedChange[] = []
 
+  // 同一次 generateDocs 的全部快照变更记录共用同一时间戳：C1 的 workspace 变更集按
+  // 「date = 最新批次时间」识别批次，共享时间戳让批次边界严格确定，不受写入耗时影响
+  // （JsonStorage 每条 appendChange 都整份落盘，大批次逐条取 now 可能跨分钟级）
+  const batchDate = new Date().toISOString()
+
   // 阶段二：建图 + 变更检测
   for (const unit of units) {
     const { relPath, functions, parsed, imports } = unit
@@ -467,7 +472,8 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
       storage.appendChange({
         targetId: change.targetId,
         type: change.type,
-        description: change.description
+        description: change.description,
+        date: batchDate
       })
     }
     storage.saveSnapshot(snapshot)

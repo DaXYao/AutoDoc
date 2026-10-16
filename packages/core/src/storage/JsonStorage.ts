@@ -6,7 +6,9 @@ import type { Annotation, ChangeRecord, ChangeSource, InsightSnapshot, InsightSn
 import type { FileSnapshot } from '../changes.js'
 import type {
   AnnotationPatch,
+  FunctionChangeRecord,
   InsightSnapshotMetaPatch,
+  ListChangeRecordsOptions,
   NewAnnotationInput,
   NewChangeInput,
   ParseCache,
@@ -211,6 +213,25 @@ export class JsonStorage implements StorageAdapter {
       .filter((c) => c.targetId === targetId)
       .reverse()
       .map((c) => (c.source ? c : { ...c, source: 'snapshot' as ChangeSource }))
+  }
+
+  listChangeRecords(opts?: ListChangeRecordsOptions): FunctionChangeRecord[] {
+    this.init()
+    // 与 listChanges 同序语义：追加序倒排即「新→旧」；旧数据缺省 source 按 'snapshot' 归一
+    let list = [...this.data.changes].reverse()
+    if (opts?.source !== undefined) {
+      const source = opts.source
+      list = list.filter((c) => (c.source ?? 'snapshot') === source)
+    }
+    if (opts?.limit !== undefined) {
+      // 非有限数（NaN/Infinity）统一归 0，与 SqliteStorage 的参数归一口径一致
+      list = list.slice(0, Number.isFinite(opts.limit) ? Math.max(0, Math.trunc(opts.limit)) : 0)
+    }
+    return list.map((c) => ({
+      ...c,
+      source: c.source ?? ('snapshot' as ChangeSource),
+      functionId: c.targetId
+    }))
   }
 
   appendChange(input: NewChangeInput): ChangeRecord {

@@ -240,6 +240,64 @@ function runAdapterSuite(create: (dir: string) => StorageAdapter): void {
     expect(gitRec.commit).toEqual({ hash: 'deadbeef', author: 'Dev', subject: 'fix: x' })
   })
 
+  it('listChangeRecords：跨 target 新→旧、source 过滤（缺省视为 snapshot）、limit、functionId 别名', () => {
+    storage.appendChange({
+      targetId: 'a.ts::-::fnA@aaaaaaaaaaaa',
+      type: 'added',
+      description: '一',
+      date: '2026-01-01T00:00:00.000Z'
+    })
+    storage.appendChange({
+      targetId: 'b.ts::-::fnB@bbbbbbbbbbbb',
+      type: 'modified',
+      description: '二',
+      date: '2026-01-02T00:00:00.000Z',
+      source: 'git',
+      commit: { hash: 'h1', author: 'Dev', subject: 'fix: x' }
+    })
+    storage.appendChange({
+      targetId: 'c.ts::-::fnC@cccccccccccc',
+      type: 'deleted',
+      description: '三',
+      date: '2026-01-03T00:00:00.000Z',
+      source: 'snapshot'
+    })
+
+    const all = storage.listChangeRecords()
+    expect(all.map((c) => c.description)).toEqual(['三', '二', '一'])
+    // functionId 为 targetId 的语义别名
+    expect(all[0].functionId).toBe('c.ts::-::fnC@cccccccccccc')
+    expect(all[0].functionId).toBe(all[0].targetId)
+
+    expect(storage.listChangeRecords({ source: 'git' }).map((c) => c.description)).toEqual(['二'])
+    expect(storage.listChangeRecords({ source: 'git' })[0].commit).toEqual({
+      hash: 'h1',
+      author: 'Dev',
+      subject: 'fix: x'
+    })
+    // 写入时缺省 source 的记录（第一条）按 'snapshot' 语义命中，且读出已归一
+    const snapshots = storage.listChangeRecords({ source: 'snapshot' })
+    expect(snapshots.map((c) => c.description)).toEqual(['三', '一'])
+    expect(snapshots.every((c) => c.source === 'snapshot')).toBe(true)
+
+    // limit 取「最近 N 条」；与 source 组合；非正数视为空
+    expect(storage.listChangeRecords({ limit: 2 }).map((c) => c.description)).toEqual(['三', '二'])
+    expect(storage.listChangeRecords({ source: 'git', limit: 5 })).toHaveLength(1)
+    expect(storage.listChangeRecords({ limit: 0 })).toHaveLength(0)
+  })
+
+  it('listChangeRecords 为只读方法：不触发写前备份', () => {
+    const backupDir = join(dir, 'backups')
+    const countBackups = (): number =>
+      existsSync(backupDir) ? readdirSync(backupDir).filter((f) => f.endsWith('.bak')).length : 0
+    storage.appendChange({ targetId: 't', type: 'added', description: 'x' })
+    const before = countBackups()
+    storage.listChangeRecords()
+    storage.listChangeRecords({ source: 'git', limit: 10 })
+    storage.listChangeRecords({ source: 'snapshot' })
+    expect(countBackups()).toBe(before)
+  })
+
   it('写操作前生成备份（数据安全）', () => {
     storage.addAnnotation({
       targetType: 'file',
@@ -649,6 +707,9 @@ describe('存储层迁移与向后兼容', () => {
     })
     const gitRec = upgraded.listChanges('t').find((c) => c.source === 'git')
     expect(gitRec?.commit).toEqual({ hash: 'beef', author: 'Dev', subject: 's' })
+    // ④ C1：listChangeRecords 的 source 过滤兼容旧行 source 为 NULL（COALESCE 视为 snapshot）
+    expect(upgraded.listChangeRecords({ source: 'snapshot' }).map((c) => c.id)).toContain('old-1')
+    expect(upgraded.listChangeRecords({ source: 'git' }).map((c) => c.id)).not.toContain('old-1')
     upgraded.close()
   })
 
