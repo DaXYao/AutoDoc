@@ -21,10 +21,19 @@
 - [ ] serve 遇 EADDRINUSE 必须响亮报错+非零退出，禁止静默当成功（否则「新前端+旧后端」错配、新接口 404 难定位）。
 - [ ] 浏览器复验 expand 门控 UI：设 localStorage 键后必须同脚本内 reload（expand store 深 watch 会全量回写覆盖外部写入）。
 - [ ] 浏览器实机复验前端改动必须 ignoreCache 强制重载文档：哈希跳转不重载 SPA，验的会是旧 bundle 并得出错误结论（高亮/默认折叠等「看似没生效」）。
+- [ ] 给「切 X」watch 加 bootstrap 早退（oldId===null return）时，先确认首屏触发路径是否正挂在该 watch 上——否则修好一个竞态又静默丢掉首屏触发（C3 横幅复位→自动重生不触发，两轮实机才定位）。
 
 ---
 
 ## 教训条目
+
+### 2026-10-17 · 修 watch 竞态时早退过宽：bootstrap 首屏触发路径被一并切断，自动重生静默失效
+- **场景**：C3 影响视图「切项目 watch 复位横幅」把 bootstrap 完成的 done 横幅清掉（🟡 竞态）；修复时加 `oldId===null return` 早退。
+- **现象**：实机复验发现进入影响视图不再自动增量重生（check 明明 stale=true），且无任何横幅/错误——静默失效。
+- **根因**：hub 流程下 appReady watch 触发 runAutoRefresh 时活动项目尚未落定（门闩 return），**首屏真正的触发点正是 activeProjectId 的 null→id watch**；早退把它一并切断。
+- **正确做法**：早退只跳过「复位横幅/降级标志」，仍补触发 runAutoRefresh（`if (oldId===null) { void runAutoRefresh(); return }`）；修 watch 竞态前先画出该 watch 的全部触发来源（首屏/切换/回滚）。
+- **预防措施**：已加入避坑清单；终审实机复验用「指纹不变的小改动」快速验证自动重生横幅（复用 38/重跑 1）。
+- **关联**：packages/web/src/views/ImpactView.vue（activeProjectId watch）；commit f9d2aff。
 
 ### 2026-10-16 · 模板函数直调当 prop：子组件 watch 每次重渲染被触发，用户视口被重置
 - **场景**：V3 链路内联图 `:model="chainVizModel(chain)"` 在模板直调构建函数。
