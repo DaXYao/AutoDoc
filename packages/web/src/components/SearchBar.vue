@@ -59,6 +59,7 @@ function handleSelect(value: string): void {
   <n-auto-complete
     v-model:value="keyword"
     :options="options"
+    :input-props="{ 'aria-label': '搜索函数' }"
     placeholder="搜索函数名 / 类名 / 用途…"
     clearable
     @select="handleSelect"

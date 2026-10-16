@@ -21,7 +21,7 @@ const CATEGORY_BAR_COLORS: Record<FunctionCategory, string> = {
   business: 'var(--ad-accent)',
   implementation: '#3D9A6C',
   utility: '#C98A2D',
-  pending: '#8A8F98'
+  pending: 'var(--ad-ink-3)'
 }
 </script>
 

@@ -12,10 +12,13 @@
   --ad-surface: #FFFFFF;
   --ad-ink: #1F2329;
   --ad-ink-2: #5C6270;
-  --ad-ink-3: #8A8F98;
+  /* ink-3 从 #8A8F98 加深：旧值在白底仅≈3.25:1，不满足 WCAG 1.4.3 AA 正文 4.5:1 */
+  --ad-ink-3: #666B74;
   --ad-line: #E8E5E0;
   --ad-line-strong: #DDD9D2;
   --ad-accent: #4C6FFF;
+  /* accent 作文字/图标色时用此加深版（白底≈5.5:1）；#4C6FFF 仅保留于填充/边框/图形 */
+  --ad-accent-ink: #3B5BE6;
   --ad-accent-soft: #EEF2FF;
   --ad-radius: 10px;
   --ad-radius-sm: 6px;
@@ -82,9 +85,10 @@ body {
   color: var(--ad-ink);
 }
 
-/* 导航 pills：默认次级墨色，active 用 accent-soft 底 + accent 字 */
+/* 导航 pills：默认次级墨色，active 用 accent-soft 底 + accent-ink 字（文字对比度达 AA）；
+   纵向 padding 6px（py-1.5）保证触控目标 ≥24px */
 .ad-nav-pill {
-  padding: 4px 10px;
+  padding: 6px 10px;
   border-radius: var(--ad-radius-sm);
   font-size: 12px;
   line-height: 20px;
@@ -97,7 +101,7 @@ body {
 .ad-nav-pill--active,
 .ad-nav-pill--active:hover {
   background: var(--ad-accent-soft);
-  color: var(--ad-accent);
+  color: var(--ad-accent-ink);
 }
 
 /* 搜索槽：弹性但有宽度下限——旧版 flex-1 无下限，窄屏被挤成 44px「空白盒」 */
@@ -166,7 +170,7 @@ body {
   overflow-x: auto;
 }
 .annotation-body a {
-  color: var(--n-color-target, var(--ad-accent));
+  color: var(--n-color-target, var(--ad-accent-ink));
   text-decoration: underline;
 }
 .annotation-body ul,
@@ -190,4 +194,14 @@ body {
 }
 .fn-jump-highlight {
   animation: fn-jump-flash 1.6s ease-out;
+}
+
+/* 前庭安全：系统开启「减少动态效果」时关掉跳转光晕动画与平滑滚动 */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .fn-jump-highlight {
+    animation: none;
+  }
 }

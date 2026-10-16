@@ -67,7 +67,7 @@ function goFile(fileId: string): void {
                   />
                   <div class="min-w-0">
                     <button
-                      class="font-mono text-xs text-blue-600 hover:underline"
+                      class="font-mono text-xs text-[color:var(--ad-accent-ink)] hover:underline"
                       @click="goFunction(fid)"
                     >
                       {{ fnName(fid) }}

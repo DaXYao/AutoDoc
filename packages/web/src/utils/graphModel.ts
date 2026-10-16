@@ -102,11 +102,11 @@ export const EXTERNAL_COLOR = '#9ca3af'
 export const SEQ_EDGE_COLOR = '#94a3b8'
 
 /**
- * 图例/叠加图的中性「未波及/默认」灰：与 style.css 的 --ad-ink-3 同值（#8A8F98）。
+ * 图例/叠加图的中性「未波及/默认」灰：与 style.css 的 --ad-ink-3 同值（#666B74）。
  * 用常量而非 CSS var：图例色以字符串被 GraphView（Vue Flow style/SVG fill）消费，
  * 且 SVG/HTML 导出等图渲染路径不经过页面 CSS，var() 不可解析，故固化令牌等值。
  */
-export const LEGEND_NEUTRAL = '#8A8F98'
+export const LEGEND_NEUTRAL = '#666B74'
 
 /** 调用点角色 → hex（语义对齐 format.ts 的 ROLE_COLORS：core=绿 / validation=黑灰 / exception=红） */
 export const ROLE_HEX: Record<CallRole, string> = {

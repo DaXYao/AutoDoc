@@ -40,7 +40,9 @@ async function locateFn(fnId: string): Promise<void> {
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
   const el = document.getElementById(`fn-${fnId}`)
   if (!el) return
-  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  // 前庭安全：系统开启「减少动态效果」时不做平滑滚动
+  const behavior = matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'
+  el.scrollIntoView({ behavior, block: 'start' })
   clearHighlight()
   jumpHighlightId.value = fnId
   highlightTimer = setTimeout(() => {
@@ -117,7 +119,7 @@ const sourceHref = computed(() =>
             <a
               v-if="sourceHref"
               :href="sourceHref"
-              class="text-xs text-blue-500 hover:underline"
+              class="text-xs text-[color:var(--ad-accent-ink)] hover:underline"
               @click.stop
             >
               打开源码

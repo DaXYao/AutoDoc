@@ -20,3 +20,18 @@ export const router = createRouter({
     { path: '/file/:fileId(.*)', name: 'file', component: FilePage }
   ]
 })
+
+/** 路由 → 文档标题（浏览器标签页/历史记录/屏幕阅读器窗口名均可辨识当前位置） */
+const ROUTE_TITLES: Record<string, string> = {
+  home: '洞察',
+  files: '文件',
+  impact: '变更影响',
+  projects: '项目',
+  module: '模块详情',
+  file: '文件文档'
+}
+
+router.afterEach((to) => {
+  const title = ROUTE_TITLES[String(to.name ?? '')]
+  document.title = title ? `${title} · AutoDoc` : 'AutoDoc'
+})

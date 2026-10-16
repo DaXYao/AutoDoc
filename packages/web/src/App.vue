@@ -7,6 +7,7 @@ import type { SelectOption } from 'naive-ui'
 import { getMode } from './data/api'
 import { appState, bootstrap, regenerateActive, switchProject } from './store/app'
 import { formatDate } from './utils/format'
+import { adSelectLabel as vAdSelectLabel } from './utils/a11y'
 import { formatIncrementalSummary } from './utils/incremental'
 import { themeOverrides, adBtnInkOverrides, adBtnOutlineOverrides } from './theme'
 import SearchBar from './components/SearchBar.vue'
@@ -106,6 +107,7 @@ async function handleRefresh(): Promise<void> {
               :value="appState.activeProjectId"
               :options="projectOptions"
               :render-label="renderProjectLabel"
+              v-ad-select-label="'切换项目'"
               placeholder="选择项目"
               size="small"
               class="shrink-0"

@@ -19,6 +19,7 @@ import {
   type LayoutPoint
 } from '../../utils/graphLayout'
 import { getGraphCfg, patchGraphCfg } from '../../utils/graphPersist'
+import { adSelectLabel as vAdSelectLabel } from '../../utils/a11y'
 import { downloadText, modelToHtml, modelToSvg } from '../../utils/graphExport'
 import FlowNodeCard from './FlowNodeCard.vue'
 
@@ -196,6 +197,7 @@ function exportHtml(): void {
       <n-select
         :value="currentLayout"
         :options="layoutOptions"
+        v-ad-select-label="'布局类型'"
         size="small"
         class="!w-36"
         @update:value="onLayoutChange"

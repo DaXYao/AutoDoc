@@ -95,7 +95,7 @@ async function handleDelete(annotation: Annotation): Promise<void> {
           （编辑于 {{ formatDate(annotation.updatedAt) }}）
         </span>
         <template v-if="!readOnly">
-          <button class="ml-auto text-blue-500 hover:underline" @click="startEdit(annotation)">
+          <button class="ml-auto text-[color:var(--ad-accent-ink)] hover:underline" @click="startEdit(annotation)">
             编辑
           </button>
           <n-popconfirm positive-text="删除" negative-text="取消" @positive-click="handleDelete(annotation)">

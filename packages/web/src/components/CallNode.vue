@@ -147,7 +147,7 @@ async function handleDeleteFollowup(followup: Annotation): Promise<void> {
         <!-- 追问入口：仅可写模式显示 -->
         <button
           v-if="!readOnly"
-          class="text-blue-500 hover:underline"
+          class="text-[color:var(--ad-accent-ink)] hover:underline"
           @click="panelOpen = !panelOpen"
         >
           {{ panelOpen ? '收起追问' : '追问' }}

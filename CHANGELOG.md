@@ -2,6 +2,14 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-17 · D3：Web Interface Guidelines 合规修复（对比度/aria/动效/触控/标题） · web
+
+- **内容**：①对比度 AA：--ad-ink-3 #8A8F98→#666B74（白底 5.36/画布 4.92，旧值 3.25 不达标），theme textColor3/placeholder/arrow 同步；新增 --ad-accent-ink #3B5BE6 承载一切 accent 文字/图标（nav pill active、annotation 链接、15 处跳转链接、phase 图标、聚合徽标底），accent #4C6FFF 仅留填充/边框/图形；theme primary 族改 #3B5BE6（hover #3550D0/pressed #2F49C0，白字全程 ≥5.49）。②可访问名：naive n-select 的 :input-props aria-label 在非 filterable 分支被静默丢弃（源码核实不渲染 input）、filterable 仅部分生效 → 新增 utils/a11y.ts 指令 v-ad-select-label 挂载时把 aria-label 写到真正可聚焦的 .n-base-selection-label（5 处 select 改用）；SearchBar 保留 input-props（auto-complete 落真实 input 有效）；ProjectHub ✕ aria-label。③prefers-reduced-motion：CSS 媒体查询（scroll-behavior auto + fn-jump-highlight none）+ FilePage scrollIntoView matchMedia 三目。④触控目标：✕ p-1.5（28px）、nav pill 32px。⑤router afterEach 文档标题映射（「X · AutoDoc」）；index.html lang=zh-CN 核查通过。⑥顺带：FlowTree 序号徽标硬编码蓝→accent-soft/accent-ink。guidelines 源网络不可达，按标准清单人工审查（来源状态已记录）。
+- **影响范围**：仅 web（style.css/theme.ts/a11y.ts 新/App.vue/GraphView/ImpactView/FlowTree/FunctionCard/CallNode/AnnotationPanel/FilePage/ModuleDetail/ProjectHub/SearchBar/router.ts 等 18 文件）；逻辑零改动；不改 server/core/README、不新增依赖。
+- **动机**：D 阶段第三步：米白色板下的无障碍合规（正文/控件对比度、读屏可访问名、动效偏好、触控尺寸、语义标题）。
+- **测试**：`pnpm lint` 与 `pnpm test` 全绿（core 170 / server 214 / web 180）；对比度核算表见提交说明；实机：select 聚焦 div aria-label 生效、pill 32px、路由标题「文件 · AutoDoc」。
+- **关联 commit**：待提交。
+
 ## 2026-10-17 · D2：组件视觉对齐（上半八组件+下半页族/图组件） · web
 
 - **内容**：把组件内灰阶/硬编码全量替换为 D1 设计令牌（--ad-line/line-strong/canvas/surface/ink 族/radius 族），卡片容器统一挂 .ad-card 删重复 border/bg/shadow/rounded；等宽经 @theme 把 font-mono 接到 --ad-mono（hash/行号/路径自动生效）。上半：FunctionCard/ImpactView/FlowTree/InsightHome/InsightHistory/CallNode/ProjectHub/ModuleDetail 八组件 gray-* 归零；下半：FileTree/GraphView/FlowNodeCard/AnnotationPanel/FilePage/FileList + CategorySection（四分类色底→canvas+左 3px 语义色条：accent/#3D9A6C/#C98A2D/#8A8F98，内联 style 免疫分层竞争）；GraphView 工具条/图例/minimap 表面化、minimap 默认点改 LEGEND_NEUTRAL；FlowNodeCard 节点卡 surface+发丝线+kind 左色条（group 紫 #8A7BC8 单点常量）；graphExport KIND_STROKE phase/group 对齐屏内色板消除导出双蓝/双紫分叉；ImpactView 图例 #94a3b8→graphModel.LEGEND_NEUTRAL(#8A8F98)；.annotation-body a→accent；.ad-card 注释补「禁叠加边框/底色/圆角/阴影工具类」规约。复审定界：装饰符（箭头/分隔）=line-strong、信息文本（行号/可交互✕）=ink-3。保留：批注蓝底/追问绿底（AGENTS 批注分离展示）、图边语义色 #94a3b8。

@@ -8,6 +8,7 @@ import { checkRefresh, fetchChangeset, fetchImpactCommits, getMode, refreshDocs 
 import { chainImportance } from '../utils/chains'
 import { fnLabelFromId, IMPACT_COLOR, LEGEND_NEUTRAL, RIPPLE_COLOR } from '../utils/graphModel'
 import { safeLocalStorage } from '../utils/graphPersist'
+import { adSelectLabel as vAdSelectLabel } from '../utils/a11y'
 import {
   affectedChains,
   changePointsOf,
@@ -567,6 +568,7 @@ function goFunction(id: string): void {
             v-model:value="commitHash"
             :options="commitOptions"
             :loading="commitsLoading"
+            v-ad-select-label="'选择提交'"
             size="small"
             filterable
             clearable
@@ -578,6 +580,7 @@ function goFunction(id: string): void {
               v-model:value="rangeStart"
               :options="commitOptions"
               :loading="commitsLoading"
+              v-ad-select-label="'范围起点提交'"
               size="small"
               filterable
               clearable
@@ -589,6 +592,7 @@ function goFunction(id: string): void {
               v-model:value="rangeEnd"
               :options="commitOptions"
               :loading="commitsLoading"
+              v-ad-select-label="'范围终点提交'"
               size="small"
               filterable
               clearable

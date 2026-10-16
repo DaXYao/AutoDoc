@@ -7,14 +7,17 @@ import type { ButtonProps, GlobalThemeOverrides } from 'naive-ui'
  */
 export const themeOverrides: GlobalThemeOverrides = {
   common: {
-    // 交互强调色：靛蓝族
-    primaryColor: '#4C6FFF',
-    primaryColorHover: '#6D87FF',
-    primaryColorPressed: '#3B5BE6',
+    // 交互强调色：靛蓝族。基准取 #3B5BE6（白底≈5.5:1）而非 #4C6FFF：
+    // naive 按钮文字多为 12-13px 白字，#4C6FFF 底仅≈4.18:1 不满足 AA 4.5:1；
+    // hover 回到 #4C6FFF 保持交互强调观感，pressed 加深一档
+    primaryColor: '#3B5BE6',
+    // hover 取比 base 略深而非更亮：更亮的 #4C6FFF 白字仅 4.18:1 不达 AA，深色 ramp 全程达标
+    primaryColorHover: '#3550D0',
+    primaryColorPressed: '#2F49C0',
     primaryColorSuppl: '#EEF2FF',
-    infoColor: '#4C6FFF',
-    infoColorHover: '#6D87FF',
-    infoColorPressed: '#3B5BE6',
+    infoColor: '#3B5BE6',
+    infoColorHover: '#3550D0',
+    infoColorPressed: '#2F49C0',
     infoColorSuppl: '#EEF2FF',
     // 状态色降饱和族：贴合米白底的低对比暖灰环境
     successColor: '#3D9A6C',
@@ -29,11 +32,11 @@ export const themeOverrides: GlobalThemeOverrides = {
     errorColorHover: '#E06A70',
     errorColorPressed: '#B23A41',
     errorColorSuppl: '#FBECEC',
-    // 墨色文字族
+    // 墨色文字族（textColor3 与 --ad-ink-3 同源加深，满足 AA 正文 4.5:1）
     textColorBase: '#1F2329',
     textColor1: '#1F2329',
     textColor2: '#5C6270',
-    textColor3: '#8A8F98',
+    textColor3: '#666B74',
     textColorDisabled: '#B4B8BF',
     // 发丝线与圆角
     borderColor: '#E8E5E0',
@@ -75,7 +78,7 @@ export const themeOverrides: GlobalThemeOverrides = {
     color: '#FFFFFF',
     colorFocus: '#FFFFFF',
     textColor: '#1F2329',
-    placeholderColor: '#8A8F98',
+    placeholderColor: '#666B74',
     borderRadius: '8px'
   },
   Select: {
@@ -94,7 +97,7 @@ export const themeOverrides: GlobalThemeOverrides = {
     // n-collapse 无外框，分隔发丝线走 dividerColor
     dividerColor: '#E8E5E0',
     titleTextColor: '#1F2329',
-    arrowColor: '#8A8F98'
+    arrowColor: '#666B74'
   },
   Card: {
     borderColor: '#E8E5E0',

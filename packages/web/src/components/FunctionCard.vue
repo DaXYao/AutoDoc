@@ -356,7 +356,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
           <a
             v-if="sourceHref"
             :href="sourceHref"
-            class="ml-1 text-blue-500 hover:underline"
+            class="ml-1 text-[color:var(--ad-accent-ink)] hover:underline"
             target="_blank"
             rel="noopener"
           >
@@ -418,7 +418,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
               <a
                 v-if="lineHref(group.startLine)"
                 :href="lineHref(group.startLine) ?? undefined"
-                class="shrink-0 font-mono text-blue-500 hover:underline"
+                class="shrink-0 font-mono text-[color:var(--ad-accent-ink)] hover:underline"
                 target="_blank"
                 rel="noopener"
                 :title="`跳到源码 L${group.startLine}`"
@@ -469,7 +469,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
                 <a
                   v-if="lineHref(other.block.startLine)"
                   :href="lineHref(other.block.startLine) ?? undefined"
-                  class="shrink-0 font-mono text-blue-500 hover:underline"
+                  class="shrink-0 font-mono text-[color:var(--ad-accent-ink)] hover:underline"
                   target="_blank"
                   rel="noopener"
                   :title="`跳到源码 L${other.block.startLine}`"
@@ -588,7 +588,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
               <button
                 v-else
                 class="rounded-[length:var(--ad-radius-sm)] px-0.5 font-mono hover:underline"
-                :class="node.id === fn.id ? 'bg-amber-100 font-bold text-[color:var(--ad-ink)]' : 'text-blue-600'"
+                :class="node.id === fn.id ? 'bg-amber-100 font-bold text-[color:var(--ad-ink)]' : 'text-[color:var(--ad-accent-ink)]'"
                 @click="goFunction(node.id)"
               >
                 {{ fnName(node.id) }}
@@ -617,7 +617,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
               <span v-if="pi > 0" class="mx-1 text-[color:var(--ad-line-strong)]">→</span>
               <button
                 class="rounded-[length:var(--ad-radius-sm)] px-0.5 font-mono hover:underline"
-                :class="id === fn.id ? 'bg-amber-100 font-bold text-[color:var(--ad-ink)]' : 'text-blue-600'"
+                :class="id === fn.id ? 'bg-amber-100 font-bold text-[color:var(--ad-ink)]' : 'text-[color:var(--ad-accent-ink)]'"
                 @click="goFunction(id)"
               >
                 {{ fnName(id) }}

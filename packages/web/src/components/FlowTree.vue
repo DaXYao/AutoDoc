@@ -294,7 +294,7 @@ function truncate(text: string, max = 90): string {
               ? 'bg-green-100 text-green-700'
               : node.kind === 'branch'
                 ? 'bg-amber-100 text-amber-700'
-                : 'bg-blue-100 text-blue-700'
+                : 'bg-[color:var(--ad-accent-soft)] text-[color:var(--ad-accent-ink)]'
           "
         >
           {{ node.order + 1 }}
@@ -317,7 +317,7 @@ function truncate(text: string, max = 90): string {
             <button
               v-for="mid in node.relatedModuleIds.slice(0, 2)"
               :key="mid"
-              class="text-[11px] font-mono text-blue-600 hover:underline"
+              class="text-[11px] font-mono text-[color:var(--ad-accent-ink)] hover:underline"
               @click.stop="goModule(mid)"
             >
               模块 {{ mid }}
@@ -356,7 +356,7 @@ function truncate(text: string, max = 90): string {
         <!-- 函数叶子：统一收进「函数(N)」开关（默认收起，展开再渲染轻量叶子行） -->
         <div v-if="hasFunctions" class="py-0.5">
           <button
-            class="text-[11px] text-blue-600 hover:underline"
+            class="text-[11px] text-[color:var(--ad-accent-ink)] hover:underline"
             :style="{ marginLeft: `${(depth + 1) * 16 + 8}px` }"
             @click.stop="toggleFn"
           >
@@ -396,7 +396,7 @@ function truncate(text: string, max = 90): string {
           <div class="flex flex-wrap items-center gap-2">
             <button
               v-if="entry"
-              class="text-sm font-mono text-blue-600 hover:underline break-all"
+              class="text-sm font-mono text-[color:var(--ad-accent-ink)] hover:underline break-all"
               @click="goFunction"
             >
               {{ fnName }}
@@ -417,7 +417,7 @@ function truncate(text: string, max = 90): string {
             <!-- 追问入口：仅可写模式显示 -->
             <button
               v-if="!readOnly && entry"
-              class="text-[11px] text-blue-500 hover:underline"
+              class="text-[11px] text-[color:var(--ad-accent-ink)] hover:underline"
               @click="toggleAsk"
             >
               {{ askOpen ? '收起追问' : '追问' }}
@@ -554,7 +554,7 @@ function truncate(text: string, max = 90): string {
           <p v-else class="text-[11px] text-[color:var(--ad-ink-3)]">暂无追问记录。</p>
           <button
             v-if="entry"
-            class="mt-1 text-[11px] text-blue-600 hover:underline"
+            class="mt-1 text-[11px] text-[color:var(--ad-accent-ink)] hover:underline"
             @click="goFunction"
           >
             查看完整详情 →

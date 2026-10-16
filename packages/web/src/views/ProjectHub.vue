@@ -152,12 +152,13 @@ async function handleRemove(id: string, name: string): Promise<void> {
               <template v-else>
                 <span class="text-[color:var(--ad-ink-3)]">尚未加载，点击即分析</span>
               </template>
-              <span v-if="busyId === project.id" class="ml-2 text-blue-500">分析中…</span>
+              <span v-if="busyId === project.id" class="ml-2 text-[color:var(--ad-accent-ink)]">分析中…</span>
             </div>
           </button>
           <button
-            class="absolute top-2 right-2 text-[color:var(--ad-ink-3)] hover:text-red-500 text-xs"
+            class="absolute top-2 right-2 p-1.5 text-[color:var(--ad-ink-3)] hover:text-red-500 text-xs"
             title="从列表移除（不改动目标文件）"
+            aria-label="删除项目"
             @click.stop="handleRemove(project.id, project.name)"
           >
             ✕

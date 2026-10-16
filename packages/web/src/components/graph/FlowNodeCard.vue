@@ -26,10 +26,11 @@ const kindIcon = computed(() => {
 /** group 超级节点紫：与状态色族同饱和度的低饱和紫（theme.ts 无紫族）；单点定义防两处硬编码漂移 */
 const GROUP_COLOR = '#8A7BC8'
 
-/** kind 图标语义色：phase=accent 靛蓝族（theme.ts primary）；group=紫族降饱和；fn=中性 ink-3。
+/** kind 图标语义色：phase=accent-ink 靛蓝族（图标属文字级前景，用加深版达 AA）；
+ *  group=紫族降饱和；fn=中性 ink-3。
  *  group 的类名必须静态书写（Tailwind 编译期扫描，不接受模板拼接），与 GROUP_COLOR 常量同源同值 */
 const kindClass = computed(() => {
-  if (props.data.kind === 'phase') return 'text-[color:var(--ad-accent)]'
+  if (props.data.kind === 'phase') return 'text-[color:var(--ad-accent-ink)]'
   return props.data.kind === 'group' ? 'text-[#8A7BC8]' : 'text-[color:var(--ad-ink-3)]'
 })
 
@@ -78,7 +79,7 @@ const showCount = computed(
       >{{ data.label }}</span>
       <span
         v-if="showCount"
-        class="ml-auto shrink-0 rounded-full bg-[color:var(--ad-accent)] px-1.5 text-[11px] font-medium leading-4 text-white"
+        class="ml-auto shrink-0 rounded-full bg-[color:var(--ad-accent-ink)] px-1.5 text-[11px] font-medium leading-4 text-white"
         :title="`聚合 ${data.count} 项`"
       >{{ data.count }}</span>
     </div>
