@@ -233,24 +233,24 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
     </n-alert>
 
     <!-- 历史版本区（可折叠，默认收起；回滚态横幅在上方常驻不受影响） -->
-    <section class="mb-5 rounded-lg border border-gray-200 bg-white">
+    <section class="ad-card mb-5">
       <button
-        class="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-gray-50 rounded-lg"
+        class="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-[color:var(--ad-canvas)] rounded-[length:var(--ad-radius)]"
         @click="toggleHistory"
       >
-        <h3 class="text-sm font-semibold text-gray-700">历史版本</h3>
+        <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">历史版本</h3>
         <span
           v-if="history"
-          class="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full text-[11px] font-semibold bg-gray-100 text-gray-600"
+          class="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full text-[11px] font-semibold bg-[color:var(--ad-canvas)] text-[color:var(--ad-ink-2)]"
         >
           {{ history.total }}
         </span>
-        <span class="ml-auto text-gray-400 text-xs">{{ historyExpanded ? '▾' : '▸' }}</span>
+        <span class="ml-auto text-[color:var(--ad-ink-3)] text-xs">{{ historyExpanded ? '▾' : '▸' }}</span>
       </button>
 
       <div v-show="historyExpanded" class="px-4 pb-3">
         <div class="flex items-center gap-2 mb-2">
-          <span v-if="history" class="text-xs text-gray-400">
+          <span v-if="history" class="text-xs text-[color:var(--ad-ink-3)]">
             共归档 {{ history.total }} 份，展示最近 {{ snapshots.length }} 份
           </span>
           <n-button
@@ -267,7 +267,7 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
         </div>
 
         <n-spin v-if="loading" size="small" />
-        <div v-else-if="snapshots.length === 0" class="text-xs text-gray-400 py-1">
+        <div v-else-if="snapshots.length === 0" class="text-xs text-[color:var(--ad-ink-3)] py-1">
           暂无历史快照；点击「重新生成 AI」后每次生成会自动归档一份。
         </div>
         <n-list v-else bordered size="small">
@@ -317,14 +317,14 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
                 <!-- 主显示优先用户命名 label（加粗），时间/触发降为次行；无命名回退现状 -->
                 <div
                   v-if="snapshotDisplayLabel(snapshot)"
-                  class="text-xs font-bold text-gray-800 truncate"
+                  class="text-xs font-bold text-[color:var(--ad-ink)] truncate"
                 >
                   {{ snapshotDisplayLabel(snapshot) }}
                 </div>
                 <div class="flex flex-wrap items-center gap-2">
                   <span
                     class="text-xs"
-                    :class="snapshotDisplayLabel(snapshot) ? 'text-gray-400' : 'font-medium text-gray-700'"
+                    :class="snapshotDisplayLabel(snapshot) ? 'text-[color:var(--ad-ink-3)]' : 'font-medium text-[color:var(--ad-ink-2)]'"
                   >
                     {{ formatDate(snapshot.savedAt) }}
                   </span>
@@ -343,27 +343,27 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
                   >
                     当前查看
                   </n-tag>
-                  <span v-if="!snapshot.aiGenerated" class="text-[11px] text-gray-400">
+                  <span v-if="!snapshot.aiGenerated" class="text-[11px] text-[color:var(--ad-ink-3)]">
                     未含 AI 结果
                   </span>
                 </div>
                 <p
                   v-if="snapshotDisplayNote(snapshot)"
-                  class="mt-0.5 text-[11px] text-gray-400 truncate"
+                  class="mt-0.5 text-[11px] text-[color:var(--ad-ink-3)] truncate"
                   :title="snapshot.note"
                 >
                   备注：{{ snapshotDisplayNote(snapshot) }}
                 </p>
-                <p v-if="snapshot.summary" class="mt-0.5 text-xs text-gray-500 truncate">
+                <p v-if="snapshot.summary" class="mt-0.5 text-xs text-[color:var(--ad-ink-2)] truncate">
                   {{ snapshot.summary }}
                 </p>
                 <p
                   v-if="snapshot.trigger === 'partition' && snapshot.partitionFeedback"
-                  class="mt-0.5 text-[11px] text-gray-400 truncate"
+                  class="mt-0.5 text-[11px] text-[color:var(--ad-ink-3)] truncate"
                 >
                   划分建议：{{ snapshot.partitionFeedback }}
                 </p>
-                <p class="mt-0.5 text-[11px] text-gray-400">
+                <p class="mt-0.5 text-[11px] text-[color:var(--ad-ink-3)]">
                   {{ formatSnapshotStats(snapshot.stats) }}
                 </p>
               </div>
@@ -409,7 +409,7 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
           </n-list-item>
         </n-list>
 
-        <p v-if="archivedCount > 0" class="mt-2 text-[11px] text-gray-400">
+        <p v-if="archivedCount > 0" class="mt-2 text-[11px] text-[color:var(--ad-ink-3)]">
           另有 {{ archivedCount }} 份已归档（不展示；系统不自动清理，如需精简可手动删除单条）。
         </p>
       </div>
@@ -417,14 +417,14 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
 
     <!-- 对比结果弹窗 -->
     <n-modal v-model:show="showDiff" preset="card" :title="diffTitle" class="max-w-2xl">
-      <div v-if="diffLines.length === 0" class="text-sm text-gray-500">
+      <div v-if="diffLines.length === 0" class="text-sm text-[color:var(--ad-ink-2)]">
         两版在摘要维度上无差异（概述、模块、脉络、核心数、分类与 AI 段状态均一致）。
       </div>
       <ul v-else class="flex flex-col gap-1.5">
         <li
           v-for="(line, i) in diffLines"
           :key="i"
-          class="text-sm text-gray-700 rounded border border-gray-100 bg-gray-50 px-3 py-1.5"
+          class="text-sm text-[color:var(--ad-ink-2)] rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-3 py-1.5"
         >
           {{ line }}
         </li>

@@ -28,11 +28,22 @@
 - [ ] **增量生成两层缓存**：解析层按「文件内容哈希+parser版本+配置指纹」持久化复用 ParsedFile；per函数 AI pass 按「文件级 chunk 内容哈希+prompt 版本盐」跨图指纹复用；可再生缓存不备份、整份替换天然清理删除文件（见 2026-10-15 条）。
 - [ ] **图可视化基座范式**：纯函数图模型构建器（三 scope+聚合上限+豁免组）+ 布局 runner（库真实 API 查证+降级标记+指纹缓存 LRU）+ 配置播种规避 patch 兜底 + 自绘 SVG/独立 HTML 双导出；入口按需挂载、computed 记忆化模型（见 2026-10-16 条）。
 - [ ] **变更影响分析范式**：变更集 API（工作区批次=batchDate 同批语义 / 单提交 / 范围闭区间并集）+ 纯前端传播计算（受影响链路=chain.path∩变更集、上游 BFS 最小深度、下游直接 callee）+ 叠加图三色优先级 + 打开视图自动增量重生（探测端点只读哈希、会话内 stale 降级防循环）（见 2026-10-17 条）。
+- [ ] **naive-ui 视觉地基四件套**：:root 令牌唯一色源 + theme.ts GlobalThemeOverrides 单入口（色族带全 hover/pressed/suppl）+ 个别控件皮肤走 per-instance :theme-overrides（避开 inline 主题变量）+ 原生容器/普通 wrapper div 承接布局与响应类（避开 cssr 无层赢 layered）（见 2026-10-17 条）。
 - [ ] （后续不断补充……）
 
 ---
 
 ## 成功经验条目
+
+### 2026-10-17 · naive-ui 项目视觉地基四件套：令牌 :root + theme.ts 单入口 + per-instance 覆写 + 原生容器避 cssr
+- **场景**：naive-ui + Tailwind v4 混合前端要整体换设计语言（米白暖极简）并重构顶栏；naive 控件与手写样式必须同色板，且不能靠 !important 硬压。
+- **做法**：
+  1. 颜色全部收敛到 style.css `:root` --ad-* 令牌（canvas/surface/ink 三档/line 两档/accent+soft/radius/shadow/mono），全局元素样式（body、::selection、:focus-visible、滚动条、跳转光晕）只引用令牌；
+  2. 新建 theme.ts 导出 GlobalThemeOverrides 作 naive 换肤单入口：common 承担 primary/状态色**族**（hover/pressed/suppl 带全）、文字族、发丝线、圆角、字号体系、body/card 面色；组件级只做 borderRadius/边框最小补强；App.vue 用 n-config-provider 包裹，createDiscreteApi 经 configProviderProps 注入同一份（离散 API 不继承 provider）；
+  3. 个别按钮/控件皮肤走 per-instance `:theme-overrides`（键名受组件主题类型约束、写错编译期报错），不与 inline 主题变量对抗；
+  4. 顶栏/主区用原生 `<header>`/`<main>` 替代 n-layout-header/content，响应式与 display 类挂普通 wrapper div（搜索槽），规避 naive cssr 无层样式赢 Tailwind layered。
+- **适用条件**：naive-ui 项目做全局视觉地基或顶栏级重构；本仓库 D2 组件批量对齐可直接沿用令牌与 theme.ts 族值，换肤争议以 theme.ts 为唯一仲裁点。
+- **关联**：packages/web/src/style.css、theme.ts、App.vue；教训库同日「三连坑」条互为表里。
 
 ### 2026-10-17 · 变更影响分析：变更集 API + 纯前端传播计算 + 自动增量重生状态机
 - **场景**：vibe coding 下「这次改动/这个提交波及哪些链路」是立项核心亮点；既有函数级变更记录（git+快照双源）、调用图/链路洞察、增量重生与图基座可复用。

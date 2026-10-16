@@ -181,7 +181,7 @@ function goModule(id: string): void {
 <template>
   <div>
     <div class="flex items-center justify-between mb-3">
-      <h2 class="text-xl font-semibold text-gray-800">项目洞察</h2>
+      <h2 class="text-xl font-semibold text-[color:var(--ad-ink)]">项目洞察</h2>
       <div class="flex items-center gap-2">
         <n-tag v-if="insight?.aiGenerated" size="small" type="success" :bordered="false">
           AI 已增强
@@ -239,12 +239,12 @@ function goModule(id: string): void {
       </n-alert>
 
       <!-- 项目概述 -->
-      <p v-if="insight.summary" class="text-sm text-gray-600 mb-4">{{ insight.summary }}</p>
+      <p v-if="insight.summary" class="text-sm text-[color:var(--ad-ink-2)] mb-4">{{ insight.summary }}</p>
 
       <!-- AI 各段执行状态徽标：一眼看出哪段 AI 未完全生效（failed/skipped/partial 显眼） -->
       <section v-if="aiPasses.length" class="mb-4">
         <div class="flex flex-wrap items-center gap-2">
-          <span class="text-xs text-gray-400 mr-1">AI 段状态：</span>
+          <span class="text-xs text-[color:var(--ad-ink-3)] mr-1">AI 段状态：</span>
           <n-tag
             v-for="p in aiPasses"
             :key="p.key"
@@ -260,19 +260,19 @@ function goModule(id: string): void {
             {{ p.status ? AI_STATUS_META[p.status].label : '未执行' }}
           </n-tag>
         </div>
-        <p v-if="incrementalSummary" class="mt-1.5 text-xs text-gray-400">
+        <p v-if="incrementalSummary" class="mt-1.5 text-xs text-[color:var(--ad-ink-3)]">
           {{ incrementalSummary }}
         </p>
       </section>
 
       <!-- 模块划分反馈（AI 主导划分 + 用户建议迭代） -->
-      <section v-if="insight.aiEnabled" class="mb-5 rounded-lg border border-gray-200 bg-white px-4 py-3">
+      <section v-if="insight.aiEnabled" class="ad-card mb-5 px-4 py-3">
         <div class="flex items-center gap-2 mb-2">
-          <h3 class="text-sm font-semibold text-gray-700">功能模块划分</h3>
+          <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">功能模块划分</h3>
           <n-tag size="tiny" :type="insight.partitionSource === 'ai' ? 'success' : 'default'" :bordered="false">
             {{ insight.partitionSource === 'ai' ? 'AI 划分' : '目录划分' }}
           </n-tag>
-          <span v-if="insight.partitionFeedback" class="text-xs text-gray-400">
+          <span v-if="insight.partitionFeedback" class="text-xs text-[color:var(--ad-ink-3)]">
             已采纳建议：{{ insight.partitionFeedback.slice(0, 40) }}
           </span>
         </div>
@@ -292,7 +292,7 @@ function goModule(id: string): void {
       <!-- ============ 业务脉络：树/图双视图（树=递归渐进披露；图=V1 GraphView） ============ -->
       <section v-if="hasFlows || graphOn" class="mb-5">
         <div class="flex items-center justify-between mb-2">
-          <h3 class="text-sm font-semibold text-gray-700">
+          <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">
             业务脉络<template v-if="hasFlows">（{{ flows.length }} 条主线）</template>
           </h3>
           <n-radio-group v-model:value="flowViewMode" size="small">
@@ -304,7 +304,7 @@ function goModule(id: string): void {
         <!-- 图模式：flows 未就绪时只给空态提示，不渲染空图 -->
         <template v-if="graphOn">
           <template v-if="hasFlows">
-            <p class="mb-1.5 text-xs text-gray-400">
+            <p class="mb-1.5 text-xs text-[color:var(--ad-ink-3)]">
               节点=脉络结构/函数聚合；点击结构节点展开/折叠子树；点击函数节点跳转
             </p>
             <div class="h-[560px]">
@@ -323,7 +323,7 @@ function goModule(id: string): void {
         </template>
 
         <!-- 树模式：原有递归脉络树渲染 -->
-        <div v-else class="rounded-lg border border-gray-200 bg-white py-2">
+        <div v-else class="ad-card py-2">
           <template v-for="(root, i) in flows" :key="root.id">
             <FlowTree
               :node="root"
@@ -333,11 +333,11 @@ function goModule(id: string): void {
             />
             <div
               v-if="i < flows.length - 1"
-              class="flex items-center py-1 my-1 border-t border-dashed border-gray-100"
+              class="flex items-center py-1 my-1 border-t border-dashed border-[color:var(--ad-line)]"
               :style="{ paddingLeft: '8px' }"
               aria-hidden="true"
             >
-              <span class="w-3 flex justify-center text-gray-300 text-xs leading-none">↓</span>
+              <span class="w-3 flex justify-center text-[color:var(--ad-line-strong)] text-xs leading-none">↓</span>
             </div>
           </template>
         </div>
@@ -348,14 +348,14 @@ function goModule(id: string): void {
       <template v-if="!hasFlows && !graphOn">
       <!-- 核心函数 -->
       <section v-if="coreFunctions.length" class="mb-5">
-        <h3 class="text-sm font-semibold text-gray-700 mb-2">
+        <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)] mb-2">
           核心函数（被多条链路依赖）
         </h3>
         <div class="flex flex-wrap gap-2">
           <button
             v-for="f in coreFunctions"
             :key="f.functionId"
-            class="px-2 py-1 rounded border border-green-300 bg-green-50 text-green-700 text-xs font-mono hover:underline"
+            class="px-2 py-1 rounded-[length:var(--ad-radius-sm)] border border-green-300 bg-green-50 text-green-700 text-xs font-mono hover:underline"
             :title="f.coreReason || f.systemRole || `coreScore ${f.coreScore} · ${f.chainIds.length} 链路`"
             @click="goFunction(f.functionId)"
           >
@@ -367,28 +367,28 @@ function goModule(id: string): void {
 
       <!-- 功能模块 -->
       <section>
-        <h3 class="text-sm font-semibold text-gray-700 mb-2">
+        <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)] mb-2">
           功能模块（{{ insight.modules.length }}）
         </h3>
         <div class="grid gap-3 md:grid-cols-2">
           <button
             v-for="mod in insight.modules"
             :key="mod.id"
-            class="text-left rounded-lg border border-gray-200 bg-white px-4 py-3 hover:border-blue-400 hover:shadow-sm transition"
+            class="ad-card ad-card--hover text-left px-4 py-3 transition"
             @click="goModule(mod.id)"
           >
             <div class="flex items-center gap-2">
-              <span class="font-semibold text-gray-800">{{ mod.name }}</span>
-              <span class="text-xs text-gray-400">
+              <span class="font-semibold text-[color:var(--ad-ink)]">{{ mod.name }}</span>
+              <span class="text-xs text-[color:var(--ad-ink-3)]">
                 {{ mod.fileCount }} 文件 · {{ mod.functionCount }} 函数 · {{ mod.chainIds.length }} 链路
               </span>
             </div>
-            <p class="mt-1 text-xs text-gray-500">{{ mod.description }}</p>
+            <p class="mt-1 text-xs text-[color:var(--ad-ink-2)]">{{ mod.description }}</p>
             <div v-if="mod.coreFunctionIds.length" class="mt-2 flex flex-wrap gap-1">
               <span
                 v-for="cid in mod.coreFunctionIds.slice(0, 4)"
                 :key="cid"
-                class="px-1.5 py-0.5 rounded bg-green-50 text-green-700 text-[11px] font-mono"
+                class="px-1.5 py-0.5 rounded-[length:var(--ad-radius-sm)] bg-green-50 text-green-700 text-[11px] font-mono"
               >
                 {{ fnName(cid) }}
               </span>

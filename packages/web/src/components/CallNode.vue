@@ -138,11 +138,12 @@ async function handleDeleteFollowup(followup: Annotation): Promise<void> {
         <span v-else class="font-mono" :class="ROLE_COLORS[edge.role].text">
           {{ edge.calleeName }}
         </span>
-        <span class="text-gray-400">· {{ ROLE_LABELS[edge.role] }}</span>
+        <span class="text-[color:var(--ad-ink-3)]">· {{ ROLE_LABELS[edge.role] }}</span>
         <n-tag size="tiny" :bordered="false" :type="edge.calleeCategory === 'external' ? 'default' : 'info'">
           {{ edge.calleeCategory === 'external' ? '外部/未解析' : CATEGORY_LABELS[edge.calleeCategory as FunctionCategory] }}
         </n-tag>
-        <span class="text-gray-300">L{{ edge.line }}</span>
+        <!-- 行号是信息文本（非装饰），用 ink-3 保证可读对比；装饰箭头/分隔才用 line-strong -->
+        <span class="font-mono text-[color:var(--ad-ink-3)]">L{{ edge.line }}</span>
         <!-- 追问入口：仅可写模式显示 -->
         <button
           v-if="!readOnly"
@@ -152,30 +153,30 @@ async function handleDeleteFollowup(followup: Annotation): Promise<void> {
           {{ panelOpen ? '收起追问' : '追问' }}
         </button>
       </div>
-      <div v-if="edge.calleePurpose" class="text-xs text-gray-500 mt-0.5">
+      <div v-if="edge.calleePurpose" class="text-xs text-[color:var(--ad-ink-2)] mt-0.5">
         作用：{{ edge.calleePurpose }}
       </div>
       <div
         v-else-if="externalInfo"
-        class="text-xs text-gray-500 mt-0.5 flex flex-wrap items-center gap-1.5"
+        class="text-xs text-[color:var(--ad-ink-2)] mt-0.5 flex flex-wrap items-center gap-1.5"
       >
         <span>作用：{{ externalInfo.purpose }}</span>
         <!-- AI 凭公开库知识推断，醒目标注以区别于项目内已确证用途 -->
         <n-tag size="tiny" :bordered="false" type="warning">外部·AI 推断</n-tag>
         <span
           v-if="externalInfo.signature"
-          class="font-mono text-gray-400"
+          class="font-mono text-[color:var(--ad-ink-3)]"
           :title="externalInfo.signature"
         >
           {{ externalInfo.signature }}
         </span>
       </div>
-      <div v-else-if="edge.calleeCategory === 'external'" class="text-xs text-gray-400 mt-0.5">
+      <div v-else-if="edge.calleeCategory === 'external'" class="text-xs text-[color:var(--ad-ink-3)] mt-0.5">
         作用：外部/未解析调用（不在本项目索引内）
       </div>
 
       <!-- 就地追问面板：单次一问一答 -->
-      <div v-if="panelOpen && !readOnly" class="mt-2 rounded border border-gray-200 bg-gray-50 px-3 py-2">
+      <div v-if="panelOpen && !readOnly" class="mt-2 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-3 py-2">
         <n-input
           v-model:value="question"
           type="textarea"
@@ -194,15 +195,15 @@ async function handleDeleteFollowup(followup: Annotation): Promise<void> {
           >
             提问
           </n-button>
-          <span v-if="asking" class="text-xs text-gray-500">
+          <span v-if="asking" class="text-xs text-[color:var(--ad-ink-2)]">
             AI 正在检索相关代码，可能需要数十秒…
           </span>
         </div>
 
         <!-- 答案区：Markdown 渲染（已禁用 HTML，防 XSS） -->
-        <div v-if="response" class="mt-2 rounded border border-gray-100 bg-white px-3 py-2">
+        <div v-if="response" class="mt-2 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-surface)] px-3 py-2">
           <div class="annotation-body text-sm" v-html="renderMarkdown(response.answer)" />
-          <div class="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-gray-400">
+          <div class="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-[color:var(--ad-ink-3)]">
             <span>{{ formatAskMeta(response.rounds, response.usedFunctionIds.length) }}</span>
             <span v-if="response.degraded" class="font-medium text-orange-500">答案可能不完整（未能在上限内完全作答）</span>
             <n-button v-if="!distilling" size="tiny" class="ml-auto" @click="startDistill">
@@ -241,13 +242,13 @@ async function handleDeleteFollowup(followup: Annotation): Promise<void> {
         <article
           v-for="followup in followups"
           :key="followup.id"
-          class="rounded border border-green-100 bg-green-50/50 px-3 py-2"
+          class="rounded-[length:var(--ad-radius-sm)] border border-green-100 bg-green-50/50 px-3 py-2"
         >
-          <div class="flex items-center gap-2 text-xs text-gray-500">
+          <div class="flex items-center gap-2 text-xs text-[color:var(--ad-ink-2)]">
             <n-tag size="tiny" :bordered="false" type="success">追问记录</n-tag>
-            <span class="font-medium text-gray-700">{{ followup.author }}</span>
+            <span class="font-medium text-[color:var(--ad-ink-2)]">{{ followup.author }}</span>
             <span>{{ formatDate(followup.createdAt) }}</span>
-            <span v-if="followup.updatedAt !== followup.createdAt" class="text-gray-400">
+            <span v-if="followup.updatedAt !== followup.createdAt" class="text-[color:var(--ad-ink-3)]">
               （编辑于 {{ formatDate(followup.updatedAt) }}）
             </span>
             <n-popconfirm

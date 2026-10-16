@@ -22,10 +22,30 @@
 - [ ] 浏览器复验 expand 门控 UI：设 localStorage 键后必须同脚本内 reload（expand store 深 watch 会全量回写覆盖外部写入）。
 - [ ] 浏览器实机复验前端改动必须 ignoreCache 强制重载文档：哈希跳转不重载 SPA，验的会是旧 bundle 并得出错误结论（高亮/默认折叠等「看似没生效」）。
 - [ ] 给「切 X」watch 加 bootstrap 早退（oldId===null return）时，先确认首屏触发路径是否正挂在该 watch 上——否则修好一个竞态又静默丢掉首屏触发（C3 横幅复位→自动重生不触发，两轮实机才定位）。
+- [ ] naive-ui 换肤禁止用类覆写 --n-* 变量：主题变量是元素 inline style，且按钮边框画在子 .n-button__border/__state-border 节点；个别皮肤走 per-instance :theme-overrides（见 2026-10-17 D1 条）。
+- [ ] Tailwind v4 工具类在 @layer 内、naive cssr 无层必赢：响应式/display 类直接挂 naive 组件根节点可能无效，包一层普通 div 再挂（见 2026-10-17 D1 条）。
+- [ ] 单行 flex 工具栏：弹性输入项（flex-1/basis 0）必须给 min-width，文字统计项必须 nowrap+ellipsis+min-w-0；否则窄屏输入框压成「空白盒」、中文文字压成竖排（见 2026-10-17 D1 条）。
+- [ ] 模块新增导出后浏览器白屏报 "does not provide an export named"：vite transform 缓存 + 浏览器模块缓存双重陈旧，普通 reload 无效，必须重启 dev server（见 2026-10-17 D1 条）。
 
 ---
 
 ## 教训条目
+
+### 2026-10-17 · D1 视觉地基三连坑：naive inline 主题变量 / 子节点边框 / layered 输给无层
+- **场景**：顶栏两枚按钮要定制「墨黑底白字」「白底发丝描边」皮肤，按惯例写 `.ad-btn-ink { --n-color: … }` 类覆写；同时给 n-auto-complete 根节点挂 tailwind `hidden lg:block`。
+- **现象**：按钮 computed 样式纹丝不动（--n-color 仍是默认 #0000）；排查中发现响应类与 naive 根节点属性也存在失效风险。
+- **根因**：①naive-ui 把全部主题变量写成元素 **inline style**（实测 button 的 style 属性一整串 --n-*），类选择器特异性再高也压不过 inline；②按钮边框不在 button 本体（本体 border:none）而在子 .n-button__border / .n-button__state-border 覆盖层，量 button 的 border 会误判「边框没生效」；③Tailwind v4 工具类位于 @layer utilities，naive cssr 注入的样式无层，无层作者样式恒赢 layered → 挂 naive 根节点的 display/响应类可能无效。
+- **正确做法**：个别控件皮肤走 per-instance `:theme-overrides`（键名受组件主题类型约束、写错编译期报错）；全局皮肤走 n-config-provider themeOverrides；响应/display 类挂外层普通 div（搜索槽即包了 .ad-search wrapper）。
+- **预防措施**：已加入避坑清单；D2 批量对齐 naive 组件前先确认目标属性属于 inline 变量 / 子节点 / 层叠竞争哪一类，再选覆写通道。
+- **关联**：packages/web/src/theme.ts（adBtnInkOverrides/adBtnOutlineOverrides）、style.css 注释、App.vue 顶栏。
+
+### 2026-10-17 · D1 顶栏「空白控件盒」与竖排统计：都是 flex 挤压无宽度下限，不是空渲染节点
+- **场景**：实机基线截图里项目选择器旁有个无名空盒、统计文字被挤成竖排窄列；任务书要求「读模板找空渲染节点」。
+- **现象**：DOM 实测空盒 = SearchBar 的 .n-auto-complete（flex:1 1 0%、宽 44px、placeholder 被裁切）；模板里并没有多余空节点。
+- **根因**：单行 header 是 flex 容器，窄屏行宽溢出时 flex-grow 不参与分配：basis 0% 的搜索项被压到 auto 最小尺寸（≈44px）看似空盒；统计 span 中文可任意断行，shrink 后变成单字宽竖排。两者同源：弹性/可缩项没有宽度下限与截断策略。
+- **正确做法**：弹性输入项给 min-width（或定宽+断点隐藏）；文字统计项 whitespace-nowrap + overflow-hidden + text-ellipsis + min-w-0，把「换行压」改「截断压」，全文放 title 悬浮。
+- **预防措施**：已加入避坑清单；排查「神秘控件」先 DOM 量宽度与 computed flex，再回模板归因，避免在模板里找不存在的空节点。
+- **关联**：packages/web/src/App.vue 顶栏、style.css .ad-search/.ad-stats。
 
 ### 2026-10-17 · 修 watch 竞态时早退过宽：bootstrap 首屏触发路径被一并切断，自动重生静默失效
 - **场景**：C3 影响视图「切项目 watch 复位横幅」把 bootstrap 完成的 done 横幅清掉（🟡 竞态）；修复时加 `oldId===null return` 早退。

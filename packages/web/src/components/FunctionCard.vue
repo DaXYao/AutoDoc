@@ -311,13 +311,13 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
 <template>
   <article
     :id="`fn-${fn.id}`"
-    class="rounded-lg border border-gray-200 bg-white scroll-mt-16"
+    class="ad-card scroll-mt-16"
     :class="{ 'fn-jump-highlight': jumpHighlightId === fn.id }"
   >
     <!-- 卡片头：签名 + 用途说明 -->
     <header class="px-4 py-3">
       <div class="flex flex-wrap items-center gap-2">
-        <span class="font-mono text-sm text-gray-900">
+        <span class="font-mono text-sm text-[color:var(--ad-ink)]">
           {{ fn.className ? `${fn.className}.` : '' }}{{ fn.signature }}
         </span>
         <n-tag v-if="fn.exported" size="tiny" :bordered="false">exported</n-tag>
@@ -351,7 +351,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
         >
           @{{ decorator }}
         </n-tag>
-        <span class="ml-auto text-xs text-gray-400">
+        <span class="ml-auto font-mono text-xs text-[color:var(--ad-ink-3)]">
           L{{ fn.startLine }}–{{ fn.endLine }}
           <a
             v-if="sourceHref"
@@ -364,23 +364,23 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
           </a>
         </span>
       </div>
-      <p class="mt-1 text-sm text-gray-600">{{ fn.purpose }}</p>
+      <p class="mt-1 text-sm text-[color:var(--ad-ink-2)]">{{ fn.purpose }}</p>
       <p v-if="fi?.systemRole" class="mt-1 text-xs text-green-700">
         系统角色：{{ fi.systemRole }}
       </p>
-      <details v-if="fn.docComment" class="mt-1 text-xs text-gray-500">
+      <details v-if="fn.docComment" class="mt-1 text-xs text-[color:var(--ad-ink-2)]">
         <summary class="cursor-pointer select-none">文档注释</summary>
         <pre class="mt-1 whitespace-pre-wrap font-mono">{{ fn.docComment }}</pre>
       </details>
     </header>
 
     <!-- 内部步骤：AI 把注释块归纳成低噪声大纲；未生成/失败时回退注释块原文平铺 -->
-    <div v-if="stepsGroup.mode !== 'empty'" class="border-t border-gray-100 px-4 py-2">
+    <div v-if="stepsGroup.mode !== 'empty'" class="border-t border-[color:var(--ad-line)] px-4 py-2">
       <template v-if="stepsGroup.mode === 'fallback'">
-        <p class="mb-1 text-xs text-gray-400">
+        <p class="mb-1 text-xs text-[color:var(--ad-ink-3)]">
           内部步骤未生成（AI 未执行/失败），以下为注释块原文
         </p>
-        <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(blocksKey(), expandDefault('codeBlocks'))">
+        <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(blocksKey(), expandDefault('codeBlocks'))">
           注释块（{{ fn.codeBlocks.length }}）
           {{ isExpanded(blocksKey(), expandDefault('codeBlocks')) ? '▾' : '▸' }}
         </button>
@@ -388,30 +388,30 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
           <div
             v-for="(block, i) in fn.codeBlocks"
             :key="i"
-            class="rounded border border-gray-100 bg-gray-50 p-2"
+            class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] p-2"
           >
-            <div class="text-xs text-gray-400 mb-1">L{{ block.startLine }}–{{ block.endLine }}</div>
-            <pre class="text-xs text-gray-600 whitespace-pre-wrap font-mono">{{ block.commentText }}</pre>
-            <pre class="mt-1 text-xs whitespace-pre-wrap font-mono overflow-x-auto bg-white rounded p-2 border border-gray-100">{{ block.codeText }}</pre>
+            <div class="font-mono text-xs text-[color:var(--ad-ink-3)] mb-1">L{{ block.startLine }}–{{ block.endLine }}</div>
+            <pre class="text-xs text-[color:var(--ad-ink-2)] whitespace-pre-wrap font-mono">{{ block.commentText }}</pre>
+            <pre class="mt-1 text-xs whitespace-pre-wrap font-mono overflow-x-auto bg-[color:var(--ad-surface)] rounded-[length:var(--ad-radius-sm)] p-2 border border-[color:var(--ad-line)]">{{ block.codeText }}</pre>
           </div>
         </div>
       </template>
       <template v-else>
-        <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(stepsKey(), expandDefault('internalSteps'))">
+        <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(stepsKey(), expandDefault('internalSteps'))">
           内部步骤（{{ stepsGroup.steps.length }}）
           {{ isExpanded(stepsKey(), expandDefault('internalSteps')) ? '▾' : '▸' }}
         </button>
         <ol v-if="isExpanded(stepsKey(), expandDefault('internalSteps'))" class="mt-2 flex flex-col gap-1.5">
           <li v-for="(group, i) in stepsGroup.steps" :key="i" class="text-xs">
             <div class="flex items-start gap-2">
-              <span class="mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gray-200 text-[10px] leading-none text-gray-600">
+              <span class="mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[color:var(--ad-line-strong)] text-[10px] leading-none text-[color:var(--ad-ink-2)]">
                 {{ i + 1 }}
               </span>
               <div class="min-w-0 flex-1">
-                <span class="text-gray-700">{{ group.step.title }}</span>
+                <span class="text-[color:var(--ad-ink-2)]">{{ group.step.title }}</span>
                 <span
                   v-if="group.step.detail"
-                  class="ml-1 text-gray-400"
+                  class="ml-1 text-[color:var(--ad-ink-3)]"
                   :title="group.step.detail"
                 >{{ truncateText(group.step.detail, 48) }}</span>
               </div>
@@ -425,9 +425,9 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
               >
                 L{{ group.startLine }}–{{ group.endLine }}
               </a>
-              <span v-else class="shrink-0 font-mono text-gray-400">L{{ group.startLine }}–{{ group.endLine }}</span>
+              <span v-else class="shrink-0 font-mono text-[color:var(--ad-ink-3)]">L{{ group.startLine }}–{{ group.endLine }}</span>
               <button
-                class="shrink-0 text-gray-400 hover:text-gray-700"
+                class="shrink-0 text-[color:var(--ad-ink-3)] hover:text-[color:var(--ad-ink)]"
                 @click="toggle(stepCodeKey(group.startLine), expandDefault('internalStepCode'))"
               >
                 {{ group.codeLineCount }} 行
@@ -442,18 +442,18 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
               <div
                 v-for="(block, bi) in group.blocks"
                 :key="bi"
-                class="rounded border border-gray-100 bg-gray-50 p-2"
+                class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] p-2"
               >
-                <div class="text-gray-400 mb-1">L{{ block.startLine }}–{{ block.endLine }}</div>
-                <pre class="text-gray-600 whitespace-pre-wrap font-mono">{{ block.commentText }}</pre>
-                <pre class="mt-1 whitespace-pre-wrap font-mono overflow-x-auto bg-white rounded p-2 border border-gray-100">{{ block.codeText }}</pre>
+                <div class="font-mono text-[color:var(--ad-ink-3)] mb-1">L{{ block.startLine }}–{{ block.endLine }}</div>
+                <pre class="text-[color:var(--ad-ink-2)] whitespace-pre-wrap font-mono">{{ block.commentText }}</pre>
+                <pre class="mt-1 whitespace-pre-wrap font-mono overflow-x-auto bg-[color:var(--ad-surface)] rounded-[length:var(--ad-radius-sm)] p-2 border border-[color:var(--ad-line)]">{{ block.codeText }}</pre>
               </div>
             </div>
           </li>
         </ol>
         <!-- 其它注释：横幅/TODO/注释代码/未归步；K=0 时整折叠不渲染 -->
         <div v-if="stepsGroup.others.length > 0" class="mt-2">
-          <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(blocksOtherKey(), expandDefault('internalStepCode'))">
+          <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(blocksOtherKey(), expandDefault('internalStepCode'))">
             其它注释（{{ stepsGroup.others.length }}）
             {{ isExpanded(blocksOtherKey(), expandDefault('internalStepCode')) ? '▾' : '▸' }}
           </button>
@@ -463,7 +463,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
                 <n-tag size="tiny" :bordered="false" class="shrink-0" :type="OTHER_KIND_COLORS[other.kind]">
                   {{ OTHER_KIND_LABELS[other.kind] }}
                 </n-tag>
-                <span class="min-w-0 flex-1 text-gray-500" :title="other.block.commentText">
+                <span class="min-w-0 flex-1 text-[color:var(--ad-ink-2)]" :title="other.block.commentText">
                   {{ truncateText(other.block.commentText, 60) }}
                 </span>
                 <a
@@ -476,11 +476,11 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
                 >
                   L{{ other.block.startLine }}–{{ other.block.endLine }}
                 </a>
-                <span v-else class="shrink-0 font-mono text-gray-400">
+                <span v-else class="shrink-0 font-mono text-[color:var(--ad-ink-3)]">
                   L{{ other.block.startLine }}–{{ other.block.endLine }}
                 </span>
                 <button
-                  class="shrink-0 text-gray-400 hover:text-gray-700"
+                  class="shrink-0 text-[color:var(--ad-ink-3)] hover:text-[color:var(--ad-ink)]"
                   @click="toggle(otherCodeKey(other.block.startLine), expandDefault('internalStepCode'))"
                 >
                   代码
@@ -489,7 +489,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
               </div>
               <pre
                 v-if="isExpanded(otherCodeKey(other.block.startLine), expandDefault('internalStepCode'))"
-                class="mt-1 ml-6 whitespace-pre-wrap font-mono overflow-x-auto bg-white rounded p-2 border border-gray-100"
+                class="mt-1 ml-6 whitespace-pre-wrap font-mono overflow-x-auto bg-[color:var(--ad-surface)] rounded-[length:var(--ad-radius-sm)] p-2 border border-[color:var(--ad-line)]"
               >{{ other.block.codeText }}</pre>
             </li>
           </ul>
@@ -498,21 +498,21 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
     </div>
 
     <!-- 内部调用关系：按执行顺序的链路（角色着色 + 箭头 + 用途说明） -->
-    <div v-if="fn.calls.length > 0" class="border-t border-gray-100 px-4 py-2">
-      <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(callsKey(), expandDefault('callGraph'))">
+    <div v-if="fn.calls.length > 0" class="border-t border-[color:var(--ad-line)] px-4 py-2">
+      <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(callsKey(), expandDefault('callGraph'))">
         调用链路（{{ fn.calls.length }}）
         {{ isExpanded(callsKey(), expandDefault('callGraph')) ? '▾' : '▸' }}
       </button>
       <div v-if="isExpanded(callsKey(), expandDefault('callGraph'))" class="mt-2">
         <!-- 角色图例 -->
-        <div class="flex flex-wrap items-center gap-3 text-xs text-gray-500 mb-2">
+        <div class="flex flex-wrap items-center gap-3 text-xs text-[color:var(--ad-ink-2)] mb-2">
           <span v-for="(label, role) in ROLE_LABELS" :key="role" class="flex items-center gap-1">
             <span class="inline-block w-2.5 h-2.5 rounded-full" :class="ROLE_COLORS[role as keyof typeof ROLE_COLORS].dot" />
             {{ label }}
           </span>
         </div>
         <!-- AI-first 降级提示：主干识别未生成/失败时不折叠、显示全部调用 -->
-        <p v-if="keyStepsMissing && callChain.length > 0" class="mb-2 text-xs text-gray-400">
+        <p v-if="keyStepsMissing && callChain.length > 0" class="mb-2 text-xs text-[color:var(--ad-ink-3)]">
           注意：主干识别未生成/失败，当前显示全部调用
         </p>
         <!-- 主干调用：节点（着色点 + 名称 + 角色 + 分类 + 用途）之间用箭头连接 -->
@@ -524,14 +524,14 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
               @changed="emit('changed')"
             />
             <li v-if="i < mainChain.length - 1" class="flex gap-2 py-0.5" aria-hidden="true">
-              <span class="w-2.5 flex justify-center text-gray-300 text-xs leading-none">↓</span>
+              <span class="w-2.5 flex justify-center text-[color:var(--ad-line-strong)] text-xs leading-none">↓</span>
               <span />
             </li>
           </template>
         </ol>
         <!-- 次要调用：可折叠（默认折叠，展开状态持久化到 localStorage） -->
         <div v-if="noiseChain.length > 0" class="mt-2">
-          <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(callsNoiseKey(), expandDefault('callChainNoise'))">
+          <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(callsNoiseKey(), expandDefault('callChainNoise'))">
             次要调用（{{ noiseChain.length }}）
             {{ isExpanded(callsNoiseKey(), expandDefault('callChainNoise')) ? '▾' : '▸' }}
           </button>
@@ -543,7 +543,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
                 @changed="emit('changed')"
               />
               <li v-if="i < noiseChain.length - 1" class="flex gap-2 py-0.5" aria-hidden="true">
-                <span class="w-2.5 flex justify-center text-gray-300 text-xs leading-none">↓</span>
+                <span class="w-2.5 flex justify-center text-[color:var(--ad-line-strong)] text-xs leading-none">↓</span>
                 <span />
               </li>
             </template>
@@ -554,8 +554,8 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
 
     <!-- 所在链路：参与了哪些链路、每条链路是干什么的、我在其中承担什么角色 -->
     <!-- 沿用原图谱位置的 graphKey：老用户既有展开态不丢失；默认仍折叠 -->
-    <div v-if="chainView" class="border-t border-gray-100 px-4 py-2">
-      <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(graphKey(), false)">
+    <div v-if="chainView" class="border-t border-[color:var(--ad-line)] px-4 py-2">
+      <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(graphKey(), false)">
         所在链路（上游 {{ fi?.callerIds.length ?? 0 }} / 下游 {{ fi?.calleeIds.length ?? 0 }} / {{ fi?.chainIds.length ?? 0 }} 条）
         {{ isExpanded(graphKey(), false) ? '▾' : '▸' }}
       </button>
@@ -563,7 +563,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
         <div
           v-for="chain in visibleChains"
           :key="chain.id"
-          class="rounded border border-gray-100 bg-gray-50 p-2"
+          class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] p-2"
         >
           <!-- C3：链 path 与当前工作区变更集有交集 → 红色「含变更」徽标（title 悬浮列出交集函数名） -->
           <div v-if="chainChangedNamesById.get(chain.id)?.length" class="mb-1">
@@ -572,30 +572,30 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
             </span>
           </div>
           <!-- ① AI 链路叙事：缺失时灰字标注，静态路径骨架照画，不伪造句子（AI 失败降级） -->
-          <p v-if="chain.narrative" class="text-gray-700">{{ chain.narrative }}</p>
-          <p v-else class="text-gray-400">叙事未生成</p>
+          <p v-if="chain.narrative" class="text-[color:var(--ad-ink-2)]">{{ chain.narrative }}</p>
+          <p v-else class="text-[color:var(--ad-ink-3)]">叙事未生成</p>
           <!-- ② 我的角色：函数级 chainRoles → 链路级 stepRoles 回退，缺失同上灰字标注 -->
           <p class="mt-1">
-            <span class="text-gray-500">我的角色：</span>
-            <span v-if="chainRole(chain)" class="text-gray-700">{{ chainRole(chain) }}</span>
-            <span v-else class="text-gray-400">角色未生成</span>
+            <span class="text-[color:var(--ad-ink-2)]">我的角色：</span>
+            <span v-if="chainRole(chain)" class="text-[color:var(--ad-ink-2)]">{{ chainRole(chain) }}</span>
+            <span v-else class="text-[color:var(--ad-ink-3)]">角色未生成</span>
           </p>
           <!-- ③ 紧凑路径：头尾窗口 + gap 省略，me 加粗高亮；行尾可展开该链完整路径 -->
           <div class="mt-1.5 flex flex-wrap items-center gap-y-1">
             <template v-for="(node, ni) in chainSegments(chain)" :key="ni">
-              <span v-if="ni > 0" class="mx-1 text-gray-300">→</span>
-              <span v-if="node.kind === 'gap'" class="text-gray-400">…</span>
+              <span v-if="ni > 0" class="mx-1 text-[color:var(--ad-line-strong)]">→</span>
+              <span v-if="node.kind === 'gap'" class="text-[color:var(--ad-ink-3)]">…</span>
               <button
                 v-else
-                class="rounded px-0.5 font-mono hover:underline"
-                :class="node.id === fn.id ? 'bg-amber-100 font-bold text-gray-900' : 'text-blue-600'"
+                class="rounded-[length:var(--ad-radius-sm)] px-0.5 font-mono hover:underline"
+                :class="node.id === fn.id ? 'bg-amber-100 font-bold text-[color:var(--ad-ink)]' : 'text-blue-600'"
                 @click="goFunction(node.id)"
               >
                 {{ fnName(node.id) }}
               </button>
             </template>
             <button
-              class="ml-2 shrink-0 text-gray-400 hover:text-gray-700"
+              class="ml-2 shrink-0 text-[color:var(--ad-ink-3)] hover:text-[color:var(--ad-ink)]"
               @click="toggle(chainPathKey(chain.id), false)"
             >
               完整路径 {{ isExpanded(chainPathKey(chain.id), false) ? '▾' : '▸' }}
@@ -603,7 +603,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
             <!-- V3：链路路径图入口；path 有效节点 <2（异常数据）时不渲染，单节点路径图无意义 -->
             <button
               v-if="chainVizAvailable(chain)"
-              class="ml-2 shrink-0 text-gray-400 hover:text-gray-700"
+              class="ml-2 shrink-0 text-[color:var(--ad-ink-3)] hover:text-[color:var(--ad-ink)]"
               @click="toggleChainViz(chain)"
             >
               图 {{ isExpanded(chainVizKey(chain.id), false) ? '▾' : '▸' }}
@@ -611,13 +611,13 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
           </div>
           <div
             v-if="isExpanded(chainPathKey(chain.id), false)"
-            class="mt-1 flex flex-wrap items-center gap-y-1 rounded border border-gray-100 bg-white p-1.5"
+            class="mt-1 flex flex-wrap items-center gap-y-1 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-surface)] p-1.5"
           >
             <template v-for="(id, pi) in chain.path" :key="`${id}-${pi}`">
-              <span v-if="pi > 0" class="mx-1 text-gray-300">→</span>
+              <span v-if="pi > 0" class="mx-1 text-[color:var(--ad-line-strong)]">→</span>
               <button
-                class="rounded px-0.5 font-mono hover:underline"
-                :class="id === fn.id ? 'bg-amber-100 font-bold text-gray-900' : 'text-blue-600'"
+                class="rounded-[length:var(--ad-radius-sm)] px-0.5 font-mono hover:underline"
+                :class="id === fn.id ? 'bg-amber-100 font-bold text-[color:var(--ad-ink)]' : 'text-blue-600'"
                 @click="goFunction(id)"
               >
                 {{ fnName(id) }}
@@ -641,7 +641,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
         <!-- 其余链路：默认折叠，展开后与 top3 同渲染 -->
         <button
           v-if="chainView.rest.length > 0"
-          class="self-start text-xs text-gray-500 hover:text-gray-800"
+          class="self-start text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]"
           @click="toggle(chainsMoreKey(), false)"
         >
           +{{ chainView.rest.length }} 更多 {{ isExpanded(chainsMoreKey(), false) ? '▾' : '▸' }}
@@ -650,8 +650,8 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
     </div>
 
     <!-- V2：可视化（调用链 / 所在链路 双 tab 图）：默认收起，展开才挂载 GraphView（布局有缓存） -->
-    <div class="border-t border-gray-100 px-4 py-2">
-      <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(vizKey(), false)">
+    <div class="border-t border-[color:var(--ad-line)] px-4 py-2">
+      <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(vizKey(), false)">
         可视化（调用链 {{ vizCallsNodeCount }} 节点 / 所在链路 {{ vizChains.length }} 链）
         {{ vizExpanded ? '▾' : '▸' }}
       </button>
@@ -681,8 +681,8 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
     </div>
 
     <!-- 最近三次变更（更早记录已归档，数据仍保留于存储） -->
-    <div v-if="fn.recentChanges.length > 0" class="border-t border-gray-100 px-4 py-2">
-      <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(changesKey(), expandDefault('changes'))">
+    <div v-if="fn.recentChanges.length > 0" class="border-t border-[color:var(--ad-line)] px-4 py-2">
+      <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(changesKey(), expandDefault('changes'))">
         最近变更（{{ fn.recentChanges.length }}{{ fn.archivedChangeCount > 0 ? `，另有 ${fn.archivedChangeCount} 条已归档` : '' }}）
         {{ isExpanded(changesKey(), expandDefault('changes')) ? '▾' : '▸' }}
       </button>
@@ -709,22 +709,22 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
           <div class="min-w-0 flex-1">
             <!-- Git 来源：短 hash · 作者 · subject（过长截断，title 悬浮全文） -->
             <template v-if="change.source === 'git' && change.commit">
-              <span class="font-mono text-gray-500">{{ change.commit.hash.slice(0, 7) }}</span>
-              <span class="mx-1 text-gray-300">·</span>
-              <span class="text-gray-600">{{ change.commit.author }}</span>
-              <span class="mx-1 text-gray-300">·</span>
-              <span class="text-gray-600" :title="change.commit.subject">{{ truncateText(change.commit.subject) }}</span>
+              <span class="font-mono text-[color:var(--ad-ink-2)]">{{ change.commit.hash.slice(0, 7) }}</span>
+              <span class="mx-1 text-[color:var(--ad-line-strong)]">·</span>
+              <span class="text-[color:var(--ad-ink-2)]">{{ change.commit.author }}</span>
+              <span class="mx-1 text-[color:var(--ad-line-strong)]">·</span>
+              <span class="text-[color:var(--ad-ink-2)]" :title="change.commit.subject">{{ truncateText(change.commit.subject) }}</span>
             </template>
-            <span v-else class="text-gray-600">{{ change.description }}</span>
+            <span v-else class="text-[color:var(--ad-ink-2)]">{{ change.description }}</span>
           </div>
-          <span class="ml-auto shrink-0 text-gray-400">{{ formatDate(change.date) }}</span>
+          <span class="ml-auto shrink-0 text-[color:var(--ad-ink-3)]">{{ formatDate(change.date) }}</span>
         </li>
       </ul>
     </div>
 
     <!-- 用户批注：与自动生成内容分离展示、分离存储 -->
-    <div class="border-t border-gray-100 px-4 py-2">
-      <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(annotationsKey(), expandDefault('annotations'))">
+    <div class="border-t border-[color:var(--ad-line)] px-4 py-2">
+      <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(annotationsKey(), expandDefault('annotations'))">
         批注（{{ fn.annotations.length }}）
         {{ isExpanded(annotationsKey(), expandDefault('annotations')) ? '▾' : '▸' }}
       </button>
@@ -739,25 +739,25 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
     </div>
 
     <!-- 追问记录：函数级 AI 追问提炼而来（kind=followup），与批注严格分离展示/存储 -->
-    <div class="border-t border-gray-100 px-4 py-2">
-      <button class="text-xs text-gray-500 hover:text-gray-800" @click="toggle(followupsKey(), false)">
+    <div class="border-t border-[color:var(--ad-line)] px-4 py-2">
+      <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(followupsKey(), false)">
         追问记录（{{ fn.followups.length }}）
         {{ isExpanded(followupsKey(), false) ? '▾' : '▸' }}
       </button>
       <div v-if="isExpanded(followupsKey(), false)" class="mt-2 flex flex-col gap-2">
-        <div v-if="fn.followups.length === 0" class="text-xs text-gray-400">
+        <div v-if="fn.followups.length === 0" class="text-xs text-[color:var(--ad-ink-3)]">
           暂无追问记录（在业务脉络树中对该函数「追问」并提炼即可回显于此）。
         </div>
         <article
           v-for="followup in fn.followups"
           :key="followup.id"
-          class="rounded border border-green-100 bg-green-50/50 px-3 py-2"
+          class="rounded-[length:var(--ad-radius-sm)] border border-green-100 bg-green-50/50 px-3 py-2"
         >
-          <div class="flex items-center gap-2 text-xs text-gray-500">
+          <div class="flex items-center gap-2 text-xs text-[color:var(--ad-ink-2)]">
             <n-tag size="tiny" :bordered="false" type="success">追问记录</n-tag>
-            <span class="font-medium text-gray-700">{{ followup.author }}</span>
+            <span class="font-medium text-[color:var(--ad-ink-2)]">{{ followup.author }}</span>
             <span>{{ formatDate(followup.createdAt) }}</span>
-            <span v-if="followup.updatedAt !== followup.createdAt" class="text-gray-400">
+            <span v-if="followup.updatedAt !== followup.createdAt" class="text-[color:var(--ad-ink-3)]">
               （编辑于 {{ formatDate(followup.updatedAt) }}）
             </span>
             <n-popconfirm

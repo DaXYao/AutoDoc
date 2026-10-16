@@ -275,7 +275,7 @@ function truncate(text: string, max = 90): string {
     <!-- ============ 结构节点行：mainline / branch / module，以及多函数 leaf（其关联函数收进「函数(N)」开关） ============ -->
     <template v-if="!isLeaf || syntheticLeaves.length > 0">
       <div
-        class="group w-full flex items-start gap-2 rounded px-2 py-1.5 text-left transition hover:bg-gray-50"
+        class="group w-full flex items-start gap-2 rounded-[length:var(--ad-radius-sm)] px-2 py-1.5 text-left transition hover:bg-[color:var(--ad-canvas)]"
         :class="hasContent ? 'cursor-pointer' : 'cursor-default'"
         :style="{ paddingLeft: indent }"
         :role="hasContent ? 'button' : undefined"
@@ -283,7 +283,7 @@ function truncate(text: string, max = 90): string {
         @click="toggleNode"
         @keydown="onRowKeydown"
       >
-        <span class="text-gray-400 text-xs w-3 shrink-0 leading-5">
+        <span class="text-[color:var(--ad-ink-3)] text-xs w-3 shrink-0 leading-5">
           {{ hasContent ? (expanded ? '▾' : '▸') : '·' }}
         </span>
         <!-- 同层序号徽标 -->
@@ -301,7 +301,7 @@ function truncate(text: string, max = 90): string {
         </span>
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-center gap-2">
-            <span class="text-sm font-medium text-gray-800 break-all">{{ node.label }}</span>
+            <span class="text-sm font-medium text-[color:var(--ad-ink)] break-all">{{ node.label }}</span>
             <n-tag size="tiny" :bordered="false" :type="FLOW_KIND_COLORS[node.kind]">
               {{ FLOW_KIND_LABELS[node.kind] }}
             </n-tag>
@@ -323,10 +323,10 @@ function truncate(text: string, max = 90): string {
               模块 {{ mid }}
             </button>
           </div>
-          <p v-if="node.summary" class="mt-0.5 text-xs text-gray-500">{{ node.summary }}</p>
+          <p v-if="node.summary" class="mt-0.5 text-xs text-[color:var(--ad-ink-2)]">{{ node.summary }}</p>
           <p
             v-if="node.reason"
-            class="mt-0.5 text-[11px] text-gray-400"
+            class="mt-0.5 text-[11px] text-[color:var(--ad-ink-3)]"
             :title="node.reason"
           >
             依据：{{ truncate(node.reason) }}
@@ -349,7 +349,7 @@ function truncate(text: string, max = 90): string {
             :style="{ paddingLeft: `${(depth + 1) * 16 + 8}px` }"
             aria-hidden="true"
           >
-            <span class="w-3 flex justify-center text-gray-300 text-xs leading-none">↓</span>
+            <span class="w-3 flex justify-center text-[color:var(--ad-line-strong)] text-xs leading-none">↓</span>
           </div>
         </template>
 
@@ -378,7 +378,7 @@ function truncate(text: string, max = 90): string {
       <!-- 异常空壳节点（无结构孩子、无函数叶子）：低调占位，不报错 -->
       <div
         v-else-if="!hasContent"
-        class="flex items-center py-1 text-[11px] text-gray-400 italic"
+        class="flex items-center py-1 text-[11px] text-[color:var(--ad-ink-3)] italic"
         :style="{ paddingLeft: `${(depth + 1) * 16 + 8}px` }"
       >
         已达深度上限 / 无下钻内容
@@ -387,10 +387,10 @@ function truncate(text: string, max = 90): string {
 
     <!-- ============ 单函数叶子行：轻量化（名 + 标签 + 一行用途 + 追问 + 展开） ============ -->
     <template v-else>
-      <div class="flex items-start gap-2 rounded px-2 py-1.5" :style="{ paddingLeft: indent }">
+      <div class="flex items-start gap-2 rounded-[length:var(--ad-radius-sm)] px-2 py-1.5" :style="{ paddingLeft: indent }">
         <span
           class="mt-1 w-2.5 h-2.5 rounded-full shrink-0"
-          :class="fnInsight?.isCore ? 'bg-green-500' : 'bg-gray-300'"
+          :class="fnInsight?.isCore ? 'bg-green-500' : 'bg-[color:var(--ad-line-strong)]'"
         />
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-center gap-2">
@@ -401,7 +401,7 @@ function truncate(text: string, max = 90): string {
             >
               {{ fnName }}
             </button>
-            <span v-else class="text-sm font-mono text-gray-600 break-all">{{ fnName }}</span>
+            <span v-else class="text-sm font-mono text-[color:var(--ad-ink-2)] break-all">{{ fnName }}</span>
             <n-tag
               v-if="fnInsight?.isCore"
               size="tiny"
@@ -422,14 +422,14 @@ function truncate(text: string, max = 90): string {
             >
               {{ askOpen ? '收起追问' : '追问' }}
             </button>
-            <button class="text-[11px] text-gray-500 hover:text-gray-800" @click="toggleDetail">
+            <button class="text-[11px] text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggleDetail">
               {{ detailOpen ? '收起 ▾' : '展开 ▸' }}
             </button>
           </div>
           <!-- 一行用途：来自函数索引 purpose，截断 -->
           <p
             v-if="fnPurpose"
-            class="mt-0.5 text-xs text-gray-500"
+            class="mt-0.5 text-xs text-[color:var(--ad-ink-2)]"
             :title="fnPurpose"
           >
             {{ truncate(fnPurpose, 120) }}
@@ -440,7 +440,7 @@ function truncate(text: string, max = 90): string {
       <!-- 就地追问面板：单次一问一答（照 CallNode 范式） -->
       <div
         v-if="askOpen && !readOnly"
-        class="my-1 mr-2 rounded border border-gray-200 bg-gray-50 px-3 py-2"
+        class="my-1 mr-2 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-3 py-2"
         :style="{ marginLeft: indent }"
       >
         <n-input
@@ -461,15 +461,15 @@ function truncate(text: string, max = 90): string {
           >
             提问
           </n-button>
-          <span v-if="asking" class="text-xs text-gray-500">
+          <span v-if="asking" class="text-xs text-[color:var(--ad-ink-2)]">
             AI 正在检索相关代码，可能需要数十秒…
           </span>
         </div>
 
         <!-- 答案区：Markdown 渲染（已禁用 HTML，防 XSS） -->
-        <div v-if="response" class="mt-2 rounded border border-gray-100 bg-white px-3 py-2">
+        <div v-if="response" class="mt-2 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-surface)] px-3 py-2">
           <div class="annotation-body text-sm" v-html="renderMarkdown(response.answer)" />
-          <div class="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-gray-400">
+          <div class="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-[color:var(--ad-ink-3)]">
             <span>{{ formatAskMeta(response.rounds, response.usedFunctionIds.length) }}</span>
             <span v-if="response.degraded" class="font-medium text-orange-500">
               答案可能不完整（未能在上限内完全作答）
@@ -519,13 +519,13 @@ function truncate(text: string, max = 90): string {
             <article
               v-for="followup in followups"
               :key="followup.id"
-              class="rounded border border-green-100 bg-green-50/50 px-3 py-2"
+              class="rounded-[length:var(--ad-radius-sm)] border border-green-100 bg-green-50/50 px-3 py-2"
             >
-              <div class="flex items-center gap-2 text-xs text-gray-500">
+              <div class="flex items-center gap-2 text-xs text-[color:var(--ad-ink-2)]">
                 <n-tag size="tiny" :bordered="false" type="success">追问记录</n-tag>
-                <span class="font-medium text-gray-700">{{ followup.author }}</span>
+                <span class="font-medium text-[color:var(--ad-ink-2)]">{{ followup.author }}</span>
                 <span>{{ formatDate(followup.createdAt) }}</span>
-                <span v-if="followup.updatedAt !== followup.createdAt" class="text-gray-400">
+                <span v-if="followup.updatedAt !== followup.createdAt" class="text-[color:var(--ad-ink-3)]">
                   （编辑于 {{ formatDate(followup.updatedAt) }}）
                 </span>
                 <n-popconfirm
@@ -551,7 +551,7 @@ function truncate(text: string, max = 90): string {
               />
             </article>
           </div>
-          <p v-else class="text-[11px] text-gray-400">暂无追问记录。</p>
+          <p v-else class="text-[11px] text-[color:var(--ad-ink-3)]">暂无追问记录。</p>
           <button
             v-if="entry"
             class="mt-1 text-[11px] text-blue-600 hover:underline"

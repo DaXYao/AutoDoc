@@ -497,8 +497,8 @@ function goFunction(id: string): void {
 <template>
   <div>
     <div class="mb-3 flex items-center justify-between">
-      <h2 class="text-xl font-semibold text-gray-800">变更影响分析</h2>
-      <span class="text-xs text-gray-400">
+      <h2 class="text-xl font-semibold text-[color:var(--ad-ink)]">变更影响分析</h2>
+      <span class="text-xs text-[color:var(--ad-ink-3)]">
         变更集来自变更历史；链路/调用关系来自当前洞察图谱
       </span>
     </div>
@@ -519,14 +519,14 @@ function goFunction(id: string): void {
       <!-- ============ C3：自动增量重生横幅（探测静默；stale 才现身） ============ -->
       <div
         v-if="autoRefreshPhase === 'refreshing'"
-        class="mb-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-700"
+        class="mb-3 flex items-center gap-2 rounded-[length:var(--ad-radius)] border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-700"
       >
         <n-spin size="small" />
         检测到未重生变更，正在增量重生…
       </div>
       <div
         v-else-if="autoRefreshPhase === 'done'"
-        class="mb-3 flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-2 text-sm text-green-700"
+        class="mb-3 flex items-center gap-2 rounded-[length:var(--ad-radius)] border border-green-200 bg-green-50 px-4 py-2 text-sm text-green-700"
       >
         <span>{{ autoRefreshDoneText }}</span>
         <n-button size="tiny" quaternary class="ml-auto" @click="dismissAutoRefreshBanner">
@@ -535,7 +535,7 @@ function goFunction(id: string): void {
       </div>
       <div
         v-else-if="autoRefreshPhase === 'error'"
-        class="mb-3 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600"
+        class="mb-3 flex items-center gap-2 rounded-[length:var(--ad-radius)] border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600"
       >
         <span>增量重生失败：{{ autoRefreshError }}（下方仍为已生成数据，可继续查看）</span>
         <n-button size="tiny" class="ml-auto shrink-0" @click="runAutoRefresh()">重试</n-button>
@@ -543,14 +543,14 @@ function goFunction(id: string): void {
       <!-- 自动重生成功后仍 stale（如解析必失败文件永不入缓存）：不再循环自动重生，警示 + 手动出口 -->
       <div
         v-else-if="autoRefreshPhase === 'stale-warning'"
-        class="mb-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-700"
+        class="mb-3 flex items-center gap-2 rounded-[length:var(--ad-radius)] border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-700"
       >
         <span>仍有未能纳入缓存的变更（可能含解析失败文件），已按当前数据展示</span>
         <n-button size="tiny" class="ml-auto shrink-0" @click="runManualRefresh">增量重生</n-button>
       </div>
 
       <!-- ============ 变更集选择器 ============ -->
-      <section class="mb-4 rounded-lg border border-gray-200 bg-white px-4 py-3">
+      <section class="ad-card mb-4 px-4 py-3">
         <div class="flex flex-wrap items-center gap-3">
           <n-radio-group v-model:value="mode" size="small">
             <n-radio-button value="workspace">工作区当前</n-radio-button>
@@ -584,7 +584,7 @@ function goFunction(id: string): void {
               placeholder="起点提交"
               class="!w-72 max-w-full"
             />
-            <span class="text-xs text-gray-400">至</span>
+            <span class="text-xs text-[color:var(--ad-ink-3)]">至</span>
             <n-select
               v-model:value="rangeEnd"
               :options="commitOptions"
@@ -599,17 +599,17 @@ function goFunction(id: string): void {
 
           <span
             v-if="commits !== null && commits.length === 0"
-            class="text-xs text-gray-400"
+            class="text-xs text-[color:var(--ad-ink-3)]"
           >
             暂无 Git 提交级变更历史（提交模式不可用）
           </span>
         </div>
         <!-- 拉取失败（null）与确无提交（[]）区分：失败给重试出口，单提交/范围模式暂不可选 -->
-        <div v-if="commitsFailed" class="mt-1.5 flex items-center gap-2 text-xs text-gray-400">
+        <div v-if="commitsFailed" class="mt-1.5 flex items-center gap-2 text-xs text-[color:var(--ad-ink-3)]">
           <span>提交列表加载失败（单提交/提交范围模式暂不可用）</span>
           <n-button size="tiny" @click="loadCommits()">重试</n-button>
         </div>
-        <p v-if="mode === 'range'" class="mt-1.5 text-xs text-gray-400">
+        <p v-if="mode === 'range'" class="mt-1.5 text-xs text-[color:var(--ad-ink-3)]">
           范围 = 提交列表（新→旧）上两端点间的闭区间，端点先后顺序无关
         </p>
       </section>
@@ -630,16 +630,16 @@ function goFunction(id: string): void {
         <template v-else-if="changeset">
           <!-- ============ 摘要卡 ============ -->
           <section class="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-            <div class="rounded-lg border border-gray-200 bg-white px-4 py-3">
+            <div class="ad-card px-4 py-3">
               <n-statistic label="变更函数" :value="changedFunctions.length" />
             </div>
-            <div class="rounded-lg border border-gray-200 bg-white px-4 py-3">
+            <div class="ad-card px-4 py-3">
               <n-statistic label="受影响链路" :value="affected.length" />
             </div>
-            <div class="rounded-lg border border-gray-200 bg-white px-4 py-3">
+            <div class="ad-card px-4 py-3">
               <n-statistic label="上游波及" :value="ripple.length" />
             </div>
-            <div class="rounded-lg border border-gray-200 bg-white px-4 py-3">
+            <div class="ad-card px-4 py-3">
               <n-statistic label="下游依赖" :value="downstreamCount" />
             </div>
           </section>
@@ -647,9 +647,9 @@ function goFunction(id: string): void {
           <!-- ============ 影响叠加图（top5 受影响链路合并 DAG） ============ -->
           <section v-if="overlayModel.nodes.length > 0" class="mb-5">
             <div class="mb-2 flex items-center justify-between">
-              <h3 class="text-sm font-semibold text-gray-700">
+              <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">
                 影响叠加图
-                <span class="text-xs font-normal text-gray-400">
+                <span class="text-xs font-normal text-[color:var(--ad-ink-3)]">
                   （受影响链路前 {{ Math.min(sortedAffected.length, IMPACT_OVERLAY_TOP_N) }} 条合并；点击节点跳转函数）
                 </span>
               </h3>
@@ -670,7 +670,7 @@ function goFunction(id: string): void {
           <!-- ============ 受影响链路列表 ============ -->
           <section class="mb-5">
             <div class="mb-2 flex items-center justify-between">
-              <h3 class="text-sm font-semibold text-gray-700">
+              <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">
                 受影响链路（{{ affected.length }}）
               </h3>
               <n-radio-group v-model:value="sortMode" size="small">
@@ -678,7 +678,7 @@ function goFunction(id: string): void {
                 <n-radio-button value="changes">变更点数</n-radio-button>
               </n-radio-group>
             </div>
-            <p v-if="affected.length === 0" class="text-xs text-gray-400">
+            <p v-if="affected.length === 0" class="text-xs text-[color:var(--ad-ink-3)]">
               没有链路的调用路径包含该变更集的函数：新增函数可能尚未进入任何链路，
               或链路数据未生成（可在洞察页生成 AI 洞察后回来看）。
             </p>
@@ -686,18 +686,18 @@ function goFunction(id: string): void {
               <div
                 v-for="card in chainCards"
                 :key="card.chain.id"
-                class="rounded-lg border border-gray-200 bg-white px-4 py-3"
+                class="ad-card px-4 py-3"
               >
-                <p v-if="card.chain.narrative" class="text-sm text-gray-600">
+                <p v-if="card.chain.narrative" class="text-sm text-[color:var(--ad-ink-2)]">
                   {{ card.chain.narrative }}
                 </p>
-                <p v-else class="text-sm text-gray-400">叙事未生成</p>
+                <p v-else class="text-sm text-[color:var(--ad-ink-3)]">叙事未生成</p>
                 <div class="mt-2 flex flex-wrap items-center gap-1.5">
-                  <span class="mr-1 text-xs text-gray-400">变更点：</span>
+                  <span class="mr-1 text-xs text-[color:var(--ad-ink-3)]">变更点：</span>
                   <button
                     v-for="point in card.points"
                     :key="`${card.chain.id}:${point.functionId}`"
-                    class="rounded border border-red-300 bg-red-50 px-1.5 py-0.5 text-[11px] font-mono text-red-600 hover:underline"
+                    class="rounded-[length:var(--ad-radius-sm)] border border-red-300 bg-red-50 px-1.5 py-0.5 text-[11px] font-mono text-red-600 hover:underline"
                     :title="point.functionId"
                     @click="goFunction(point.functionId)"
                   >
@@ -713,20 +713,20 @@ function goFunction(id: string): void {
 
           <!-- ============ 上游波及区（传递调用者，BFS 深度序） ============ -->
           <section class="mb-5">
-            <h3 class="mb-2 text-sm font-semibold text-gray-700">
+            <h3 class="mb-2 text-sm font-semibold text-[color:var(--ad-ink-2)]">
               上游波及（{{ ripple.length }}）
-              <span class="text-xs font-normal text-gray-400">
+              <span class="text-xs font-normal text-[color:var(--ad-ink-3)]">
                 谁（间接）调用了变更函数——直接调用者在前
               </span>
             </h3>
-            <p v-if="ripple.length === 0" class="text-xs text-gray-400">
+            <p v-if="ripple.length === 0" class="text-xs text-[color:var(--ad-ink-3)]">
               变更函数没有项目内调用者（入口函数或洞察数据未覆盖）
             </p>
             <div v-else class="flex flex-wrap gap-2">
               <button
                 v-for="entry in ripple"
                 :key="entry.functionId"
-                class="flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-mono text-amber-700 hover:underline"
+                class="flex items-center gap-1 rounded-[length:var(--ad-radius-sm)] border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-mono text-amber-700 hover:underline"
                 :title="entry.functionId"
                 @click="goFunction(entry.functionId)"
               >
@@ -740,9 +740,9 @@ function goFunction(id: string): void {
 
           <!-- ============ 下游依赖区（按变更函数分组的直接 callees） ============ -->
           <section class="mb-5">
-            <h3 class="mb-2 text-sm font-semibold text-gray-700">
+            <h3 class="mb-2 text-sm font-semibold text-[color:var(--ad-ink-2)]">
               下游依赖
-              <span class="text-xs font-normal text-gray-400">
+              <span class="text-xs font-normal text-[color:var(--ad-ink-3)]">
                 每个变更函数直接调用的项目内函数
               </span>
             </h3>
@@ -750,29 +750,30 @@ function goFunction(id: string): void {
               <div
                 v-for="group in downstream"
                 :key="group.functionId"
-                class="rounded-lg border border-gray-200 bg-white px-4 py-2.5"
+                class="ad-card px-4 py-2.5"
               >
                 <div class="flex flex-wrap items-center gap-2">
                   <button
-                    class="rounded border border-red-300 bg-red-50 px-1.5 py-0.5 text-xs font-mono text-red-600 hover:underline"
+                    class="rounded-[length:var(--ad-radius-sm)] border border-red-300 bg-red-50 px-1.5 py-0.5 text-xs font-mono text-red-600 hover:underline"
                     :title="group.functionId"
                     @click="goFunction(group.functionId)"
                   >
                     {{ fnName(group.functionId) }}
                   </button>
-                  <span class="text-xs text-gray-400">→</span>
+                  <!-- 装饰性箭头统一 line-strong（与 FunctionCard/FlowTree 同字形同色） -->
+                  <span class="text-xs text-[color:var(--ad-line-strong)]">→</span>
                   <template v-if="group.calleeIds.length > 0">
                     <button
                       v-for="callee in group.calleeIds"
                       :key="callee"
-                      class="rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-[11px] font-mono text-gray-600 hover:underline"
+                      class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-1.5 py-0.5 text-[11px] font-mono text-[color:var(--ad-ink-2)] hover:underline"
                       :title="callee"
                       @click="goFunction(callee)"
                     >
                       {{ fnName(callee) }}
                     </button>
                   </template>
-                  <span v-else class="text-xs text-gray-400">无项目内下游</span>
+                  <span v-else class="text-xs text-[color:var(--ad-ink-3)]">无项目内下游</span>
                 </div>
               </div>
             </div>

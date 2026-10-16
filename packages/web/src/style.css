@@ -1,5 +1,147 @@
 @import 'tailwindcss';
 
+/* 让 Tailwind 的 font-mono 工具类指向设计令牌等宽字体栈：
+   hash/行号/路径等所有 font-mono 场景统一走 --ad-mono，组件无需逐处改写 */
+@theme {
+  --font-mono: var(--ad-mono);
+}
+
+/* D1 米白极简设计令牌：全站颜色的唯一来源，组件内禁止再写死灰阶 hex */
+:root {
+  --ad-canvas: #F7F5F2;
+  --ad-surface: #FFFFFF;
+  --ad-ink: #1F2329;
+  --ad-ink-2: #5C6270;
+  --ad-ink-3: #8A8F98;
+  --ad-line: #E8E5E0;
+  --ad-line-strong: #DDD9D2;
+  --ad-accent: #4C6FFF;
+  --ad-accent-soft: #EEF2FF;
+  --ad-radius: 10px;
+  --ad-radius-sm: 6px;
+  --ad-shadow: 0 1px 2px rgba(31, 35, 41, .04);
+  --ad-mono: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+}
+
+body {
+  background: var(--ad-canvas);
+  color: var(--ad-ink);
+  font-family: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+::selection {
+  background: var(--ad-accent-soft);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ad-accent);
+  outline-offset: 2px;
+}
+
+/* 输入/选择控件自带 accent 焦点环，去掉全局 outline 避免双环 */
+.n-input :focus-visible,
+.n-base-selection :focus-visible {
+  outline: none;
+}
+
+/* 细滚动条：米白底上用发丝线同族拇指色，弱化滚动存在感 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ad-line-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ad-line-strong);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 顶栏：单行 56px，surface 底 + 发丝线下边框；用原生 header 而非 n-layout-header，避免 naive cssr 与自定义样式层叠竞争 */
+.ad-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 56px;
+  padding: 0 24px;
+  background: var(--ad-surface);
+  border-bottom: 1px solid var(--ad-line);
+}
+
+.ad-wordmark {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  color: var(--ad-ink);
+}
+
+/* 导航 pills：默认次级墨色，active 用 accent-soft 底 + accent 字 */
+.ad-nav-pill {
+  padding: 4px 10px;
+  border-radius: var(--ad-radius-sm);
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--ad-ink-2);
+  transition: color .15s ease, background-color .15s ease;
+}
+.ad-nav-pill:hover {
+  color: var(--ad-ink);
+}
+.ad-nav-pill--active,
+.ad-nav-pill--active:hover {
+  background: var(--ad-accent-soft);
+  color: var(--ad-accent);
+}
+
+/* 搜索槽：弹性但有宽度下限——旧版 flex-1 无下限，窄屏被挤成 44px「空白盒」 */
+.ad-search {
+  flex: 1 1 0%;
+  min-width: 150px;
+  max-width: 260px;
+}
+
+/* 统计文字：单行截断，全文走 title 悬浮 */
+.ad-stats {
+  font-size: 12px;
+  color: var(--ad-ink-3);
+}
+
+.ad-select-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 顶栏两枚按钮（.ad-btn-ink / .ad-btn-outline）的换肤不在这里：
+   naive-ui 把主题变量注入为元素 inline style，类选择器压不过，
+   皮肤改由 theme.ts 的 per-instance theme-overrides 提供（类型安全）。 */
+
+/* 卡片基类：D2 起逐步替换组件内 border-gray-200 手写卡片 */
+.ad-card {
+  background: var(--ad-surface);
+  border: 1px solid var(--ad-line);
+  border-radius: var(--ad-radius);
+  box-shadow: var(--ad-shadow);
+}
+
+/* 卡片交互态修饰类：.ad-card 未分层，Tailwind 的 border-* 工具类在 @layer utilities 里，
+   层内样式压不过未分层的 .ad-card，直接用 border-[color:var(--ad-accent)] 不生效。
+   故用语义修饰类（与 .ad-nav-pill--active 同范式），置于 .ad-card 之后靠源码顺序覆盖边框色。 */
+.ad-card--active {
+  border-color: var(--ad-accent);
+}
+.ad-card--hover:hover {
+  border-color: var(--ad-accent);
+}
+
 /* 批注 Markdown 渲染样式（与 Naive UI 主题协调的最小排版） */
 .annotation-body {
   line-height: 1.7;
@@ -33,14 +175,14 @@
 /* 跳转定位落点确认：函数卡片被滚动到位后短暂闪烁一圈光晕（class 由 FilePage 定时移除） */
 @keyframes fn-jump-flash {
   0% {
-    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+    box-shadow: 0 0 0 0 rgba(76, 111, 255, 0);
   }
   15%,
   55% {
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.55);
+    box-shadow: 0 0 0 3px rgba(76, 111, 255, 0.55);
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+    box-shadow: 0 0 0 0 rgba(76, 111, 255, 0);
   }
 }
 .fn-jump-highlight {

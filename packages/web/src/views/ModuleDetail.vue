@@ -39,15 +39,15 @@ function goFile(fileId: string): void {
   <div>
     <div class="flex items-center gap-2 mb-2">
       <n-button size="small" quaternary @click="router.push({ name: 'home' })">← 洞察</n-button>
-      <h2 class="text-xl font-semibold text-gray-800">{{ module?.name ?? '模块' }}</h2>
+      <h2 class="text-xl font-semibold text-[color:var(--ad-ink)]">{{ module?.name ?? '模块' }}</h2>
     </div>
-    <p v-if="module" class="text-sm text-gray-600 mb-4">{{ module.description }}</p>
+    <p v-if="module" class="text-sm text-[color:var(--ad-ink-2)] mb-4">{{ module.description }}</p>
 
     <n-empty v-if="!module" description="模块不存在" class="my-8" />
     <template v-else>
       <!-- 实现链路 -->
       <section class="mb-6">
-        <h3 class="text-sm font-semibold text-gray-700 mb-2">
+        <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)] mb-2">
           实现链路（{{ chains.length }}）
         </h3>
         <n-empty v-if="chains.length === 0" description="该模块暂无完整调用链路" size="small" />
@@ -55,15 +55,15 @@ function goFile(fileId: string): void {
           <div
             v-for="chain in chains"
             :key="chain.id"
-            class="rounded-lg border border-gray-200 bg-white px-4 py-3"
+            class="ad-card px-4 py-3"
           >
-            <p v-if="chain.narrative" class="text-xs text-gray-600 mb-2">{{ chain.narrative }}</p>
+            <p v-if="chain.narrative" class="text-xs text-[color:var(--ad-ink-2)] mb-2">{{ chain.narrative }}</p>
             <ol class="flex flex-col">
               <template v-for="(fid, i) in chain.path" :key="`${chain.id}-${fid}-${i}`">
                 <li class="flex items-start gap-2">
                   <span
                     class="mt-1 w-2 h-2 rounded-full shrink-0"
-                    :class="fnInsight(fid)?.isCore ? 'bg-green-500' : 'bg-gray-300'"
+                    :class="fnInsight(fid)?.isCore ? 'bg-green-500' : 'bg-[color:var(--ad-line-strong)]'"
                   />
                   <div class="min-w-0">
                     <button
@@ -72,13 +72,13 @@ function goFile(fileId: string): void {
                     >
                       {{ fnName(fid) }}
                     </button>
-                    <div v-if="chain.stepRoles[fid]" class="text-xs text-gray-500">
+                    <div v-if="chain.stepRoles[fid]" class="text-xs text-[color:var(--ad-ink-2)]">
                       在这里：{{ chain.stepRoles[fid] }}
                     </div>
                   </div>
                 </li>
                 <li v-if="i < chain.path.length - 1" class="flex gap-2 py-0.5" aria-hidden="true">
-                  <span class="w-2 flex justify-center text-gray-300 text-xs leading-none">↓</span>
+                  <span class="w-2 flex justify-center text-[color:var(--ad-line-strong)] text-xs leading-none">↓</span>
                   <span />
                 </li>
               </template>
@@ -89,12 +89,12 @@ function goFile(fileId: string): void {
 
       <!-- 核心函数 -->
       <section v-if="module.coreFunctionIds.length" class="mb-6">
-        <h3 class="text-sm font-semibold text-gray-700 mb-2">核心函数</h3>
+        <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)] mb-2">核心函数</h3>
         <div class="flex flex-wrap gap-2">
           <button
             v-for="cid in module.coreFunctionIds"
             :key="cid"
-            class="px-2 py-1 rounded border border-green-300 bg-green-50 text-green-700 text-xs font-mono hover:underline"
+            class="px-2 py-1 rounded-[length:var(--ad-radius-sm)] border border-green-300 bg-green-50 text-green-700 text-xs font-mono hover:underline"
             :title="fnInsight(cid)?.coreReason || fnInsight(cid)?.systemRole || ''"
             @click="goFunction(cid)"
           >
@@ -105,12 +105,12 @@ function goFile(fileId: string): void {
 
       <!-- 文件 -->
       <section>
-        <h3 class="text-sm font-semibold text-gray-700 mb-2">文件（{{ module.fileIds.length }}）</h3>
+        <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)] mb-2">文件（{{ module.fileIds.length }}）</h3>
         <div class="flex flex-wrap gap-2">
           <button
             v-for="fid in module.fileIds"
             :key="fid"
-            class="px-2 py-1 rounded border border-gray-200 bg-white text-xs font-mono text-gray-600 hover:border-blue-400"
+            class="px-2 py-1 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-surface)] text-xs font-mono text-[color:var(--ad-ink-2)] hover:border-[color:var(--ad-accent)]"
             @click="goFile(fid)"
           >
             {{ fid }}
