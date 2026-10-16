@@ -96,6 +96,43 @@ function parseCacheVersionKey(normalized: NormalizedConfig): string {
   )
 }
 
+/**
+ * 加载对当前版本有效的解析缓存条目（generateDocs 阶段一与 inspectParseCache 共用口径）：
+ * versionKey 不符（解析器升级/配置指纹变化）视作空缓存 → 全量重解析。
+ */
+function loadValidParseCache(
+  normalized: NormalizedConfig,
+  storage: StorageAdapter
+): { versionKey: string; cachedEntries: Record<string, ParseCacheEntry> } {
+  const versionKey = parseCacheVersionKey(normalized)
+  const loadedCache = storage.loadParseCache()
+  return {
+    versionKey,
+    cachedEntries: loadedCache && loadedCache.versionKey === versionKey ? loadedCache.entries : {}
+  }
+}
+
+/**
+ * 缓存条目命中前置判定：内容哈希一致 + 形状校验 + functionCount 对照。
+ * functionCount 校验的必要性：functions 被整体截断为 [] 时空数组仍是合法形状、
+ * contentHash 也未变，仅靠形状校验会静默复用坏条目产出空文档。
+ * 不含消费兜底（buildFunctionDoc try/catch）——那是 generateDocs 阶段一 tryReuse 的职责。
+ * 谓词收窄到 parsed: ParsedFile：ParseCacheEntry.parsed 声明为 unknown（存储层不理解解析结构），
+ * 命中后调用方直接按 ParsedFile 消费，与抽出前的内联校验窄化语义一致。
+ */
+function isCacheEntryHit(
+  cached: ParseCacheEntry | undefined,
+  contentHash: string
+): cached is ParseCacheEntry & { parsed: ParsedFile } {
+  return (
+    cached !== undefined &&
+    cached.contentHash === contentHash &&
+    isParsedFileShape(cached.parsed) &&
+    (cached.functionCount === undefined ||
+      cached.functionCount === cached.parsed.functions.length)
+  )
+}
+
 /** 单条 ParsedFunction 的最小形状校验：只查后续消费必然触碰的关键字段 */
 function isParsedFunctionShape(value: unknown): value is ParsedFunction {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
@@ -314,10 +351,7 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
   const knownPaths = new Set(relPaths)
 
   // 阶段一：增量解析。versionKey 不符（解析器升级/配置指纹变化）视作空缓存 → 全量重解析
-  const versionKey = parseCacheVersionKey(normalized)
-  const loadedCache = storage.loadParseCache()
-  const cachedEntries =
-    loadedCache && loadedCache.versionKey === versionKey ? loadedCache.entries : {}
+  const { versionKey, cachedEntries } = loadValidParseCache(normalized, storage)
   const nextEntries: Record<string, ParseCacheEntry> = {}
   const stats: IncrementalParseStats = { reused: 0, reparsed: 0, added: 0, removed: 0 }
 
@@ -334,19 +368,10 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
     }
     const contentHash = sha256(source)
     const cached = cachedEntries[relPath]
-    // 尝试复用缓存条目：形状校验 + functionCount 对照 + 消费兜底，任一环节不过即返回 null。
-    // functionCount 校验的必要性：functions 被整体截断为 [] 时空数组仍是合法形状、
-    // contentHash 也未变，仅靠形状校验会静默复用坏条目产出空文档。
+    // 尝试复用缓存条目：命中前置判定（isCacheEntryHit，与 inspectParseCache 共用）+ 消费兜底，
+    // 任一环节不过即返回 null。
     const tryReuse = (): { parsed: ParsedFile; functions: FunctionDoc[] } | null => {
-      if (
-        !cached ||
-        cached.contentHash !== contentHash ||
-        !isParsedFileShape(cached.parsed) ||
-        (cached.functionCount !== undefined &&
-          cached.functionCount !== cached.parsed.functions.length)
-      ) {
-        return null
-      }
+      if (!isCacheEntryHit(cached, contentHash)) return null
       // 消费阶段（buildFunctionDoc 等）整体兜底：形状校验只防结构性损坏，字段级异常
       // 一律按未命中降级真解析（与 parseFile 容错同构），避免坏条目被写回形成崩溃循环
       try {
@@ -488,4 +513,50 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
   }
 
   return { files, changes: allChanges, incremental: stats }
+}
+
+/**
+ * C3：只读探测——不做真解析、不写任何存储，仅按「内容哈希 + 缓存命中判定」统计
+ * 当前工作区相对解析缓存若跑一次 generateDocs 会产生的增量统计（与阶段一同口径：
+ * collectFiles / sha256 / loadValidParseCache / isCacheEntryHit 全部共用）。
+ * server 的 GET /api/refresh/check 据此判定 stale（reparsed+added+removed > 0）。
+ * 与阶段一的唯一差异：不含消费兜底（不构建 FunctionDoc 无从兜底）——形状合法但
+ * 字段级损坏的条目此处记 reused、真重生时降级 reparsed，两者都判「无新变更」方向，
+ * 不影响 stale 结论的正确性（该场景本就需要用户显式重生才能修复，探测不为它拉警报）。
+ * 注意循环后果：解析必失败的文件真重生时被跳过、永不入缓存（见阶段一解析失败的 continue），
+ * 此处对其恒记 added → stale 永真；调用方应做会话内降级——前端 ImpactView 已实现：
+ * 自动重生成功后仍 stale 时不再自动重生，改警示横幅 + 手动增量重生出口。
+ */
+export async function inspectParseCache(
+  rootDir: string,
+  normalized: NormalizedConfig,
+  storage: StorageAdapter
+): Promise<IncrementalParseStats> {
+  await ensureDefaultParsers()
+  const relPaths = await collectFiles(
+    rootDir,
+    normalized.config.include ?? [],
+    normalized.config.exclude ?? []
+  )
+  const knownPaths = new Set(relPaths)
+  const { cachedEntries } = loadValidParseCache(normalized, storage)
+  const stats: IncrementalParseStats = { reused: 0, reparsed: 0, added: 0, removed: 0 }
+  for (const relPath of relPaths) {
+    if (!parserRegistry.forFile(relPath)) continue
+    let source: string
+    try {
+      source = await readFile(join(rootDir, relPath), 'utf-8')
+    } catch {
+      // 读取失败的文件真重生时也会跳过（不入缓存），探测同样不计入任何桶
+      continue
+    }
+    const cached = cachedEntries[relPath]
+    if (isCacheEntryHit(cached, sha256(source))) stats.reused++
+    else if (cached) stats.reparsed++
+    else stats.added++
+  }
+  for (const relPath of Object.keys(cachedEntries)) {
+    if (!knownPaths.has(relPath)) stats.removed++
+  }
+  return stats
 }

@@ -677,6 +677,19 @@ export interface ImpactChangeset {
   generatedAt: string
 }
 
+/* ------------------------- 增量重生探测（C3） ------------------------- */
+
+/**
+ * GET /api/refresh/check 响应：工作区相对解析缓存是否有未重生的变更。
+ * 探测只做内容哈希比对（core inspectParseCache），不触发解析与写入。
+ */
+export interface RefreshCheckResponse {
+  /** true = 存在内容变更/新增/删除文件（reparsed+added+removed > 0），需要增量重生 */
+  stale: boolean
+  /** 哈希比对统计（与 generateDocs 阶段一同口径）；旧服务无该字段，前端须容错缺省 */
+  stats?: IncrementalParseStats
+}
+
 /* ------------------------- 就地追问（轴 B） ------------------------- */
 
 /** POST /api/ask 请求：在某个调用步骤（stepId）上就地提问 */

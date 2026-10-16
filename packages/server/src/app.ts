@@ -2,8 +2,8 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, NewProjectInput, ProjectInsight, ProjectsResponse } from '@autodoc/shared-types'
-import { resolveShowRecent } from '@autodoc/core'
+import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse } from '@autodoc/shared-types'
+import { inspectParseCache, resolveShowRecent } from '@autodoc/core'
 import { regenerate, type DocService } from './context.js'
 import { pickFolder } from './pickFolder.js'
 import type { ProjectManager } from './projects.js'
@@ -448,6 +448,21 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       if (error instanceof AskInputError) return reply.code(400).send({ error: message })
       return reply.code(500).send({ error: `追问失败：${message}` })
     }
+  })
+
+  /* ------------------------- 增量重生探测（C3，纯读，不受 readOnly 拦截） ------------------------- */
+
+  // 工作区相对解析缓存是否有未重生变更：只做内容哈希比对（core inspectParseCache），
+  // 不解析不写入，轻量到影响视图每次进入都可探测；stale 时前端自动 POST /api/refresh 增量重生
+  app.get('/api/refresh/check', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const stats = await inspectParseCache(service.rootDir, service.normalized, service.storage)
+    const body: RefreshCheckResponse = {
+      stale: stats.reparsed + stats.added + stats.removed > 0,
+      stats
+    }
+    return body
   })
 
   app.post('/api/refresh', async (req, reply) => {

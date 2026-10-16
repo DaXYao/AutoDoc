@@ -14,6 +14,7 @@ import { renderMarkdown } from '../utils/markdown'
 import { splitCallChain } from '../utils/callChain'
 import { groupInternalSteps } from '../utils/internalSteps'
 import { compactPath, roleOf, selectTopChains } from '../utils/chains'
+import { changePointsOf } from '../utils/impact'
 import { fnJumpQuery } from '../utils/nav'
 import AnnotationPanel from './AnnotationPanel.vue'
 import CallNode from './CallNode.vue'
@@ -85,6 +86,33 @@ function chainRole(chain: InsightChain): string | null {
 function chainSegments(chain: InsightChain): ReturnType<typeof compactPath> {
   return compactPath(chain.path, props.fn.id)
 }
+
+/* ------------------------- C3：链路「含变更」徽标（呼应工作区变更集） ------------------------- */
+
+/**
+ * 当前工作区变更集的变更函数 id 集合（store 在 bootstrap/regenerate/回滚后刷新；静态模式为 null）。
+ * computed 而非函数内即席构建：避免每条链路卡片渲染时重复 map+new Set。
+ */
+const workspaceChangedIds = computed<ReadonlySet<string>>(
+  () => new Set((appState.workspaceChangeset?.changedFunctions ?? []).map((f) => f.functionId))
+)
+
+/**
+ * 每条可见链路上属于工作区变更集的函数名（去重、按链上顺序；复用 changePointsOf，
+ * 环路重复 id 只记首个位置），非空即显示红色「含变更」徽标。
+ * 预计算为 chain.id → 名单 的 Map：模板 v-if 与 :title 共用同一份结果，
+ * 避免每次渲染对每条链路调两次函数、各自重复跑 changePointsOf+map。
+ */
+const chainChangedNamesById = computed<Map<string, string[]>>(() => {
+  const map = new Map<string, string[]>()
+  const ids = workspaceChangedIds.value
+  if (ids.size === 0) return map
+  for (const chain of visibleChains.value) {
+    const names = changePointsOf(chain, ids).map((p) => fnName(p.functionId))
+    if (names.length > 0) map.set(chain.id, names)
+  }
+  return map
+})
 
 /* ------------------------- V2：可视化（调用链 / 所在链路 双 tab 图） ------------------------- */
 
@@ -537,6 +565,12 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
           :key="chain.id"
           class="rounded border border-gray-100 bg-gray-50 p-2"
         >
+          <!-- C3：链 path 与当前工作区变更集有交集 → 红色「含变更」徽标（title 悬浮列出交集函数名） -->
+          <div v-if="chainChangedNamesById.get(chain.id)?.length" class="mb-1">
+            <span :title="`链上变更函数：${chainChangedNamesById.get(chain.id)?.join('、')}`">
+              <n-tag type="error" size="tiny" :bordered="false">含变更</n-tag>
+            </span>
+          </div>
           <!-- ① AI 链路叙事：缺失时灰字标注，静态路径骨架照画，不伪造句子（AI 失败降级） -->
           <p v-if="chain.narrative" class="text-gray-700">{{ chain.narrative }}</p>
           <p v-else class="text-gray-400">叙事未生成</p>

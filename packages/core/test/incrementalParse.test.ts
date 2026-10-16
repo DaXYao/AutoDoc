@@ -7,6 +7,7 @@ import {
   createStorage,
   ensureDefaultParsers,
   generateDocs,
+  inspectParseCache,
   loadConfig,
   parserRegistry
 } from '../src/index.js'
@@ -181,5 +182,80 @@ describe('增量解析（I1：内容哈希缓存）', () => {
     // 断言不含 Map/Set/函数等不可 JSON 化成员：往返后与原产物深相等
     expect(parsed.functions.length).toBeGreaterThan(0)
     expect(JSON.parse(JSON.stringify(parsed))).toEqual(parsed)
+  })
+
+  /* ------------------------- C3：inspectParseCache 只读探测 ------------------------- */
+
+  describe('inspectParseCache（只哈希比对、不真解析）', () => {
+    /** 以独立 storage 实例探测（与 run 同样跨「重启」口径，顺带验证探测不依赖生成时的内存态） */
+    async function probe(root: string) {
+      const normalized = await loadConfig(root)
+      const storage = createStorage(normalized.config.storage, root)
+      const stats = await inspectParseCache(root, normalized, storage)
+      storage.close()
+      return stats
+    }
+
+    it('生成后无改动：全 reused，stale 判据（reparsed+added+removed）为 0', async () => {
+      const root = prepare()
+      await run(root)
+      expect(await probe(root)).toEqual({ reused: 3, reparsed: 0, added: 0, removed: 0 })
+    })
+
+    it('从未生成过（无缓存）：全部按 added 计', async () => {
+      const root = prepare()
+      expect(await probe(root)).toEqual({ reused: 0, reparsed: 0, added: 3, removed: 0 })
+    })
+
+    it('改一文件内容：仅该文件 reparsed=1，其余 reused', async () => {
+      const root = prepare()
+      await run(root)
+      const formatPath = join(root, 'src/utils/format.ts')
+      writeFileSync(
+        formatPath,
+        readFileSync(formatPath, 'utf-8') + '\nexport function extra(): void {}\n'
+      )
+      expect(await probe(root)).toEqual({ reused: 2, reparsed: 1, added: 0, removed: 0 })
+    })
+
+    it('删一文件：removed=1', async () => {
+      const root = prepare()
+      await run(root)
+      rmSync(join(root, 'src/utils/format.ts'))
+      expect(await probe(root)).toEqual({ reused: 2, reparsed: 0, added: 0, removed: 1 })
+    })
+
+    it('新增一文件：added=1', async () => {
+      const root = prepare()
+      await run(root)
+      writeFileSync(join(root, 'src/utils/extra.ts'), 'export function extra(): void {}\n')
+      expect(await probe(root)).toEqual({ reused: 3, reparsed: 0, added: 1, removed: 0 })
+    })
+
+    it('versionKey 失效（配置指纹变化）：整份缓存作废，全部按 added 计', async () => {
+      const root = prepare()
+      await run(root)
+      const configPath = join(root, 'autodoc.config.json')
+      const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+      config.classification.fallback = 'utility'
+      writeFileSync(configPath, JSON.stringify(config, null, 2))
+      expect(await probe(root)).toEqual({ reused: 0, reparsed: 0, added: 3, removed: 0 })
+    })
+
+    it('探测只读：不写缓存、不改存储（探测后真重生统计与直接重生一致）', async () => {
+      const root = prepare()
+      await run(root)
+      const formatPath = join(root, 'src/utils/format.ts')
+      writeFileSync(
+        formatPath,
+        readFileSync(formatPath, 'utf-8') + '\nexport function extra(): void {}\n'
+      )
+      const before = await probe(root)
+      const after = await probe(root)
+      // 连续两次探测结果一致：若探测误写缓存，第二次会把 reparsed 记成 reused
+      expect(after).toEqual(before)
+      const second = await run(root)
+      expect(second.incremental).toEqual(before)
+    })
   })
 })

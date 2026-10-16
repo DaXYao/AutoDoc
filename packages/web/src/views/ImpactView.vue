@@ -2,9 +2,9 @@
 import { computed, ref, watch, watchEffect } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import type { ImpactChangeset, ImpactCommit, InsightChain } from '@autodoc/shared-types'
-import { appState, findFunctionEntry } from '../store/app'
-import { fetchChangeset, fetchImpactCommits, getMode } from '../data/api'
+import type { ImpactChangeset, ImpactCommit, IncrementalParseStats, InsightChain } from '@autodoc/shared-types'
+import { appState, findFunctionEntry, reloadAll } from '../store/app'
+import { checkRefresh, fetchChangeset, fetchImpactCommits, getMode, refreshDocs } from '../data/api'
 import { chainImportance } from '../utils/chains'
 import { fnLabelFromId, IMPACT_COLOR, RIPPLE_COLOR } from '../utils/graphModel'
 import { safeLocalStorage } from '../utils/graphPersist'
@@ -248,17 +248,120 @@ watch(
     if (!isReady || ready.value) return
     await loadCommits()
     ready.value = true
+    // C3：门闩开后后台探测/自动增量重生（不 await：changeset 由既有 watch 照常拉取，
+    // 探测与重生期间旧数据始终可看，符合「重生失败不阻塞查看」的要求）
+    void runAutoRefresh()
   },
   { immediate: true }
 )
+
+/* ------------------------- C3：自动增量重生（探测 → 重生 → 刷新 appState） ------------------------- */
+
+/**
+ * 横幅状态机：
+ * idle = 无横幅（未探测 / 探测无变更 / 完成横幅被关闭）；
+ * refreshing = 检测到 stale，增量重生进行中（琥珀横幅）；
+ * done = 重生完成（绿横幅显示增量统计，可关闭）；
+ * error = 重生失败（红横幅 + 重试按钮；changeset 仍按既有数据展示，不阻塞查看）；
+ * stale-warning = 本会话自动重生已成功过、探测却仍 stale（典型根因：解析必失败的文件
+ *   永不入缓存 → stale 永真）。不再自动重生，改警示横幅 + 手动「增量重生」出口。
+ * 探测（check）阶段不设横幅：毫秒级请求，闪一下横幅反而是噪音。
+ */
+type AutoRefreshPhase = 'idle' | 'refreshing' | 'done' | 'error' | 'stale-warning'
+const autoRefreshPhase = ref<AutoRefreshPhase>('idle')
+const autoRefreshStats = ref<IncrementalParseStats | null>(null)
+const autoRefreshError = ref('')
+/** 防重入：同一时刻只允许一次自动重生在途（门闩启动与重试按钮共用同一入口） */
+let autoRefreshInFlight = false
+/**
+ * 会话内「上次自动重生已成功」标志。解析必失败的新文件永远不会写入解析缓存，
+ * 探测（inspectParseCache）对其恒记 added → stale 永真；若不降级，每次进视图都会
+ * 自动重生一遍并弹出误导性的「已按最新代码重生」成功横幅。成功一次后仍 stale 即改警示。
+ */
+let autoRefreshSucceeded = false
+
+/** 完成横幅文案：stats 缺省（旧服务响应无该字段）时退化为不带统计的通用文案 */
+const autoRefreshDoneText = computed(() => {
+  const s = autoRefreshStats.value
+  if (!s) return '已按最新代码增量重生'
+  return `已按最新代码增量重生：复用 ${s.reused}/重跑 ${s.reparsed}（新增 ${s.added}/删除 ${s.removed}）`
+})
+
+function dismissAutoRefreshBanner(): void {
+  autoRefreshPhase.value = 'idle'
+}
+
+async function runAutoRefresh(): Promise<void> {
+  if (autoRefreshInFlight) return
+  // 静态导出无 API；hub 无活动项目时探测必 409；readOnly 模式重生必 403——均不触发
+  if (getMode() !== 'api' || (appState.hubEnabled && appState.activeProjectId === null)) return
+  if (appState.meta?.readOnly) return
+  autoRefreshInFlight = true
+  try {
+    let stale = false
+    try {
+      const check = await checkRefresh()
+      stale = check?.stale === true
+    } catch {
+      // 探测失败按不 stale 处理：静默降级看旧数据，不再叠一层错误横幅
+      stale = false
+    }
+    if (!stale) {
+      // 重试入口进来时（上次重生实际已成功、仅 reloadAll 网络失败挂了 error 横幅），
+      // 必须先补一次 reloadAll 把最新数据拉回再复位横幅，否则「重试」静默留旧数据、语义不闭合；
+      // 正常首入 phase=idle，复位是无操作
+      if (autoRefreshPhase.value === 'error') await reloadAll()
+      autoRefreshPhase.value = 'idle'
+      return
+    }
+    if (autoRefreshSucceeded) {
+      // 本会话已自动重生成功过却仍 stale：大概率是解析必失败的文件永不入缓存所致，
+      // 再自动重生只会循环产出误导性成功横幅，降级为警示 + 手动出口
+      autoRefreshPhase.value = 'stale-warning'
+      return
+    }
+    autoRefreshPhase.value = 'refreshing'
+    const incremental = await refreshDocs()
+    // 复用既有 reloadAll 链路（bootstrap → loadActiveDocs）整份刷新 appState：
+    // meta/summaries/index/insight/工作区变更集全部拉回；insight 身份变化会触发下方
+    // 既有 watch 重取 commits+changeset，此处无需显式 loadChangeset
+    await reloadAll()
+    autoRefreshSucceeded = true
+    autoRefreshStats.value = incremental ?? null
+    autoRefreshPhase.value = 'done'
+  } catch (error) {
+    autoRefreshError.value = error instanceof Error ? error.message : String(error)
+    autoRefreshPhase.value = 'error'
+  } finally {
+    autoRefreshInFlight = false
+  }
+}
+
+/** stale-warning 横幅的手动「增量重生」：用户显式要求重生，解除会话内降级后按正常流程走一遍 */
+function runManualRefresh(): void {
+  autoRefreshSucceeded = false
+  void runAutoRefresh()
+}
 
 // 切项目：提交列表与变更集都属于活动项目，全部重取（scope 字符串不变时 watch 不触发，需显式重载）。
 // 门闩未开时跳过：首屏由 appReady watch 统一发起，避免 bootstrap 期间重复拉取
 watch(
   () => appState.activeProjectId,
-  () => {
+  (newId, oldId) => {
     if (!ready.value) return
+    // bootstrap 期间 null→首项目 不是「切项目」：不复位横幅/降级标志（否则清掉刚完成的 done 横幅），
+    // 提交/变更集首屏由 appReady watch 负责；但自动重生探测必须在此补触发——
+    // appReady watch 触发 runAutoRefresh 时活动项目可能尚未落定（hub 门闩会直接 return）
+    if (oldId === null) {
+      void runAutoRefresh()
+      return
+    }
+    // C3：横幅与降级标志属于旧项目会话，切项目先复位，再对新项目重跑探测/自动重生
+    //（runAutoRefresh 自带 inFlight 守卫，与在途重生重叠时不会双发）
+    autoRefreshPhase.value = 'idle'
+    autoRefreshSucceeded = false
     void loadCommits().then(() => loadChangeset())
+    void runAutoRefresh()
   }
 )
 
@@ -413,6 +516,39 @@ function goFunction(id: string): void {
     </n-empty>
 
     <template v-else>
+      <!-- ============ C3：自动增量重生横幅（探测静默；stale 才现身） ============ -->
+      <div
+        v-if="autoRefreshPhase === 'refreshing'"
+        class="mb-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-700"
+      >
+        <n-spin size="small" />
+        检测到未重生变更，正在增量重生…
+      </div>
+      <div
+        v-else-if="autoRefreshPhase === 'done'"
+        class="mb-3 flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-2 text-sm text-green-700"
+      >
+        <span>{{ autoRefreshDoneText }}</span>
+        <n-button size="tiny" quaternary class="ml-auto" @click="dismissAutoRefreshBanner">
+          关闭
+        </n-button>
+      </div>
+      <div
+        v-else-if="autoRefreshPhase === 'error'"
+        class="mb-3 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600"
+      >
+        <span>增量重生失败：{{ autoRefreshError }}（下方仍为已生成数据，可继续查看）</span>
+        <n-button size="tiny" class="ml-auto shrink-0" @click="runAutoRefresh()">重试</n-button>
+      </div>
+      <!-- 自动重生成功后仍 stale（如解析必失败文件永不入缓存）：不再循环自动重生，警示 + 手动出口 -->
+      <div
+        v-else-if="autoRefreshPhase === 'stale-warning'"
+        class="mb-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-700"
+      >
+        <span>仍有未能纳入缓存的变更（可能含解析失败文件），已按当前数据展示</span>
+        <n-button size="tiny" class="ml-auto shrink-0" @click="runManualRefresh">增量重生</n-button>
+      </div>
+
       <!-- ============ 变更集选择器 ============ -->
       <section class="mb-4 rounded-lg border border-gray-200 bg-white px-4 py-3">
         <div class="flex flex-wrap items-center gap-3">

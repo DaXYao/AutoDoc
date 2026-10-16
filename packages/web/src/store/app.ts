@@ -3,6 +3,7 @@ import type {
   FileDocView,
   FileSummary,
   FunctionIndexEntry,
+  ImpactChangeset,
   IncrementalParseStats,
   InsightResponse,
   NewProjectInput,
@@ -12,6 +13,7 @@ import type {
 import {
   activateProject,
   addProject as apiAddProject,
+  fetchChangeset,
   fetchFileView,
   fetchFunctionIndex,
   fetchInsight,
@@ -40,6 +42,11 @@ export interface AppState {
   functionIndex: FunctionIndexEntry[]
   /** 项目洞察/代码图谱（静态+可选AI）；I3：响应类型附带最近增量统计（parseStats/aiChunkStats） */
   insight: InsightResponse | null
+  /**
+   * C3：当前工作区变更集（scope='workspace'），供函数卡片「所在链路」的「含变更」徽标呼应。
+   * 静态导出模式恒为 null（无变更历史数据）；拉取失败同样静默 null（徽标是增强信息，不弹错）。
+   */
+  workspaceChangeset: ImpactChangeset | null
   /** fileId → 视图（serve 模式下按需拉取） */
   fileViews: Map<string, FileDocView>
 }
@@ -54,8 +61,18 @@ export const appState = reactive<AppState>({
   summaries: [],
   functionIndex: [],
   insight: null,
+  workspaceChangeset: null,
   fileViews: new Map()
 })
+
+/** 拉取工作区变更集（C3 徽标数据源）；失败静默置 null，避免给 bootstrap/reloadAll 添错误噪声 */
+async function loadWorkspaceChangeset(): Promise<void> {
+  try {
+    appState.workspaceChangeset = await fetchChangeset('workspace')
+  } catch {
+    appState.workspaceChangeset = null
+  }
+}
 
 /** 加载当前活动项目的文档数据（meta/summaries/index）；无活动项目时清空 */
 async function loadActiveDocs(): Promise<void> {
@@ -64,6 +81,7 @@ async function loadActiveDocs(): Promise<void> {
     appState.summaries = []
     appState.functionIndex = []
     appState.insight = null
+    appState.workspaceChangeset = null
     return
   }
   const [meta, summaries, index] = await Promise.all([
@@ -74,7 +92,11 @@ async function loadActiveDocs(): Promise<void> {
   appState.meta = meta
   appState.summaries = summaries
   appState.functionIndex = index
-  appState.insight = await fetchInsight()
+  // C3：变更集与文档数据同属活动项目，随 bootstrap/reloadAll/切项目一起刷新
+  //（regenerateActive 走 reloadAll → 本函数，重生后的新快照批次即在此拉回）；
+  // 洞察与工作区变更集互不依赖，并行拉取减少串行等待（loadWorkspaceChangeset 内部吞错，不会拖垮 Promise.all）
+  const [insight] = await Promise.all([fetchInsight(), loadWorkspaceChangeset()])
+  appState.insight = insight
 }
 
 /** 若已配置 AI 且尚未生成摘要，按需触发一次 AI 生成（命中缓存则秒回） */
@@ -103,6 +125,8 @@ export async function repartitionInsight(feedback: string): Promise<void> {
  */
 export async function refreshInsight(): Promise<void> {
   appState.insight = await fetchInsight()
+  // C3：回滚路径不经过 reloadAll，但徽标变更集须与当前生效数据同步刷新，此处一并拉取
+  await loadWorkspaceChangeset()
 }
 
 export async function bootstrap(): Promise<void> {
@@ -127,6 +151,7 @@ export async function bootstrap(): Promise<void> {
       appState.summaries = []
       appState.functionIndex = []
       appState.insight = null
+      appState.workspaceChangeset = null
     }
   } catch (error) {
     appState.error = error instanceof Error ? error.message : String(error)
@@ -200,6 +225,10 @@ export async function removeProject(id: string): Promise<void> {
     appState.meta = null
     appState.summaries = []
     appState.functionIndex = []
+    // 与 bootstrap 无活动项目分支口径一致：洞察与变更集同属活动项目，
+    // 不清会让「含变更」徽标与链路图谱残留已移除项目的数据
+    appState.insight = null
+    appState.workspaceChangeset = null
   } else {
     await loadActiveDocs()
   }

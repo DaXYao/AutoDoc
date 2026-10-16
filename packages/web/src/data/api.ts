@@ -17,6 +17,7 @@ import type {
   NewProjectInput,
   ProjectInfo,
   ProjectsResponse,
+  RefreshCheckResponse,
   ServerMeta
 } from '@autodoc/shared-types'
 /**
@@ -178,6 +179,15 @@ export async function fetchChangeset(scope: string): Promise<ImpactChangeset | n
   const res = await fetch(`/api/impact/changeset?scope=${encodeURIComponent(scope)}`)
   if (!res.ok) throw await errorFromResponse(res, '加载变更集失败')
   return (await res.json()) as ImpactChangeset
+}
+
+/**
+ * C3：探测工作区相对解析缓存是否有未重生变更（只做哈希比对，服务端不解析不写入）。
+ * 静态模式返回 null；失败抛错，由调用方（影响视图自动重生流程）静默降级为「不 stale」。
+ */
+export async function checkRefresh(): Promise<RefreshCheckResponse | null> {
+  if (mode !== 'api') return null
+  return fetchJson<RefreshCheckResponse>('/api/refresh/check')
 }
 
 /* ------------------------- 历史 AI 洞察快照（H2） ------------------------- */
