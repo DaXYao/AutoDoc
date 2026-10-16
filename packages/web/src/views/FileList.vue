@@ -12,9 +12,9 @@ const autoExpandDepth = computed(() => (tree.value.length <= 3 ? 1 : 0))
 <template>
   <div>
     <div class="flex items-center justify-between mb-3">
-      <h2 class="text-xl font-semibold text-gray-800">
+      <h2 class="text-xl font-semibold text-[color:var(--ad-ink)]">
         文件列表
-        <span class="text-sm font-normal text-gray-500 ml-2">
+        <span class="text-sm font-normal text-[color:var(--ad-ink-2)] ml-2">
           {{ tree.length }} 个根目录 · {{ appState.summaries.length }} 个文件
         </span>
       </h2>
@@ -24,7 +24,7 @@ const autoExpandDepth = computed(() => (tree.value.length <= 3 ? 1 : 0))
       请确认 docgen serve 已启动，或静态站点包含 autodoc-data.json。
     </n-alert>
     <n-empty v-else-if="tree.length === 0" description="尚未解析到任何源码文件" />
-    <div v-else class="rounded-lg border border-gray-200 bg-white py-2">
+    <div v-else class="ad-card py-2">
       <FileTree
         v-for="node in tree"
         :key="node.path"

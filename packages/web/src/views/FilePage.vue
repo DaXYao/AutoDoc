@@ -104,11 +104,11 @@ const sourceHref = computed(() =>
       <!-- 文件头：路径、语言、文件级批注入口（可折叠，默认策略可配置） -->
       <section class="mb-4">
         <button
-          class="w-full text-left rounded-lg border border-gray-200 bg-white px-4 py-3 hover:border-blue-300"
+          class="ad-card ad-card--hover w-full text-left px-4 py-3"
           @click="toggle(headerKey, expandDefault('fileHeader'))"
         >
           <div class="flex items-center gap-3">
-            <span class="font-mono text-base text-gray-800 break-all">{{ view.file.path }}</span>
+            <span class="font-mono text-base text-[color:var(--ad-ink)] break-all">{{ view.file.path }}</span>
             <n-tag size="tiny" :bordered="false">{{ view.file.language }}</n-tag>
             <n-tag size="tiny" :bordered="false">函数 {{ view.file.functions.length }}</n-tag>
             <n-tag v-if="view.annotations.length > 0" size="tiny" type="info" :bordered="false">
@@ -122,7 +122,7 @@ const sourceHref = computed(() =>
             >
               打开源码
             </a>
-            <span class="ml-auto text-gray-400 text-xs">
+            <span class="ml-auto text-[color:var(--ad-ink-3)] text-xs">
               {{ isExpanded(headerKey, expandDefault('fileHeader')) ? '收起' : '展开' }}
             </span>
           </div>

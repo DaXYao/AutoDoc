@@ -6,7 +6,7 @@ import type { ImpactChangeset, ImpactCommit, IncrementalParseStats, InsightChain
 import { appState, findFunctionEntry, reloadAll } from '../store/app'
 import { checkRefresh, fetchChangeset, fetchImpactCommits, getMode, refreshDocs } from '../data/api'
 import { chainImportance } from '../utils/chains'
-import { fnLabelFromId, IMPACT_COLOR, RIPPLE_COLOR } from '../utils/graphModel'
+import { fnLabelFromId, IMPACT_COLOR, LEGEND_NEUTRAL, RIPPLE_COLOR } from '../utils/graphModel'
 import { safeLocalStorage } from '../utils/graphPersist'
 import {
   affectedChains,
@@ -439,11 +439,11 @@ const overlayModel = computed(() =>
 /** 图作用域按变更集隔离：不同 scope 的布局记忆互不覆盖 */
 const graphScopeKey = computed(() => `impact:${scopeString.value ?? 'none'}`)
 
-/** 图例三色与 impactOverlayModel 着色单一来源（IMPACT_COLOR/RIPPLE_COLOR 常量共用） */
+/** 图例三色与 impactOverlayModel 着色单一来源（IMPACT_COLOR/RIPPLE_COLOR/LEGEND_NEUTRAL 常量共用） */
 const overlayLegend = [
   { color: IMPACT_COLOR, label: '变更函数' },
   { color: RIPPLE_COLOR, label: '上游波及' },
-  { color: '#94a3b8', label: '未波及节点' }
+  { color: LEGEND_NEUTRAL, label: '未波及节点' }
 ]
 
 /* ------------------------- 展示辅助 ------------------------- */

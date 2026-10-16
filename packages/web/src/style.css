@@ -124,7 +124,10 @@ body {
    naive-ui 把主题变量注入为元素 inline style，类选择器压不过，
    皮肤改由 theme.ts 的 per-instance theme-overrides 提供（类型安全）。 */
 
-/* 卡片基类：D2 起逐步替换组件内 border-gray-200 手写卡片 */
+/* 卡片基类：D2 起逐步替换组件内 border-gray-200 手写卡片。
+   规约：新增 .ad-card 挂载点禁止再叠加 border、bg、rounded、shadow 族工具类
+   （.ad-card 未分层，会静默压制 @layer utilities 内的同属性工具类，写了不报错但不生效；
+   交互态边框走 .ad-card--active / .ad-card--hover 修饰类） */
 .ad-card {
   background: var(--ad-surface);
   border: 1px solid var(--ad-line);
@@ -163,7 +166,7 @@ body {
   overflow-x: auto;
 }
 .annotation-body a {
-  color: var(--n-color-target, #2080f0);
+  color: var(--n-color-target, var(--ad-accent));
   text-decoration: underline;
 }
 .annotation-body ul,

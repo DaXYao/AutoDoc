@@ -10,7 +10,7 @@ import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
 import '@vue-flow/minimap/dist/style.css'
 import type { GraphModel, GraphNode, LayoutType } from '../../utils/graphModel'
-import { LAYOUT_LABELS, LAYOUT_TYPES } from '../../utils/graphModel'
+import { LEGEND_NEUTRAL, LAYOUT_LABELS, LAYOUT_TYPES } from '../../utils/graphModel'
 import {
   getLayoutCached,
   layoutCacheKey,
@@ -160,7 +160,9 @@ function onNodeClick(event: NodeMouseEvent): void {
 
 function miniNodeColor(node: Node): string {
   const data = node.data as GraphNode | undefined
-  return data?.color ?? (data?.kind === 'phase' ? '#3b82f6' : '#94a3b8')
+  // phase 蓝对齐 --ad-accent（FlowNodeCard 的 phase 色条同值，minimap 圆点与节点卡不再双色）；
+  // 默认中性灰对齐 LEGEND_NEUTRAL（=ink-3），与 ImpactView 图例「未波及节点」同屏同色温
+  return data?.color ?? (data?.kind === 'phase' ? '#4C6FFF' : LEGEND_NEUTRAL)
 }
 
 /* ------------------------- 导出 ------------------------- */
@@ -188,9 +190,9 @@ function exportHtml(): void {
 </script>
 
 <template>
-  <div class="flex h-full min-h-[320px] flex-col overflow-hidden rounded-lg border border-gray-200">
-    <div class="flex flex-wrap items-center gap-2 border-b border-gray-200 bg-gray-50 px-3 py-2">
-      <label class="text-xs text-gray-500">布局</label>
+  <div class="ad-card flex h-full min-h-[320px] flex-col overflow-hidden">
+    <div class="flex flex-wrap items-center gap-2 border-b border-[color:var(--ad-line)] bg-[color:var(--ad-surface)] px-3 py-2">
+      <label class="text-xs text-[color:var(--ad-ink-2)]">布局</label>
       <n-select
         :value="currentLayout"
         :options="layoutOptions"
@@ -199,12 +201,12 @@ function exportHtml(): void {
         @update:value="onLayoutChange"
       />
       <n-tag v-if="degraded" size="small" type="warning" :bordered="false">布局已降级</n-tag>
-      <span v-if="loading" class="text-xs text-gray-400">布局计算中…</span>
+      <span v-if="loading" class="text-xs text-[color:var(--ad-ink-3)]">布局计算中…</span>
       <div class="ml-auto flex items-center gap-2">
         <span
           v-for="item in legend ?? []"
           :key="item.label"
-          class="flex items-center gap-1 text-xs text-gray-600"
+          class="flex items-center gap-1 text-xs text-[color:var(--ad-ink-2)]"
         >
           <span class="inline-block h-2.5 w-2.5 rounded-full" :style="{ backgroundColor: item.color }" />
           {{ item.label }}
@@ -213,7 +215,7 @@ function exportHtml(): void {
         <n-button size="small" @click="exportHtml">导出 HTML</n-button>
       </div>
     </div>
-    <div v-if="model.nodes.length === 0" class="flex flex-1 items-center justify-center text-sm text-gray-400">
+    <div v-if="model.nodes.length === 0" class="flex flex-1 items-center justify-center text-sm text-[color:var(--ad-ink-3)]">
       暂无可渲染的图数据
     </div>
     <VueFlow
@@ -228,9 +230,22 @@ function exportHtml(): void {
       <template #node-card="nodeProps">
         <FlowNodeCard v-bind="nodeProps" />
       </template>
-      <Background :gap="16" pattern-color="#d1d5db" />
+      <!-- 点阵底色 = --ad-line-strong 同值：prop 以字符串进 SVG fill，CSS var 不可解析，故写常量 -->
+      <Background :gap="16" pattern-color="#DDD9D2" />
       <Controls />
       <MiniMap :node-color="miniNodeColor" pannable zoomable />
     </VueFlow>
   </div>
 </template>
+
+<style>
+/* minimap 容器表面化：vue-flow 默认白底无边框，米白页面上呈「悬浮断层」；
+   改 surface + 发丝线 + radius-sm 与工具条同族。类名属 vue-flow 全局命名空间、
+   仅图容器内出现，无 scoped 亦无越界副作用（Controls 同理保持默认白底不描边，避免过度装饰） */
+.vue-flow__minimap {
+  background: var(--ad-surface);
+  border: 1px solid var(--ad-line);
+  border-radius: var(--ad-radius-sm);
+  overflow: hidden;
+}
+</style>

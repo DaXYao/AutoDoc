@@ -13,26 +13,28 @@ const props = defineProps<{
 const emit = defineEmits<{ changed: [] }>()
 
 const sectionKey = (): string => `section:${props.fileId}:${props.category}`
+
+/** 分类语义色条（左侧 3px）：与 theme.ts 状态色族同值；business 走 accent 令牌。
+ *  用内联 style 而非工具类：色值随 category 动态取值，且内联样式天然免疫
+ *  Tailwind 分层与未分层样式的层叠竞争（.ad-card 已踩过该坑）。 */
+const CATEGORY_BAR_COLORS: Record<FunctionCategory, string> = {
+  business: 'var(--ad-accent)',
+  implementation: '#3D9A6C',
+  utility: '#C98A2D',
+  pending: '#8A8F98'
+}
 </script>
 
 <template>
   <section v-if="functions.length > 0" class="mb-4">
     <button
-      class="w-full text-left rounded-lg px-4 py-2.5 font-medium flex items-center gap-2"
-      :class="
-        category === 'business'
-          ? 'bg-blue-50 text-blue-800'
-          : category === 'implementation'
-            ? 'bg-emerald-50 text-emerald-800'
-            : category === 'utility'
-              ? 'bg-amber-50 text-amber-800'
-              : 'bg-orange-50 text-orange-800'
-      "
+      class="w-full text-left rounded-[length:var(--ad-radius)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-4 py-2.5 font-medium flex items-center gap-2 text-[color:var(--ad-ink)]"
+      :style="{ borderLeft: `3px solid ${CATEGORY_BAR_COLORS[category]}` }"
       @click="toggle(sectionKey(), categoryDefault(category))"
     >
       {{ CATEGORY_LABELS[category] }}
-      <span class="text-xs opacity-70">{{ functions.length }}</span>
-      <span class="ml-auto text-xs opacity-60">
+      <span class="text-xs text-[color:var(--ad-ink-3)]">{{ functions.length }}</span>
+      <span class="ml-auto text-xs text-[color:var(--ad-ink-3)]">
         {{ isExpanded(sectionKey(), categoryDefault(category)) ? '收起' : '展开' }}
       </span>
     </button>

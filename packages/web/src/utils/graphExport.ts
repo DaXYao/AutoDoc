@@ -19,10 +19,11 @@ const KIND_FILL: Record<string, string> = {
   fn: '#ffffff',
   group: '#f5f3ff'
 }
+// 导出件与屏内视图同色板：phase=accent、group=FlowNodeCard 色条紫（D2b 复审消除双蓝/双紫分叉）
 const KIND_STROKE: Record<string, string> = {
-  phase: '#3b82f6',
+  phase: '#4C6FFF',
   fn: '#94a3b8',
-  group: '#8b5cf6'
+  group: '#8A7BC8'
 }
 const DEFAULT_EDGE_COLOR = '#94a3b8'
 

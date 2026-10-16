@@ -35,13 +35,13 @@ function tags(counts: Record<FunctionCategory, number>): { key: string; label: s
   <div class="select-none">
     <!-- 目录行 -->
     <button
-      class="w-full flex items-center gap-2 rounded px-2 py-1.5 hover:bg-gray-50 text-left transition"
+      class="w-full flex items-center gap-2 rounded-[length:var(--ad-radius-sm)] px-2 py-1.5 hover:bg-[color:var(--ad-canvas)] text-left transition"
       :style="{ paddingLeft: `${depth * 14 + 8}px` }"
       @click="toggle"
     >
-      <span class="text-gray-400 text-xs w-3 shrink-0">{{ expanded ? '▾' : '▸' }}</span>
-      <span class="font-mono text-sm text-gray-800 font-medium break-all">{{ node.name }}</span>
-      <span class="text-xs text-gray-400 shrink-0">
+      <span class="text-[color:var(--ad-ink-3)] text-xs w-3 shrink-0">{{ expanded ? '▾' : '▸' }}</span>
+      <span class="font-mono text-sm text-[color:var(--ad-ink)] font-medium break-all">{{ node.name }}</span>
+      <span class="text-xs text-[color:var(--ad-ink-3)] shrink-0">
         {{ node.fileCount }} 文件 · {{ node.functionCount }} 函数
       </span>
       <n-tag
@@ -62,10 +62,10 @@ function tags(counts: Record<FunctionCategory, number>): { key: string; label: s
           v-for="file in node.files"
           :key="file.fileId"
           :to="{ name: 'file', params: { fileId: file.fileId } }"
-          class="block rounded-lg border border-gray-200 bg-white px-3 py-2 hover:border-blue-400 hover:shadow-sm transition"
+          class="ad-card ad-card--hover block px-3 py-2 transition"
         >
-          <div class="font-mono text-sm text-gray-800 break-all">{{ fileName(file) }}</div>
-          <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+          <div class="font-mono text-sm text-[color:var(--ad-ink)] break-all">{{ fileName(file) }}</div>
+          <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-[color:var(--ad-ink-2)]">
             <span>{{ file.language }}</span>
             <span>{{ file.total }} 函数</span>
             <n-tag

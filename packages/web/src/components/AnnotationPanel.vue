@@ -80,18 +80,18 @@ async function handleDelete(annotation: Annotation): Promise<void> {
 
 <template>
   <div class="flex flex-col gap-2">
-    <div v-if="annotations.length === 0 && readOnly" class="text-xs text-gray-400">
+    <div v-if="annotations.length === 0 && readOnly" class="text-xs text-[color:var(--ad-ink-3)]">
       暂无批注（只读模式）
     </div>
     <article
       v-for="annotation in annotations"
       :key="annotation.id"
-      class="rounded border border-gray-100 bg-blue-50/40 px-3 py-2"
+      class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-blue-50/40 px-3 py-2"
     >
-      <div class="flex items-center gap-2 text-xs text-gray-500">
-        <span class="font-medium text-gray-700">{{ annotation.author }}</span>
+      <div class="flex items-center gap-2 text-xs text-[color:var(--ad-ink-2)]">
+        <span class="font-medium text-[color:var(--ad-ink-2)]">{{ annotation.author }}</span>
         <span>{{ formatDate(annotation.createdAt) }}</span>
-        <span v-if="annotation.updatedAt !== annotation.createdAt" class="text-gray-400">
+        <span v-if="annotation.updatedAt !== annotation.createdAt" class="text-[color:var(--ad-ink-3)]">
           （编辑于 {{ formatDate(annotation.updatedAt) }}）
         </span>
         <template v-if="!readOnly">
