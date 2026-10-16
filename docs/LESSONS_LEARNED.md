@@ -22,6 +22,7 @@
 - [ ] 浏览器复验 expand 门控 UI：设 localStorage 键后必须同脚本内 reload（expand store 深 watch 会全量回写覆盖外部写入）。
 - [ ] 浏览器实机复验前端改动必须 ignoreCache 强制重载文档：哈希跳转不重载 SPA，验的会是旧 bundle 并得出错误结论（高亮/默认折叠等「看似没生效」）。
 - [ ] 给「切 X」watch 加 bootstrap 早退（oldId===null return）时，先确认首屏触发路径是否正挂在该 watch 上——否则修好一个竞态又静默丢掉首屏触发（C3 横幅复位→自动重生不触发，两轮实机才定位）。
+- [ ] naive-ui n-select 的 :input-props aria-label 在非 filterable 分支被静默丢弃（该分支不渲染 input）；可访问名须写到真正可聚焦的 .n-base-selection-label（指令 v-ad-select-label）。
 - [ ] naive-ui 换肤禁止用类覆写 --n-* 变量：主题变量是元素 inline style，且按钮边框画在子 .n-button__border/__state-border 节点；个别皮肤走 per-instance :theme-overrides（见 2026-10-17 D1 条）。
 - [ ] Tailwind v4 工具类在 @layer 内、naive cssr 无层必赢：响应式/display 类直接挂 naive 组件根节点可能无效，包一层普通 div 再挂（见 2026-10-17 D1 条）。
 - [ ] 单行 flex 工具栏：弹性输入项（flex-1/basis 0）必须给 min-width，文字统计项必须 nowrap+ellipsis+min-w-0；否则窄屏输入框压成「空白盒」、中文文字压成竖排（见 2026-10-17 D1 条）。
@@ -46,6 +47,14 @@
 - **正确做法**：弹性输入项给 min-width（或定宽+断点隐藏）；文字统计项 whitespace-nowrap + overflow-hidden + text-ellipsis + min-w-0，把「换行压」改「截断压」，全文放 title 悬浮。
 - **预防措施**：已加入避坑清单；排查「神秘控件」先 DOM 量宽度与 computed flex，再回模板归因，避免在模板里找不存在的空节点。
 - **关联**：packages/web/src/App.vue 顶栏、style.css .ad-search/.ad-stats。
+
+### 2026-10-17 · naive n-select 的 aria-label 经 :input-props 注入在非 filterable 模式被静默丢弃
+- **场景**：D3 合规修复给 5 处 n-select 加 `:input-props="{ 'aria-label': … }"`。
+- **现象**：复审读 naive-ui 2.44.1 源码发现：非 filterable 单选分支**根本不渲染 `<input>`**、inputProps 不展开；filterable 时带 aria-label 的 input 是 tabindex=-1 子节点，Tab 聚焦的外层 div 无名——可访问名实际未生效。
+- **根因**：naive Select 的可聚焦元素是 `div.n-base-selection-label[tabindex=0]`，任何 input 向透传都到不了它；属性 fallthrough 又落在根 div。
+- **正确做法**：自定义指令挂载/更新时 `el.querySelector('.n-base-selection-label').setAttribute('aria-label', …)`（utils/a11y.ts v-ad-select-label）；auto-complete 经 Input 透传有效、可保留 input-props。
+- **预防措施**：已加入避坑清单；给第三方组件补 a11y 属性前必须读其源码确认落点元素。
+- **关联**：packages/web/src/utils/a11y.ts；commit d5ddcb0。
 
 ### 2026-10-17 · 修 watch 竞态时早退过宽：bootstrap 首屏触发路径被一并切断，自动重生静默失效
 - **场景**：C3 影响视图「切项目 watch 复位横幅」把 bootstrap 完成的 done 横幅清掉（🟡 竞态）；修复时加 `oldId===null return` 早退。
