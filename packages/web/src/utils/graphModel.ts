@@ -89,6 +89,12 @@ const CHAIN_MARKS = ['①', '②', '③', '④', '⑤', '⑥']
 /** me 节点高亮色（与链路调色板错开，避免误读为某条链） */
 export const ME_COLOR = '#e11d48'
 
+/** 变更影响视图（C2）：变更函数节点高亮红（与 ME_COLOR 玫红错开，语义是「变更点」不是「我」） */
+export const IMPACT_COLOR = '#dc2626'
+
+/** 变更影响视图（C2）：上游波及节点琥珀色（警示色族，表达「被变更间接波及」） */
+export const RIPPLE_COLOR = '#f59e0b'
+
 /** 外部/未解析调用灰节点（禁止强行猜测分类，一律灰） */
 export const EXTERNAL_COLOR = '#9ca3af'
 

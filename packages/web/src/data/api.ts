@@ -6,6 +6,8 @@ import type {
   FileDocView,
   FileSummary,
   FunctionIndexEntry,
+  ImpactChangeset,
+  ImpactCommit,
   IncrementalParseStats,
   InsightDiff,
   InsightHistoryResponse,
@@ -149,6 +151,33 @@ export async function requestInsightPartition(feedback: string): Promise<Insight
   })
   if (!res.ok) return null
   return (await res.json()) as InsightResponse
+}
+
+/* ------------------------- 变更影响分析（C1 后端 / C2 前端） ------------------------- */
+
+/**
+ * 提交候选列表（date 降序）。静态导出无变更历史数据、非服务模式返回 null（视图据此隐藏单提交/范围选择）。
+ * 失败同样返回 null（前端降级：仍可看工作区当前变更集）。
+ */
+export async function fetchImpactCommits(limit?: number): Promise<ImpactCommit[] | null> {
+  if (mode !== 'api') return null
+  try {
+    const qs = limit !== undefined ? `?limit=${encodeURIComponent(String(limit))}` : ''
+    return await fetchJson<ImpactCommit[]>(`/api/impact/commits${qs}`)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 某一范围（workspace / commit:<hash> / range:<a>..<b>）的函数级变更集。
+ * 静态模式返回 null；409（无活动项目）/400（scope 非法）等失败抛错，由调用方弹 message。
+ */
+export async function fetchChangeset(scope: string): Promise<ImpactChangeset | null> {
+  if (mode !== 'api') return null
+  const res = await fetch(`/api/impact/changeset?scope=${encodeURIComponent(scope)}`)
+  if (!res.ok) throw await errorFromResponse(res, '加载变更集失败')
+  return (await res.json()) as ImpactChangeset
 }
 
 /* ------------------------- 历史 AI 洞察快照（H2） ------------------------- */

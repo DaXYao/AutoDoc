@@ -80,6 +80,13 @@ async function handleRefresh(): Promise<void> {
           >
             文件
           </router-link>
+          <router-link
+            to="/impact"
+            class="px-2 py-1 rounded text-xs text-gray-600 hover:bg-gray-100"
+            active-class="bg-gray-100 text-gray-900 font-medium"
+          >
+            变更影响
+          </router-link>
         </nav>
 
         <!-- 项目切换（仅 hub 模式） -->
