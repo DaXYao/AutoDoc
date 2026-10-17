@@ -31,9 +31,22 @@
 - [ ] **naive-ui 视觉地基四件套**：:root 令牌唯一色源 + theme.ts GlobalThemeOverrides 单入口（色族带全 hover/pressed/suppl）+ 个别控件皮肤走 per-instance :theme-overrides（避开 inline 主题变量）+ 原生容器/普通 wrapper div 承接布局与响应类（避开 cssr 无层赢 layered）（见 2026-10-17 条）。
 - [ ] **免 API Key 的 Agent 笔记通道**：文件契约协议（规则文本动态生成：schema+目标索引+示例+建议任务清单；一笔记一文件严格校验+错误清单；第三数据源与批注/自动生成三分离；静态导出嵌入）（见 2026-10-17 条）。
 
+- [ ] **跨进程内存态丢失的前端自愈范式**：数据层保留 HTTP status 并按状态码发全局钩子 → store 用 localStorage 记住身份并「单飞自动重激活 + 服务端真相预检 + 失败按 id 放弃记账」→ 恢复期用专用信号而非身份字段本身表达、只有最终失败才做真实身份迁移 → 视图按原因分文案并对瞬时失败自动重试（见 2026-10-17 条）。
+
 ---
 
 ## 成功经验条目
+
+### 2026-10-17 · 跨进程内存态丢失的前端自愈：409 自动重激活 + 原因分文案 + 瞬时态自动重试
+- **场景**：本地 hub 服务的「当前激活项目」只在内存（`server/projects.ts:44-47`），重启即丢；浏览器里开着的 SPA 此后所有活动项目接口都 409，界面出现「规则契约不可用 + 旧项目数据残留」的自相矛盾态。**适用条件**：本地服务模式、服务端存在「只在内存的用户选择态」、前端有多个消费该身份的 watch；不适用静态导出模式（无服务、无身份）。
+- **做法**：
+  1. **状态码留到底**：`ApiError(status)` 统一在所有非 2xx 出口抛出（GET/POST/PUT/DELETE/PATCH 共用一个 helper，错误文案逐字保持），409 触发一个注册式观察者 `setNoActiveProjectHandler`；能力探测（`initDataSource`）显式 `observe=false` 排除——它靠 catch 降级到单项目/静态模式，不能被恢复流程打断；
+  2. **自愈三层防护**：并发单飞（一次重启会同时炸多个 409）+ **服务端真相预检**（409 语义不止一种，`/api/ask` 的 409 是「未配置 AI」，预检 `/api/projects` 的 `activeId` 才决定要不要重激活，顺带做双页签对账）+ 失败按 id 放弃记账（防 409 风暴，成功不记账，故每次重启都能自愈一次）；身份记在 localStorage（`autodoc.lastActiveProjectId`），仅 api+hub 模式读写；
+  3. **恢复期不碰身份字段**：新增专用信号 `activationRecovering` 承载「恢复中」，`activeProjectId` 与已展示数据原地保留；只有最终失败才做真实 `id→null` 迁移。理由：多个视图 `watch(activeProjectId)` 会把 id→null→id 读成「切了两次项目」（ImpactView 复位自动重生横幅并重跑全量增量、GraphView 重挂载顶掉图/树开关）；
+  4. **按原因分文案 + 瞬时态自动重试**：视图把 409 与「真·服务异常」分述，且不再给对该状态无效的建议（无活动项目时提示「重新扫描」）；FilePage 这类页面级请求把 409 当瞬时态（warning 而非红色 error），恢复落定/用户手动切换后自动重试一次，文案用 computed 跟随 store 信号（钩子是同步触发的，catch 当下 `activationRecovering` 常常还没置位，快照字符串会说谎）；
+  5. **恢复失败绝不写全局 error**：hub「无活动项目」本就是正常可达状态，写 `appState.error` 会把页面切成整屏错误态；用 `activationLost` + 一次性 toast 表达。
+- **证据**：`packages/web/src/{data/api.ts,store/app.ts,utils/toast.ts,views/AgentNotesView.vue,views/FilePage.vue}`，测试 `packages/web/test/{api.test.ts,activationRecovery.test.ts}` 18 例（含「恢复全程 activeProjectId 无 null 抖动」——必须 `watch(..., {flush:'sync'})` 才测得出来，默认 post flush 会把中间 null 合并掉）。实机连开带跑 5 次重启均自动恢复。
+- **反例教训**：见 `docs/LESSONS_LEARNED.md` 同日期条（抖动与「会话级记账」两个坑，其中后者是我给子代理写规格时自己带进去的）。
 
 ### 2026-10-17 · 免 API Key 的 Agent 笔记通道：文件契约协议 + 动态规则生成 + 严格校验错误清单
 - **场景**：用户已有订阅制 Agent（Codex/Qoder CN/ChatGPT）积累大量上下文，但订阅 Key 不能外供；AutoDoc 想把这些「代打」的洞察收进产品展示。

@@ -28,10 +28,20 @@
 - [ ] Tailwind v4 工具类在 @layer 内、naive cssr 无层必赢：响应式/display 类直接挂 naive 组件根节点可能无效，包一层普通 div 再挂（见 2026-10-17 D1 条）。
 - [ ] 单行 flex 工具栏：弹性输入项（flex-1/basis 0）必须给 min-width，文字统计项必须 nowrap+ellipsis+min-w-0；否则窄屏输入框压成「空白盒」、中文文字压成竖排（见 2026-10-17 D1 条）。
 - [ ] 模块新增导出后浏览器白屏报 "does not provide an export named"：vite transform 缓存 + 浏览器模块缓存双重陈旧，普通 reload 无效，必须重启 dev server（见 2026-10-17 D1 条）。
+- [ ] 跨进程内存态（hub activeId）丢失时禁止「先收回状态再恢复」：把 `activeProjectId` 做成 id→null→id 抖动，会被多个视图的 `watch(activeProjectId)` 读成「切了两次项目」（ImpactView 复位自动重生横幅并重跑全量增量、GraphView 重挂载顶掉图/树开关）；恢复期用独立信号（activationRecovering）表达，只有最终失败才做真实的 id→null 迁移。
+- [ ] 数据层禁止把 HTTP 状态码压扁成 Error 文案、更禁止一律 catch 返 null：视图只剩「服务异常」这种模糊文案，还会建议对该状态无效的操作（无活动项目时点「重新扫描」）；要保留 status 并按原因分文案。
+- [ ] 「防重试风暴」的记账要按「一次事件」而不是「一个会话」计数：写成「同一 id 会话内只尝试一次」会让用户第二次重启服务就不再自愈（实机连开带跑两轮才抓到）；成功恢复不记账，只对失败记账。
 
 ---
 
 ## 教训条目
+
+### 2026-10-17 · 「诚实态先行」的 activeProjectId 抖动 + 会话级重试记账：两个都在实机复验才暴露
+- **场景**：修「本地服务重启后活动项目丢失（409）」，方案是前端记住上次项目并自动重激活。实现按「先落诚实空态、恢复成功再置回 id」组织状态，并按我给的规格把自动重试记成「同一 id 一个会话只尝试一次」。
+- **现象**：初审代理指出抖动会打到别的消费方——`ImpactView` 的 `watch(activeProjectId)` 把 id→null 当切项目（复位自动重生横幅、抹掉会话降级标志）、null→id 又当 bootstrap（`runAutoRefresh` 重跑全量增量重生 + reloadAll，与恢复自己的 loadActiveDocs 抢 loadToken），null 窗口还把 commits/changeset 清掉，只能靠 insight 身份 watch 意外救回；我随后实机连开带跑第二轮重启时发现页面直接掉「尚无活动项目」，因为上一次成功恢复把 id 记进了「已尝试」集合。
+- **根因**：①把「恢复中」用一个已有的、被多视图 watch 的全局身份字段来表达，等于给所有订阅者广播了一次假的事件；②重试记账的粒度选错（会话 ≠ 一次丢失事件）。
+- **正确做法**：新增专用信号 `activationRecovering` 承载「恢复中」，身份字段只在真实迁移时变；记账只对「激活失败」成立（防 409 风暴），成功不记账；再叠加并发单飞 + 预检服务端真相（409 站点语义不止一种，`/api/ask` 的 409 是「未配置 AI」）三层防护。
+- **预防措施**：改动全局 store 的身份字段（activeProjectId 这类）前，先 grep 全部 watch 消费方并逐个问「这个假事件它会怎么理解」；跨进程状态类修复，验收用例必须包含「连续两次服务重启」而不是只有一次。
 
 ### 2026-10-17 · n-select 选项写成 dropdown 的 {label,key}：静默失效且 typecheck 抓不到，D1 起顶栏项目切换即坏
 - **场景**：D1 顶栏把项目切换从 n-dropdown 改成 n-select，选项数组沿用 `{label,key}`；E2 类型筛选下拉照抄同款写法。

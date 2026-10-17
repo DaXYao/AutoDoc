@@ -2,6 +2,16 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-17 · R1：服务重启丢激活后的 409 自愈（诚实态 + 自动重激活） · web
+
+- **触发**：用户截图「Agent 笔记」页同时出现「规则契约暂不可用（无活动项目或服务异常）」与残留的「笔记1/错误1/建议20」。根因两条：①E 轮我自己留下的校验探针 `002-probe-bad.json` 当时还在 `.autodoc/agent/`（现已清空，浏览器 store 里是重启前的旧数据）；②hub 服务的 `activeId` 只在内存（server/projects.ts:44-47），E3 重启后丢失 → 活动项目类接口一律 409，而 `fetchJson` 把状态码压扁、`fetchAgentRules` 又吞错返回 null，视图无法区分原因，还建议了一个对该状态无效的「重新扫描」。
+- **内容**：①`data/api.ts`：新增 `ApiError(status)` + `isNoActiveProjectError` + 409 观察钩子 `setNoActiveProjectHandler`，所有非 2xx 出口（fetchJson 与 POST/PUT/DELETE/PATCH 手写分支）统一走 `apiError/errorFromResponse`，错误文案逐字保持原样；`initDataSource` 能力探测显式 `observe=false`（hub 无活动项目时 `/api/meta` 正是 409，靠 catch 降级，不能被恢复流程打断）；`fetchAgentRules` 不再吞错、`fetchAgentNotes` 保持吞错（增强数据不弹 toast）；`requestInsightAI/Partition` 仅 409 抛错（其余状态保留「可能输出超长」既有降级口径），补上「重启后点生成洞察静默无反应」缺口。②`store/app.ts`：localStorage 记 `autodoc.lastActiveProjectId`（仅 api+hub）；409 → `recoverLostActivation`：先用 `/api/projects` 核实（409 不等于激活丢失，`/api/ask` 两处 409 是「未配置 AI」）→ 命中即自动重激活 + 重拉数据 + info/success toast，失败才 `releaseActivation` 落诚实空态并按「一次丢失只公告一条」去重；并发单飞 + 激活失败按 id 记账放弃（防 409 风暴，成功恢复不记账，故每次重启都能自愈一次）；恢复期间**刻意保留 `activeProjectId`** 只置新信号 `activationRecovering`，避免 id→null→id 被视图读成「切了两次项目」；抽 `clearActiveScopedState()` 收口原 bootstrap/loadActiveDocs/removeProject 三份重复清空；`adoptServerActiveProject` 以服务端 activeId 对账（双页签另一页签切走时本页面跟随）。③`utils/toast.ts` 新：离散 message 单例（显式注入 themeOverrides），App.vue 改引用、store 在 setup 外也能提示。④`AgentNotesView.vue`：`rulesHint` 分「无活动项目 / 服务异常」两套文案（前者不再建议无效的重新扫描，恢复中显示「正在自动恢复…」），统计条空态同理分述，`handleCopyRules` 未就绪提示同步分流；watch 增听 `activationRecovering`（id 不抖后规则契约靠它落定重拉）。⑤`FilePage.vue`：409 当瞬时态而非终态，文案跟着 store 信号走（warning 而非红色 error），恢复落定或用户手动切换后自动重试一次。
+- **影响范围**：仅 web 9 文件（api/store/App/AgentNotesView/FilePage/InsightHome/toast 新 + 两个测试新）；服务端与 `configs/projects.json` 零改动（未持久化 activeId、未加启动预激活）、不新增依赖。
+- **动机**：把「服务重启后要手动重选项目、且界面半新半旧」这个每次 dogfooding 都会踩的状态，改成自动恢复 + 原因可辨。
+- **测试**：`test/api.test.ts` 9 例（状态码/钩子触发与注销/探测排除/两接口口径/洞察 AI 409 与非 409）；`test/activationRecovery.test.ts` 9 例（并发 409 只激活一次、注册表无该 id、连续两次重启都自愈、激活失败后放弃且手动切换重新武装、恢复全程 `activeProjectId` 无 null 抖动（`flush:'sync'` 才测得出）、非 409 失败保住 id、无关 409 只对账、双页签采纳、非 hub 模式不碰 localStorage）。`pnpm lint` 全绿；`pnpm test` 全绿（core 170 / web 214 / server 253）。FilePage 瞬时态与自动重试为浏览器实机复验（项目无 @vue/test-utils，未为此引依赖）。
+- **实机复验**：连开带跑 5 次「杀进程重启 → 页签不动」，控制台仅剩预期 409 日志；Agent 笔记页出现「正在自动恢复…」→ 规则时间戳刷新；顶栏项目名全程未变（无抖动）；文件页出现黄色瞬时条后自动渲染出函数列表；冷启动无活动项目时仍落「选择项目」页、未被隐式激活；统计条 0/0/20 且无校验错误表。
+- **关联 commit**：cf75568。
+
 ## 2026-10-17 · E3：Agent 笔记通道合规收尾（对比度令牌/徽标皮肤/aria-busy/导出链路） · web
 
 - **内容**：①style.css 增 danger/success/warning-soft 令牌（逐字对齐 theme.ts pressed/suppl 族值；success-soft 注释「ink/soft 组合 4.44 不达 AA，文字墨色须配 surface」）。②Agent 视图新引入红族字面量→令牌（错误计数 chip/错误标题）；n-tag 徽标因默认状态色 12% 透明面色混底后 2.8~4.3:1 不达 AA，改显式 `color` prop 令牌皮肤（overview/chain-note=accent-soft+accent-ink 4.91、decision=surface+success-ink 4.95、pitfall=warning-soft+ink-2 5.54；faq 默认 5.86 达标保持），并配 `bordered+borderColor:--ad-line` 保住贴纸感；建议任务徽标同型皮肤（canvas 底默认 info 仅 4.28，初审抓出）。③复制/导出/重扫按钮 `aria-busy`+重入守卫（复制规则/复制建议统一 copying 早退）；错误/建议区 role=status。④复制回退 textarea 去 readonly 用 onfocus select。⑤测试升级：覆盖面钉死（四键 toEqual）+ 令牌真实存在于 style.css 断言（防手滑假名/静默删项）。⑥导出链路实查：临时仓 export 后 autodoc-data.json 含 agentNotes(notes=1,errors=0,readOnly=true)，探针已清理。
