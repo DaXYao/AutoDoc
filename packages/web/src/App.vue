@@ -31,11 +31,16 @@ onMounted(async () => {
 const readOnly = computed(() => appState.meta?.readOnly ?? false)
 const isStatic = computed(() => getMode() === 'static')
 
-/** 顶部项目切换下拉的选项 */
+/**
+ * 顶部项目切换下拉的选项。
+ * D1 起消费组件已从 n-dropdown 换成 n-select（模板处注释有换型记录）：
+ * n-select 只读 valueField='value'、无 key 回退（naive-ui Select.mjs 源码核实），
+ * 沿用 dropdown 的 key 协议会让全部选项 value=undefined、点击切项目必然失败。
+ */
 const projectOptions = computed(() =>
   appState.projects.map((p) => ({
     label: p.name,
-    key: p.id,
+    value: p.id,
     disabled: p.id === appState.activeProjectId
   }))
 )
@@ -92,6 +97,14 @@ async function handleRefresh(): Promise<void> {
             </router-link>
             <router-link to="/impact" class="ad-nav-pill" active-class="ad-nav-pill--active">
               变更影响
+            </router-link>
+            <router-link
+              to="/agent-notes"
+              class="ad-nav-pill"
+              active-class="ad-nav-pill--active"
+              title="Agent 笔记通道：接入指南与笔记浏览"
+            >
+              Agent 接入
             </router-link>
           </nav>
 

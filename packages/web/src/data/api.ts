@@ -1,4 +1,7 @@
 import type {
+  AgentNotesResponse,
+  AgentRulesExportResponse,
+  AgentRulesResult,
   Annotation,
   AnnotationKind,
   AskResponse,
@@ -390,4 +393,47 @@ export async function refreshDocs(): Promise<IncrementalParseStats | undefined> 
   if (!res.ok) throw new Error(`重新生成失败：${res.status}`)
   const data = (await res.json().catch(() => ({}))) as { incremental?: IncrementalParseStats }
   return data.incremental
+}
+
+/* ------------------------- Agent 笔记通道（E2） ------------------------- */
+
+/**
+ * 笔记 + 校验错误 + 建议任务。
+ * 静态模式：读导出瞬间嵌入的 `agentNotes` 快照（无此字段=旧导出，返回 null 由视图走空态）；
+ * 建议任务为服务端实时推导，静态快照不含，固定空数组。
+ * API 模式失败（含 409 无活动项目）静默返回 null——笔记是增强信息，store 侧不弹 toast。
+ */
+export async function fetchAgentNotes(): Promise<AgentNotesResponse | null> {
+  if (mode !== 'api') {
+    const embedded = staticData?.agentNotes
+    return embedded
+      ? { notes: embedded.notes, errors: embedded.errors, suggestions: [] }
+      : null
+  }
+  try {
+    return await fetchJson<AgentNotesResponse>('/api/agent-notes')
+  } catch {
+    return null
+  }
+}
+
+/** 规则契约文本（接入指南预览用）；静态模式与失败均返回 null（视图隐藏复制/导出） */
+export async function fetchAgentRules(): Promise<AgentRulesResult | null> {
+  if (mode !== 'api') return null
+  try {
+    return await fetchJson<AgentRulesResult>('/api/agent-rules')
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 导出契约到目标仓 `.autodoc/AGENT_RULES.md`（写操作）。
+ * 403=只读、409=无活动项目、500=写盘失败：抛带后端 error 文案的 Error，由调用方弹 message。
+ */
+export async function exportAgentRules(): Promise<AgentRulesExportResponse> {
+  if (mode !== 'api') throw new Error('导出规则契约仅服务模式可用')
+  const res = await fetch('/api/agent-rules/export', { method: 'POST' })
+  if (!res.ok) throw await errorFromResponse(res, '导出规则契约失败')
+  return (await res.json()) as AgentRulesExportResponse
 }

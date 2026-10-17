@@ -1,5 +1,6 @@
-import { reactive } from 'vue'
+import { computed, reactive } from 'vue'
 import type {
+  AgentNotesResponse,
   FileDocView,
   FileSummary,
   FunctionIndexEntry,
@@ -13,6 +14,7 @@ import type {
 import {
   activateProject,
   addProject as apiAddProject,
+  fetchAgentNotes,
   fetchChangeset,
   fetchFileView,
   fetchFunctionIndex,
@@ -47,6 +49,12 @@ export interface AppState {
    * 静态导出模式恒为 null（无变更历史数据）；拉取失败同样静默 null（徽标是增强信息，不弹错）。
    */
   workspaceChangeset: ImpactChangeset | null
+  /**
+   * E2：Agent 笔记通道数据（笔记+校验错误+建议任务）。
+   * 与批注严格分离：只读展示外部 Agent 产出，AutoDoc 永不写回。
+   * 静态模式为导出瞬间的快照（suggestions 恒空）；拉取失败静默 null（不弹 toast，徽标/分区据此隐藏）。
+   */
+  agentNotes: AgentNotesResponse | null
   /** fileId → 视图（serve 模式下按需拉取） */
   fileViews: Map<string, FileDocView>
 }
@@ -62,26 +70,69 @@ export const appState = reactive<AppState>({
   functionIndex: [],
   insight: null,
   workspaceChangeset: null,
+  agentNotes: null,
   fileViews: new Map()
 })
 
+/**
+ * bootstrap 是否已落定（数据源已判定 + 活动项目已解析）。
+ * 消费方：子视图 onMounted 早于 App.onMounted 的 bootstrap，直接读非响应式的 getMode() 会误判
+ * （静态导出下会去 fetch /api/* 失败并弹多余错误），且无依赖 computed 首算即永久缓存；
+ * 视图以本响应式信号为门闩——meta 就位（serve 单项目/静态）或确认 hub 无活动项目/报错后，
+ * getMode() 才可信，再发起取数与静态分支判定（ImpactView 首用，E2 收口到 store 供多视图共用）。
+ */
+export const appReady = computed(
+  () =>
+    appState.meta !== null ||
+    appState.error !== null ||
+    (appState.hubEnabled && appState.activeProjectId === null)
+)
+
+/**
+ * loadActiveDocs 代际令牌：每次进入（bootstrap/切项目/增删项目/reloadAll）自增。
+ * 竞态场景：快速连续切项目时，旧一次加载的在途请求可能晚于新一次返回，
+ * 直接写回会用旧项目的洞察/变更集/笔记覆盖新项目数据——每个 await 梯队写回前校验令牌，
+ * 过期即丢弃。refreshAgentNotes/refreshInsight 等非代际推进的补拉用当前令牌自守卫。
+ */
+let loadToken = 0
+
 /** 拉取工作区变更集（C3 徽标数据源）；失败静默置 null，避免给 bootstrap/reloadAll 添错误噪声 */
-async function loadWorkspaceChangeset(): Promise<void> {
+async function loadWorkspaceChangeset(token: number): Promise<void> {
   try {
-    appState.workspaceChangeset = await fetchChangeset('workspace')
+    const changeset = await fetchChangeset('workspace')
+    if (token === loadToken) appState.workspaceChangeset = changeset
   } catch {
-    appState.workspaceChangeset = null
+    if (token === loadToken) appState.workspaceChangeset = null
   }
+}
+
+/** 拉取 Agent 笔记（E2 数据源）；失败静默置 null（徽标/内联分区是增强信息，不弹 toast、不拖垮 Promise.all） */
+async function loadAgentNotes(token: number): Promise<void> {
+  try {
+    const result = await fetchAgentNotes()
+    if (token === loadToken) appState.agentNotes = result
+  } catch {
+    if (token === loadToken) appState.agentNotes = null
+  }
+}
+
+/** E2：Agent 笔记视图「重新扫描」——服务端每次现读现校验 `.autodoc/agent/`，无缓存，直接重拉即可 */
+export async function refreshAgentNotes(): Promise<void> {
+  // 期间若发生切项目（token 推进），本次结果作废，由 loadActiveDocs 拉新项目数据
+  await loadAgentNotes(loadToken)
 }
 
 /** 加载当前活动项目的文档数据（meta/summaries/index）；无活动项目时清空 */
 async function loadActiveDocs(): Promise<void> {
+  // 代际推进：此后任何更晚的 loadActiveDocs 进入都会使本次在途响应过期（写回前逐梯队校验）
+  const token = ++loadToken
   if (appState.activeProjectId === null && appState.hubEnabled) {
     appState.meta = null
     appState.summaries = []
     appState.functionIndex = []
     appState.insight = null
     appState.workspaceChangeset = null
+    appState.agentNotes = null
     return
   }
   const [meta, summaries, index] = await Promise.all([
@@ -89,13 +140,20 @@ async function loadActiveDocs(): Promise<void> {
     fetchSummaries(),
     fetchFunctionIndex()
   ])
+  if (token !== loadToken) return
   appState.meta = meta
   appState.summaries = summaries
   appState.functionIndex = index
   // C3：变更集与文档数据同属活动项目，随 bootstrap/reloadAll/切项目一起刷新
   //（regenerateActive 走 reloadAll → 本函数，重生后的新快照批次即在此拉回）；
-  // 洞察与工作区变更集互不依赖，并行拉取减少串行等待（loadWorkspaceChangeset 内部吞错，不会拖垮 Promise.all）
-  const [insight] = await Promise.all([fetchInsight(), loadWorkspaceChangeset()])
+  // E2：Agent 笔记同口径——只随活动项目数据拉一次，内部吞错不拖垮 Promise.all；
+  // 洞察/变更集/笔记互不依赖，并行拉取减少串行等待
+  const [insight] = await Promise.all([
+    fetchInsight(),
+    loadWorkspaceChangeset(token),
+    loadAgentNotes(token)
+  ])
+  if (token !== loadToken) return
   appState.insight = insight
 }
 
@@ -124,9 +182,12 @@ export async function repartitionInsight(feedback: string): Promise<void> {
  * 后端 loadInsight 在 activeId 命中时返回历史快照，否则返回实时计算结果。
  */
 export async function refreshInsight(): Promise<void> {
-  appState.insight = await fetchInsight()
+  const token = loadToken
+  const insight = await fetchInsight()
+  if (token !== loadToken) return
+  appState.insight = insight
   // C3：回滚路径不经过 reloadAll，但徽标变更集须与当前生效数据同步刷新，此处一并拉取
-  await loadWorkspaceChangeset()
+  await loadWorkspaceChangeset(token)
 }
 
 export async function bootstrap(): Promise<void> {
@@ -152,6 +213,7 @@ export async function bootstrap(): Promise<void> {
       appState.functionIndex = []
       appState.insight = null
       appState.workspaceChangeset = null
+      appState.agentNotes = null
     }
   } catch (error) {
     appState.error = error instanceof Error ? error.message : String(error)
@@ -225,10 +287,11 @@ export async function removeProject(id: string): Promise<void> {
     appState.meta = null
     appState.summaries = []
     appState.functionIndex = []
-    // 与 bootstrap 无活动项目分支口径一致：洞察与变更集同属活动项目，
-    // 不清会让「含变更」徽标与链路图谱残留已移除项目的数据
+    // 与 bootstrap 无活动项目分支口径一致：洞察、变更集与 Agent 笔记同属活动项目，
+    // 不清会让「含变更」徽标、链路图谱与「Agent 笔记」徽标残留已移除项目的数据
     appState.insight = null
     appState.workspaceChangeset = null
+    appState.agentNotes = null
   } else {
     await loadActiveDocs()
   }

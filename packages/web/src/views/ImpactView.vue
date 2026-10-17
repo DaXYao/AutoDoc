@@ -3,7 +3,7 @@ import { computed, ref, watch, watchEffect } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import type { ImpactChangeset, ImpactCommit, IncrementalParseStats, InsightChain } from '@autodoc/shared-types'
-import { appState, findFunctionEntry, reloadAll } from '../store/app'
+import { appReady, appState, findFunctionEntry, reloadAll } from '../store/app'
 import { checkRefresh, fetchChangeset, fetchImpactCommits, getMode, refreshDocs } from '../data/api'
 import { chainImportance } from '../utils/chains'
 import { fnLabelFromId, IMPACT_COLOR, LEGEND_NEUTRAL, RIPPLE_COLOR } from '../utils/graphModel'
@@ -229,20 +229,8 @@ watch(
   { immediate: true }
 )
 
-/**
- * bootstrap 是否已落定（数据源已判定 + 活动项目已解析）。
- * 子视图 onMounted 早于 App.onMounted 的 bootstrap，直接读非响应式的 getMode() 会误判：
- * 静态导出下会去 fetch /api/impact/* 失败并弹多余错误提示。改以此响应式信号为准，
- * 待 meta 就位（serve 单项目/静态）或确认 hub 无活动项目后，getMode() 才可信，再发起取数。
- */
-const appReady = computed(
-  () =>
-    appState.meta !== null ||
-    appState.error !== null ||
-    (appState.hubEnabled && appState.activeProjectId === null)
-)
-
 // 首屏与刷新：appReady 落定后拉一次 commits 并开门闩（导航进入时 appReady 已为 true，immediate 直接触发）
+// （appReady 门闩语义见 store/app.ts 导出注释；E2 修复收口到 store，视图不再各写一份）
 watch(
   appReady,
   async (isReady) => {

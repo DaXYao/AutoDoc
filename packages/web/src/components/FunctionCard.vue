@@ -15,7 +15,9 @@ import { splitCallChain } from '../utils/callChain'
 import { groupInternalSteps } from '../utils/internalSteps'
 import { compactPath, roleOf, selectTopChains } from '../utils/chains'
 import { changePointsOf } from '../utils/impact'
+import { notesForTarget } from '../utils/agentNotes'
 import { fnJumpQuery } from '../utils/nav'
+import AgentNoteItem from './AgentNoteItem.vue'
 import AnnotationPanel from './AnnotationPanel.vue'
 import CallNode from './CallNode.vue'
 import GraphView from './graph/GraphView.vue'
@@ -306,6 +308,14 @@ const chainPathKey = (chainId: string): string => `card:${props.fn.id}:chain:${c
 const changesKey = (): string => `card:${props.fn.id}:changes`
 const annotationsKey = (): string => `card:${props.fn.id}:annotations`
 const followupsKey = (): string => `card:${props.fn.id}:followups`
+const agentNotesKey = (): string => `card:${props.fn.id}:agentnotes`
+
+/**
+ * E2 内联呼应：挂载到本函数的 Agent 笔记（target kind=function 且 id=本函数稳定 ID）。
+ * 数据来自 appState.agentNotes（bootstrap 拉一次 + 笔记视图「重新扫描」刷新）；
+ * store 为 null（加载失败/静态无快照）时返回空数组 → 分区不渲染，与「无笔记」同口径。
+ */
+const fnAgentNotes = computed(() => notesForTarget(appState.agentNotes?.notes ?? [], 'function', props.fn.id))
 </script>
 
 <template>
@@ -780,6 +790,17 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
           <!-- 追问记录按 Markdown 渲染（已禁用 HTML，防 XSS） -->
           <div class="annotation-body mt-1 text-sm" v-html="renderMarkdown(followup.content)" />
         </article>
+      </div>
+    </div>
+
+    <!-- Agent 笔记（E2 内联呼应）：外部 Agent 只读产出，与批注/追问严格分离；无笔记不渲染本分区 -->
+    <div v-if="fnAgentNotes.length > 0" class="border-t border-[color:var(--ad-line)] px-4 py-2">
+      <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(agentNotesKey(), false)">
+        Agent 笔记（{{ fnAgentNotes.length }}）
+        {{ isExpanded(agentNotesKey(), false) ? '▾' : '▸' }}
+      </button>
+      <div v-if="isExpanded(agentNotesKey(), false)" class="mt-2 flex flex-col gap-2">
+        <AgentNoteItem v-for="note in fnAgentNotes" :key="note.id" :note="note" :show-target="false" />
       </div>
     </div>
   </article>

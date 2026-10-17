@@ -2,7 +2,10 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { appState, findFunctionEntry } from '../store/app'
+import { isExpanded, toggle } from '../store/expand'
 import { fnJumpQuery } from '../utils/nav'
+import { notesForTarget } from '../utils/agentNotes'
+import AgentNoteItem from '../components/AgentNoteItem.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -13,6 +16,16 @@ const module = computed(() => insight.value?.modules.find((m) => m.id === module
 const chains = computed(() =>
   (insight.value?.chains ?? []).filter((c) => c.moduleId === moduleId.value)
 )
+
+/**
+ * E2 内联呼应：挂载到本模块的 Agent 笔记（target kind=module 且 id=本模块 id）。
+ * store 为 null 时返回空数组 → 分区不渲染（与「无笔记」同口径，不额外提示加载失败）。
+ */
+const moduleAgentNotes = computed(() =>
+  notesForTarget(appState.agentNotes?.notes ?? [], 'module', moduleId.value)
+)
+/** 折叠默认收起 + 用户态持久化（与函数卡片 agentnotes 分区同范式） */
+const agentNotesKey = (): string => `module:${moduleId.value}:agentnotes`
 
 function fnName(id: string): string {
   const entry = findFunctionEntry(id)
@@ -115,6 +128,20 @@ function goFile(fileId: string): void {
           >
             {{ fid }}
           </button>
+        </div>
+      </section>
+
+      <!-- Agent 笔记（E2 内联呼应）：外部 Agent 只读产出；无笔记不渲染本分区 -->
+      <section v-if="moduleAgentNotes.length > 0" class="mt-6">
+        <button
+          class="text-sm font-semibold text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]"
+          @click="toggle(agentNotesKey(), false)"
+        >
+          Agent 笔记（{{ moduleAgentNotes.length }}）
+          {{ isExpanded(agentNotesKey(), false) ? '▾' : '▸' }}
+        </button>
+        <div v-if="isExpanded(agentNotesKey(), false)" class="mt-2 flex flex-col gap-2">
+          <AgentNoteItem v-for="note in moduleAgentNotes" :key="note.id" :note="note" :show-target="false" />
         </div>
       </section>
     </template>

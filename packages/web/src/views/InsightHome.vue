@@ -176,6 +176,13 @@ function goFunction(id: string): void {
 function goModule(id: string): void {
   void router.push({ name: 'module', params: { moduleId: id } })
 }
+
+/** E2：Agent 笔记摘要徽标（数据来自 store，N=0 或未加载时隐藏），点击跳笔记视图 */
+const agentNoteCount = computed(() => appState.agentNotes?.notes.length ?? 0)
+
+function goAgentNotes(): void {
+  void router.push({ name: 'agent-notes' })
+}
 </script>
 
 <template>
@@ -217,6 +224,17 @@ function goModule(id: string): void {
     <template v-else>
       <!-- 历史版本区（含回滚态横幅 +「回到实时」；静态模式自动隐藏） -->
       <InsightHistory ref="historyRef" />
+
+      <!-- E2：Agent 笔记摘要徽标（N=0 或未加载时隐藏），点击跳「Agent 接入」视图 -->
+      <div v-if="agentNoteCount > 0" class="-mt-1 mb-3 flex justify-end">
+        <button
+          class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-surface)] px-2 py-1 text-xs text-[color:var(--ad-ink-2)] hover:border-[color:var(--ad-accent)]"
+          aria-label="查看 Agent 笔记"
+          @click="goAgentNotes"
+        >
+          Agent 笔记 {{ agentNoteCount }}
+        </button>
+      </div>
 
       <!-- AI 状态提示 -->
       <n-alert
