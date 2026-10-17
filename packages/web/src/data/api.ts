@@ -42,9 +42,43 @@ export function isHubEnabled(): boolean {
   return hubEnabled
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
+/** HTTP 非 2xx：保留状态码，供调用方区分「409 无活动项目」与真·服务异常 */
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
+let noActiveProjectHandler: (() => void) | null = null
+
+/** 注册/注销 409（服务端无活动项目）观察者；store 用它触发自动重激活 */
+export function setNoActiveProjectHandler(fn: (() => void) | null): void {
+  noActiveProjectHandler = fn
+}
+
+export function isNoActiveProjectError(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 409
+}
+
+/** 非 2xx 的唯一出口：409 时通知观察者并造 ApiError（message 由各调用点原样传入，文案不变） */
+function apiError(res: Response, message: string, observe = true): ApiError {
+  if (observe && res.status === 409) noActiveProjectHandler?.()
+  return new ApiError(res.status, message)
+}
+
+/** 同 apiError，但优先展示后端 error 文案 */
+async function errorFromResponse(res: Response, fallback: string): Promise<ApiError> {
+  const detail = await res.json().catch(() => ({}))
+  return apiError(res, (detail as { error?: string }).error ?? `${fallback}：${res.status}`)
+}
+
+async function fetchJson<T>(url: string, observe = true): Promise<T> {
   const res = await fetch(url)
-  if (!res.ok) throw new Error(`请求失败：${res.status} ${url}`)
+  if (!res.ok) throw apiError(res, `请求失败：${res.status} ${url}`, observe)
   return (await res.json()) as T
 }
 
@@ -53,10 +87,12 @@ async function fetchJson<T>(url: string): Promise<T> {
  * 1) /api/projects 成功 → serve + hub 模式（可能尚无活动项目）；
  * 2) 否则 /api/meta 成功 → serve 单项目模式（旧服务或 --root 启动）；
  * 3) 否则加载 autodoc-data.json → 静态导出模式。
+ * observe=false：探测靠 catch 做降级，hub 无活动项目时 /api/meta 正是 409，
+ * 若触发观察者会在 bootstrap 尚未落定前空跑一次恢复流程。
  */
 export async function initDataSource(): Promise<void> {
   try {
-    await fetchJson<ProjectsResponse>('/api/projects')
+    await fetchJson<ProjectsResponse>('/api/projects', false)
     mode = 'api'
     hubEnabled = true
     return
@@ -64,13 +100,13 @@ export async function initDataSource(): Promise<void> {
     // 继续尝试单项目 / 静态
   }
   try {
-    const meta = await fetchJson<ServerMeta>('/api/meta')
+    const meta = await fetchJson<ServerMeta>('/api/meta', false)
     if (typeof meta.generatedAt !== 'string') throw new Error('invalid meta')
     mode = 'api'
     hubEnabled = false
     return
   } catch {
-    staticData = await fetchJson<ExportData>('autodoc-data.json')
+    staticData = await fetchJson<ExportData>('autodoc-data.json', false)
     mode = 'static'
     hubEnabled = false
   }
@@ -85,10 +121,7 @@ export async function fetchProjects(): Promise<ProjectsResponse | null> {
 
 export async function activateProject(id: string): Promise<void> {
   const res = await fetch(`/api/projects/${encodeURIComponent(id)}/activate`, { method: 'POST' })
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({}))
-    throw new Error((detail as { error?: string }).error ?? `激活项目失败：${res.status}`)
-  }
+  if (!res.ok) throw await errorFromResponse(res, '激活项目失败')
 }
 
 export async function addProject(input: NewProjectInput): Promise<ProjectInfo> {
@@ -97,16 +130,13 @@ export async function addProject(input: NewProjectInput): Promise<ProjectInfo> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input)
   })
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({}))
-    throw new Error((detail as { error?: string }).error ?? `添加项目失败：${res.status}`)
-  }
+  if (!res.ok) throw await errorFromResponse(res, '添加项目失败')
   return (await res.json()) as ProjectInfo
 }
 
 export async function removeProject(id: string): Promise<void> {
   const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
-  if (!res.ok && res.status !== 204) throw new Error(`移除项目失败：${res.status}`)
+  if (!res.ok && res.status !== 204) throw apiError(res, `移除项目失败：${res.status}`)
 }
 
 /** 弹出系统原生文件夹选择对话框，返回选中绝对路径；取消或不支持返回 null */
@@ -130,7 +160,11 @@ export async function fetchInsight(feedback = ''): Promise<InsightResponse | nul
   }
 }
 
-/** 按需生成 AI 洞察（force 忽略缓存）；无 key/失败返回 null（前端降级） */
+/**
+ * 按需生成 AI 洞察（force 忽略缓存）。
+ * 非 409 的失败照旧返回 null（既有降级文案「可能输出超长」依赖这个口径，不许改）；
+ * 409 = 服务端没有活动项目，吞成 null 会让按钮静默无反应，故抛 ApiError 走 409 观察者自愈。
+ */
 export async function requestInsightAI(
   force = false,
   feedback = ''
@@ -141,11 +175,12 @@ export async function requestInsightAI(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ force, feedback })
   })
+  if (res.status === 409) throw await errorFromResponse(res, 'AI 洞察生成失败')
   if (!res.ok) return null
   return (await res.json()) as InsightResponse
 }
 
-/** 按用户建议重新划分模块（仅重生成划分，其余走缓存） */
+/** 按用户建议重新划分模块（仅重生成划分，其余走缓存）；409 口径同 requestInsightAI */
 export async function requestInsightPartition(feedback: string): Promise<InsightResponse | null> {
   if (mode !== 'api') return null
   const res = await fetch('/api/insight/partition', {
@@ -153,6 +188,7 @@ export async function requestInsightPartition(feedback: string): Promise<Insight
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ feedback })
   })
+  if (res.status === 409) throw await errorFromResponse(res, 'AI 划分失败')
   if (!res.ok) return null
   return (await res.json()) as InsightResponse
 }
@@ -194,12 +230,6 @@ export async function checkRefresh(): Promise<RefreshCheckResponse | null> {
 }
 
 /* ------------------------- 历史 AI 洞察快照（H2） ------------------------- */
-
-/** POST/DELETE 失败时组装带后端 error 文案的 Error（对齐 askCallStep 风格） */
-async function errorFromResponse(res: Response, fallback: string): Promise<Error> {
-  const detail = await res.json().catch(() => ({}))
-  return new Error((detail as { error?: string }).error ?? `${fallback}：${res.status}`)
-}
 
 /** 历史快照列表（最近 N + activeId 回滚指针）；静态模式或失败返回 null（前端降级隐藏历史区） */
 export async function fetchInsightHistory(): Promise<InsightHistoryResponse | null> {
@@ -312,7 +342,7 @@ export async function addAnnotation(payload: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   })
-  if (!res.ok) throw new Error(`添加批注失败：${res.status}`)
+  if (!res.ok) throw apiError(res, `添加批注失败：${res.status}`)
   return (await res.json()) as Annotation
 }
 
@@ -325,13 +355,13 @@ export async function updateAnnotation(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch)
   })
-  if (!res.ok) throw new Error(`更新批注失败：${res.status}`)
+  if (!res.ok) throw apiError(res, `更新批注失败：${res.status}`)
   return (await res.json()) as Annotation
 }
 
 export async function deleteAnnotation(id: string): Promise<void> {
   const res = await fetch(`/api/annotations/${id}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`删除批注失败：${res.status}`)
+  if (!res.ok) throw apiError(res, `删除批注失败：${res.status}`)
 }
 
 /* ------------------------- 就地追问（轴 B） ------------------------- */
@@ -350,10 +380,7 @@ export async function askCallStep(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ functionId, stepId, question })
   })
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({}))
-    throw new Error((detail as { error?: string }).error ?? `提问失败：${res.status}`)
-  }
+  if (!res.ok) throw await errorFromResponse(res, '提问失败')
   return (await res.json()) as AskResponse
 }
 
@@ -370,10 +397,7 @@ export async function askFunction(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ functionId, question })
   })
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({}))
-    throw new Error((detail as { error?: string }).error ?? `提问失败：${res.status}`)
-  }
+  if (!res.ok) throw await errorFromResponse(res, '提问失败')
   return (await res.json()) as AskResponse
 }
 
@@ -390,7 +414,7 @@ export async function fetchAnnotations(targetId: string): Promise<Annotation[]> 
 /** I3：重新生成文档，返回本次解析层增量统计（服务端未给出时 undefined，成功提示不追加摘要） */
 export async function refreshDocs(): Promise<IncrementalParseStats | undefined> {
   const res = await fetch('/api/refresh', { method: 'POST' })
-  if (!res.ok) throw new Error(`重新生成失败：${res.status}`)
+  if (!res.ok) throw apiError(res, `重新生成失败：${res.status}`)
   const data = (await res.json().catch(() => ({}))) as { incremental?: IncrementalParseStats }
   return data.incremental
 }
@@ -417,14 +441,13 @@ export async function fetchAgentNotes(): Promise<AgentNotesResponse | null> {
   }
 }
 
-/** 规则契约文本（接入指南预览用）；静态模式与失败均返回 null（视图隐藏复制/导出） */
+/**
+ * 规则契约文本（接入指南预览用）；静态模式返回 null。
+ * 失败抛 ApiError（含 409 无活动项目）——视图须区分两种原因给出不同文案，故不再吞错。
+ */
 export async function fetchAgentRules(): Promise<AgentRulesResult | null> {
   if (mode !== 'api') return null
-  try {
-    return await fetchJson<AgentRulesResult>('/api/agent-rules')
-  } catch {
-    return null
-  }
+  return fetchJson<AgentRulesResult>('/api/agent-rules')
 }
 
 /**

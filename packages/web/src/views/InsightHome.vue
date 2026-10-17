@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
+import { isNoActiveProjectError } from '../data/api'
 import { appState, ensureInsightAI, findFunctionEntry, regenerateInsightAI, repartitionInsight } from '../store/app'
 import { AI_PASS_LABELS, AI_PASS_ORDER, AI_STATUS_META } from '../utils/format'
 import { formatIncrementalSummary } from '../utils/incremental'
@@ -35,7 +36,10 @@ async function triggerAI(force: boolean): Promise<void> {
     else await ensureInsightAI()
     void historyRef.value?.reload()
   } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error))
+    // 409 由 store 的自愈流程负责提示（并会自行重载数据），这里不再叠一条无指向的错误
+    if (!isNoActiveProjectError(error)) {
+      message.error(error instanceof Error ? error.message : String(error))
+    }
   } finally {
     aiBusy.value = false
   }
@@ -58,7 +62,10 @@ async function handleRepartition(): Promise<void> {
       message.warning('AI 划分失败（可能输出超长），已回退目录划分；可重试或简化建议')
     }
   } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error))
+    // 409 走 store 的自愈提示；其余异常才在此报告（「可能输出超长」那条不该用来解释激活丢失）
+    if (!isNoActiveProjectError(error)) {
+      message.error(error instanceof Error ? error.message : String(error))
+    }
   } finally {
     partitionBusy.value = false
   }

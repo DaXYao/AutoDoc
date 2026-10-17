@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import type { AgentNoteType, AgentRulesResult, AgentSuggestion } from '@autodoc/shared-types'
 import type { SelectOption } from 'naive-ui'
-import { exportAgentRules, fetchAgentRules, getMode } from '../data/api'
+import { exportAgentRules, fetchAgentRules, getMode, isNoActiveProjectError } from '../data/api'
 import { appReady, appState, refreshAgentNotes } from '../store/app'
 import { adSelectLabel as vAdSelectLabel } from '../utils/a11y'
 import { formatDate } from '../utils/format'
@@ -33,6 +33,8 @@ const isStatic = computed(() => appReady.value && getMode() === 'static')
 /* ------------------------- 规则契约（接入指南） ------------------------- */
 
 const rules = ref<AgentRulesResult | null>(null)
+/** 规则契约不可用的原因：409（服务端无活动项目）与其他服务异常要分开表述，建议动作不同 */
+const rulesHint = ref<'no-active' | 'error' | null>(null)
 /** 规则文本预览默认收起（长文本不抢笔记列表的视觉主体） */
 const rulesExpanded = ref(false)
 const exporting = ref(false)
@@ -41,20 +43,43 @@ const scanning = ref(false)
 const copying = ref(false)
 
 async function loadRules(): Promise<void> {
-  rules.value = await fetchAgentRules()
+  try {
+    rules.value = await fetchAgentRules()
+    rulesHint.value = null
+  } catch (error) {
+    rules.value = null
+    rulesHint.value = isNoActiveProjectError(error) ? 'no-active' : 'error'
+  }
 }
+
+/**
+ * 规则契约不可用文案（措辞只在这里分叉，模板不堆三元）。
+ * 「重新扫描」对无活动项目无效（它不恢复激活），故该分支不给这个建议；
+ * 自动恢复在途由 store 的 activationRecovering 报「正在自动恢复」——恢复期间 id 不回收，
+ * 不能再靠 appState.loading 猜（那是 bootstrap/切项目的 spinner，与恢复无关）。
+ */
+const rulesUnavailableText = computed(() => {
+  if (rulesHint.value === 'no-active') {
+    return appState.activationRecovering
+      ? '规则契约暂不可用：本地服务已重启，正在自动恢复活动项目…'
+      : '规则契约暂不可用：本地服务当前没有活动项目（服务重启后不保留激活状态），请在顶栏「切换项目」重新选择。'
+  }
+  return '规则契约暂不可用（服务异常），可点「重新扫描」重试。'
+})
 
 /**
  * 首屏与切项目重拉规则契约：
  * - 门闩 appReady——bootstrap 落定前 getMode() 不可信（静态导出会误发 /api 请求）；
  * - 监听 activeProjectId——hub 无活动项目时 /api/agent-rules 409 → rules=null，
- *   之后用户激活项目 appReady 并不翻转（恒 true），须靠此信号变化自愈重拉。
- * fetchAgentRules 失败内部吞错返回 null，不会 unhandled rejection。
+ *   之后用户激活项目 appReady 并不翻转（恒 true），须靠此信号变化自愈重拉；
+ * - 监听 activationRecovering——409 自愈刻意不回收 activeProjectId（保持 id 不抖动），
+ *   恢复成功后该信号没有任何其他变化，规则契约只能靠它落定后重拉。
+ * fetchAgentRules 会抛（409 与其他异常要分流），loadRules 内部捕获，不产生 unhandled rejection。
  */
 watch(
-  [appReady, () => appState.activeProjectId],
-  ([ready]) => {
-    if (!ready || isStatic.value) return
+  [appReady, () => appState.activeProjectId, () => appState.activationRecovering],
+  ([ready, , recovering]) => {
+    if (!ready || isStatic.value || recovering) return
     void loadRules()
   },
   { immediate: true }
@@ -93,7 +118,12 @@ async function copyText(text: string): Promise<boolean> {
 
 async function handleCopyRules(): Promise<void> {
   if (!rules.value) {
-    message.warning('规则契约未就绪，可先「重新扫描」')
+    // 「重新扫描」对无活动项目无效（它不恢复激活），该分支复用已分流的文案指向顶栏「切换项目」
+    message.warning(
+      rulesHint.value === 'no-active'
+        ? rulesUnavailableText.value
+        : '规则契约未就绪，可先「重新扫描」'
+    )
     return
   }
   if (copying.value) return
@@ -141,6 +171,17 @@ const noteCount = computed(() => notesData.value?.notes.length ?? 0)
 const errorCount = computed(() => notesData.value?.errors.length ?? 0)
 const suggestionCount = computed(() => notesData.value?.suggestions.length ?? 0)
 const hasChannelData = computed(() => notesData.value !== null)
+
+/** 空态说明按真实原因分述：无活动项目与加载失败是两回事，混在一句里用户无从下手 */
+const notesUnavailableText = computed(() => {
+  if (isStatic.value) return '本次导出未嵌入笔记快照'
+  if (appState.activationRecovering) return '笔记数据未就绪：本地服务已重启，正在自动恢复活动项目…'
+  // 单项目模式（serve --root X）activeProjectId 恒 null 而数据正常，「无活动项目」判定必须带 hub 门
+  if (appState.hubEnabled && appState.activeProjectId === null) {
+    return '笔记数据未就绪：本地服务当前没有活动项目'
+  }
+  return '笔记数据未就绪（加载失败），可点「重新扫描」重试'
+})
 
 const errors = computed(() => notesData.value?.errors ?? [])
 const suggestions = computed(() => notesData.value?.suggestions ?? [])
@@ -252,9 +293,7 @@ async function handleCopySuggestion(suggestion: AgentSuggestion): Promise<void> 
           aria-label="规则契约文本预览"
         >{{ rules.rulesText }}</pre>
       </template>
-      <p v-else class="mt-2 text-xs text-[color:var(--ad-ink-3)]">
-        规则契约暂不可用（无活动项目或服务异常），可点「重新扫描」重试。
-      </p>
+      <p v-else class="mt-2 text-xs text-[color:var(--ad-ink-3)]">{{ rulesUnavailableText }}</p>
     </section>
 
     <!-- ============ 统计条 ============ -->
@@ -280,9 +319,7 @@ async function handleCopySuggestion(suggestion: AgentSuggestion): Promise<void> 
       >
         建议 <span class="font-semibold text-[color:var(--ad-ink)]">{{ suggestionCount }}</span>
       </span>
-      <span v-if="!hasChannelData" class="text-[color:var(--ad-ink-3)]">
-        {{ isStatic ? '本次导出未嵌入笔记快照' : '笔记数据未就绪（无活动项目或加载失败）' }}
-      </span>
+      <span v-if="!hasChannelData" class="text-[color:var(--ad-ink-3)]">{{ notesUnavailableText }}</span>
     </section>
 
     <!-- ============ 错误清单（有错才显示，不静默丢弃） ============ -->

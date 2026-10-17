@@ -2,23 +2,17 @@
 import { computed, h, onMounted } from 'vue'
 import type { VNodeChild } from 'vue'
 import { useRouter } from 'vue-router'
-import { createDiscreteApi } from 'naive-ui'
 import type { SelectOption } from 'naive-ui'
 import { getMode } from './data/api'
 import { appState, bootstrap, regenerateActive, switchProject } from './store/app'
 import { formatDate } from './utils/format'
 import { adSelectLabel as vAdSelectLabel } from './utils/a11y'
 import { formatIncrementalSummary } from './utils/incremental'
+import { toast } from './utils/toast'
 import { themeOverrides, adBtnInkOverrides, adBtnOutlineOverrides } from './theme'
 import SearchBar from './components/SearchBar.vue'
 
 const router = useRouter()
-
-// App.vue 自身渲染 n-message-provider（组件树在其上方），useMessage 注入不到；用离散 API 弹提示
-// 离散 API 不继承 config-provider，显式注入同一份主题覆写，保证 toast 与全站色板一致
-const { message } = createDiscreteApi(['message'], {
-  configProviderProps: { themeOverrides }
-})
 
 onMounted(async () => {
   await bootstrap()
@@ -73,9 +67,9 @@ async function handleRefresh(): Promise<void> {
     const incremental = await regenerateActive()
     // I3：成功提示追加增量摘要（若有），让用户确认「增量真生效」而非全量重跑
     const summary = formatIncrementalSummary(incremental)
-    message.success(summary ? `重新生成完成 · ${summary}` : '重新生成完成')
+    toast.success(summary ? `重新生成完成 · ${summary}` : '重新生成完成')
   } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error))
+    toast.error(error instanceof Error ? error.message : String(error))
   }
 }
 </script>

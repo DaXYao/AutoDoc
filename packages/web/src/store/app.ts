@@ -9,6 +9,7 @@ import type {
   InsightResponse,
   NewProjectInput,
   ProjectInfo,
+  ProjectsResponse,
   ServerMeta
 } from '@autodoc/shared-types'
 import {
@@ -25,11 +26,14 @@ import {
   getMode,
   initDataSource,
   isHubEnabled,
+  isNoActiveProjectError,
   refreshDocs,
   removeProject as apiRemoveProject,
   requestInsightAI,
-  requestInsightPartition
+  requestInsightPartition,
+  setNoActiveProjectHandler
 } from '../data/api'
+import { toast } from '../utils/toast'
 
 /** 全局应用状态：元信息、项目列表、文件列表、函数索引与按需加载的文件视图缓存 */
 export interface AppState {
@@ -40,6 +44,18 @@ export interface AppState {
   projects: ProjectInfo[]
   activeProjectId: string | null
   hubEnabled: boolean
+  /**
+   * 服务端确认没有活动项目、且自动恢复没成功或没有可恢复的记录（hub 模式本地服务重启后 activeId 不保留）。
+   * 视图据此把「无活动项目」与「服务异常」分开表述，而不是给一个对该状态无效的建议。
+   * 只在真正的空态迁移时置位（见 releaseActivation），恢复尝试期间恒为 false。
+   */
+  activationLost: boolean
+  /**
+   * 409 后的自动重激活正在尝试。恢复期间刻意保留 activeProjectId 与已展示数据
+   * （id 抖动会让视图误判成「切项目」，见 recoverLostActivation），视图靠本信号显示
+   * 「正在自动恢复…」，不借用全局 loading（那会抹掉并发中的 bootstrap/切项目 spinner）。
+   */
+  activationRecovering: boolean
   summaries: FileSummary[]
   functionIndex: FunctionIndexEntry[]
   /** 项目洞察/代码图谱（静态+可选AI）；I3：响应类型附带最近增量统计（parseStats/aiChunkStats） */
@@ -66,6 +82,8 @@ export const appState = reactive<AppState>({
   projects: [],
   activeProjectId: null,
   hubEnabled: false,
+  activationLost: false,
+  activationRecovering: false,
   summaries: [],
   functionIndex: [],
   insight: null,
@@ -95,6 +113,101 @@ export const appReady = computed(
  * 过期即丢弃。refreshAgentNotes/refreshInsight 等非代际推进的补拉用当前令牌自守卫。
  */
 let loadToken = 0
+
+/** 记住最后一次激活的项目 id：服务端 activeId 只在内存，重启即丢，前端留着它才能自愈 */
+const LAST_ACTIVE_KEY = 'autodoc.lastActiveProjectId'
+
+/** 本次「激活丢失」是否已公告过；重新拿到活动项目时复位（见 markActiveProject） */
+let activationLossAnnounced = false
+
+/** 仅 api + hub 模式下有「活动项目」概念；静态/单项目模式不碰 localStorage */
+function canPersistActiveProject(): boolean {
+  return getMode() === 'api' && appState.hubEnabled
+}
+
+// 隐私模式/配额满时 localStorage 读写会抛：自愈只是尽力而为，不能因此打断恢复流程
+function withActiveProjectStorage(action: (ls: Storage) => void): void {
+  if (!canPersistActiveProject()) return
+  try {
+    const ls = globalThis.localStorage
+    if (ls) action(ls)
+  } catch {
+    // 忽略
+  }
+}
+
+function rememberedProjectId(): string | null {
+  if (!canPersistActiveProject()) return null
+  try {
+    return globalThis.localStorage?.getItem(LAST_ACTIVE_KEY) ?? null
+  } catch {
+    return null
+  }
+}
+
+/** 登记服务回报的活动项目：写记录并复位「激活丢失」（id 为 null 表示无活动项目，保持原记录不动） */
+function markActiveProject(id: string | null): void {
+  if (id === null) return
+  appState.activationLost = false
+  activationLossAnnounced = false
+  withActiveProjectStorage((ls) => ls.setItem(LAST_ACTIVE_KEY, id))
+}
+
+/** 只清除该 id 的记录，避免覆盖并发切换写入的新记录 */
+function forgetActiveProject(id: string): void {
+  withActiveProjectStorage((ls) => {
+    if (ls.getItem(LAST_ACTIVE_KEY) === id) ls.removeItem(LAST_ACTIVE_KEY)
+  })
+}
+
+/**
+ * 清空「活动项目作用域」数据（bootstrap 无活动项目分支 / loadActiveDocs / removeProject / 409 回收共用）。
+ * 洞察、变更集与 Agent 笔记同属活动项目，不清会让「含变更」徽标、链路图谱与
+ * 「Agent 笔记」徽标残留上一个项目的数据。
+ */
+function clearActiveScopedState(): void {
+  appState.meta = null
+  appState.summaries = []
+  appState.functionIndex = []
+  appState.insight = null
+  appState.workspaceChangeset = null
+  appState.agentNotes = null
+}
+
+/**
+ * 收回活动项目作用域状态并进入「诚实空态」。id→null 是一次真实的项目切换，允许视图 watch 触发。
+ * warn 只在最终失败时公告一次：拿不到注册表这类静默回收不占用提示额度，
+ * 而后续每一次 409（同一状态）再弹同一条只是噪音。
+ */
+function releaseActivation(notify: 'quiet' | 'warn'): void {
+  appState.activeProjectId = null
+  appState.activationRecovering = false
+  appState.fileViews.clear()
+  clearActiveScopedState()
+  appState.activationLost = true
+  if (notify === 'warn' && !activationLossAnnounced) {
+    activationLossAnnounced = true
+    toast.warning('本地服务当前没有活动项目（重启后不保留），请在顶栏「切换项目」重新选择')
+  }
+}
+
+/** 项目列表确有差异才替换：同值也换成新数组会让 ProjectHub 等下游白重渲染一轮 */
+function isSameProjectList(a: ProjectInfo[], b: ProjectInfo[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((item, index) => {
+    const other = b[index]
+    return (
+      item.id === other.id &&
+      item.name === other.name &&
+      item.root === other.root &&
+      item.config === other.config &&
+      item.active === other.active &&
+      item.loaded === other.loaded &&
+      item.fileCount === other.fileCount &&
+      item.functionCount === other.functionCount
+    )
+  })
+}
 
 /** 拉取工作区变更集（C3 徽标数据源）；失败静默置 null，避免给 bootstrap/reloadAll 添错误噪声 */
 async function loadWorkspaceChangeset(token: number): Promise<void> {
@@ -127,12 +240,7 @@ async function loadActiveDocs(): Promise<void> {
   // 代际推进：此后任何更晚的 loadActiveDocs 进入都会使本次在途响应过期（写回前逐梯队校验）
   const token = ++loadToken
   if (appState.activeProjectId === null && appState.hubEnabled) {
-    appState.meta = null
-    appState.summaries = []
-    appState.functionIndex = []
-    appState.insight = null
-    appState.workspaceChangeset = null
-    appState.agentNotes = null
+    clearActiveScopedState()
     return
   }
   const [meta, summaries, index] = await Promise.all([
@@ -194,12 +302,17 @@ export async function bootstrap(): Promise<void> {
   appState.loading = true
   appState.error = null
   try {
+    if (!noActiveHandlerRegistered) {
+      noActiveHandlerRegistered = true
+      setNoActiveProjectHandler(onNoActiveProject)
+    }
     await initDataSource()
     appState.hubEnabled = isHubEnabled()
     if (appState.hubEnabled) {
       const resp = await fetchProjects()
       appState.projects = resp?.projects ?? []
       appState.activeProjectId = resp?.activeId ?? null
+      markActiveProject(appState.activeProjectId)
     } else {
       appState.projects = []
       appState.activeProjectId = null
@@ -208,17 +321,131 @@ export async function bootstrap(): Promise<void> {
     if (getMode() === 'static' || appState.activeProjectId !== null || !appState.hubEnabled) {
       await loadActiveDocs()
     } else {
-      appState.meta = null
-      appState.summaries = []
-      appState.functionIndex = []
-      appState.insight = null
-      appState.workspaceChangeset = null
-      appState.agentNotes = null
+      clearActiveScopedState()
     }
   } catch (error) {
     appState.error = error instanceof Error ? error.message : String(error)
   } finally {
     appState.loading = false
+  }
+}
+
+/**
+ * 409 观察者只在 bootstrap 里注册一次；setNoActiveProjectHandler 是覆盖式，
+ * 但重复注册会让 reloadAll 每次都换个闭包，没必要。
+ */
+let noActiveHandlerRegistered = false
+/** 单飞：loadActiveDocs 走 Promise.all，服务重启一次会同时炸出多个 409，只允许一个恢复流程在途 */
+let recoveryInFlight: Promise<void> | null = null
+/**
+ * 自动激活失败过的 id：本会话不再对它自动重试（防的是「服务起着但该项目激活必失败」时
+ * 每次 409 都重发一次重激活）。成功恢复不记账——下一次服务重启是新的一次丢失，仍要自愈。
+ */
+const autoRecoveryGaveUp = new Set<string>()
+
+function onNoActiveProject(): void {
+  if (recoveryInFlight) return
+  recoveryInFlight = recoverLostActivation()
+    .catch(() => releaseActivation('quiet'))
+    .finally(() => {
+      recoveryInFlight = null
+    })
+}
+
+/**
+ * 以服务端回报为准做对账：409 预检（服务端确有活动项目）与恢复成功后的列表刷新共用一条逻辑，
+ * 与 switchProject 同口径采纳服务端 activeId。双页签场景下另一页签可能已切走活动项目，
+ * 本页面若只看见「服务端非 null」就直接 return，会永久停在旧项目的失效数据上。
+ */
+async function adoptServerActiveProject(resp: ProjectsResponse): Promise<void> {
+  if (resp.activeId) markActiveProject(resp.activeId)
+  if (!isSameProjectList(appState.projects, resp.projects)) appState.projects = resp.projects
+  if (resp.activeId === null || resp.activeId === appState.activeProjectId) return
+  appState.activeProjectId = resp.activeId
+  // 真实的项目切换：文档数据属于活动项目，不重拉会把旧项目的清单挂在新项目名下
+  await loadActiveDocs()
+}
+
+/**
+ * 恢复失败的两种真相必须分开表述：
+ * - 激活这一步没成、或激活后又 409 → 服务端确实没有活动项目，进诚实空态；
+ * - 激活成功后拉数据才失败 → 服务端确有活动项目，保住 id 与在展示的数据只报真实错误，
+ *   否则会留下「顶栏选择器空、列表仍标 active、文案说没有活动项目」的自相矛盾画面。
+ */
+function handleRecoveryFailure(error: unknown, activated: boolean): void {
+  if (activated && !isNoActiveProjectError(error)) {
+    toast.error(error instanceof Error ? error.message : String(error))
+    return
+  }
+  releaseActivation('warn')
+}
+
+/**
+ * 任何接口 409 = 服务端当前没有活动项目（hub 的 activeId 只在内存，重启即丢）。
+ * 先用记住的项目尝试一次自动重激活，不可用/失败再退回诚实空态让用户手动切换。
+ * 全程吞异常，且绝不写 appState.error：无活动项目是 hub 的正常可达状态，
+ * 而 error 会把 FileList / ProjectHub 切成整屏错误态（见 appReady 的第二个条件）。
+ * 恢复在途期间刻意保留 activeProjectId 与已展示数据，只置 activationRecovering：
+ * 先把 id 收成 null 再置回会被视图当成「切了两次项目」（ImpactView 复位自动重生横幅并
+ * 重跑全量增量、GraphView 重挂载顶掉图/树开关），失败态才做真正的 id→null 迁移。
+ */
+async function recoverLostActivation(): Promise<void> {
+  // 静态/单项目模式没有「活动项目」概念：无从恢复，更不该清掉正在展示的文档数据
+  if (getMode() !== 'api' || !appState.hubEnabled) return
+  const id = rememberedProjectId()
+  if (!id) {
+    releaseActivation('quiet')
+    return
+  }
+  let resp: ProjectsResponse | null = null
+  try {
+    resp = await fetchProjects()
+  } catch {
+    resp = null
+  }
+  // 连注册表都读不到（服务挂了）：安静回收，但保留记录，等服务回来后的下一次 409 再试
+  if (resp === null) {
+    releaseActivation('quiet')
+    return
+  }
+  // 注册表里确有活动项目 → 这次 409 与激活无关（如 /api/ask 的「未配置 AI」）：只做对账
+  if (resp.activeId !== null) {
+    try {
+      await adoptServerActiveProject(resp)
+    } catch (error) {
+      handleRecoveryFailure(error, true)
+    }
+    return
+  }
+  const project = resp.projects.find((p) => p.id === id)
+  if (!project) {
+    forgetActiveProject(id)
+    releaseActivation('warn')
+    return
+  }
+  if (autoRecoveryGaveUp.has(id)) {
+    releaseActivation('warn')
+    return
+  }
+  appState.activationRecovering = true
+  toast.info(`本地服务已重启，正在自动恢复项目「${project.name}」…`)
+  let activated = false
+  try {
+    await activateProject(id)
+    activated = true
+    appState.activeProjectId = id
+    markActiveProject(id)
+    for (const p of appState.projects) p.active = p.id === id
+    await loadActiveDocs()
+    // 与 switchProject 同口径：激活后项目的 loaded/计数已变化，刷新一次列表并采用服务端回报的 activeId
+    const refreshed = await fetchProjects()
+    if (refreshed) await adoptServerActiveProject(refreshed)
+    toast.success(`已自动恢复项目「${project.name}」`)
+  } catch (error) {
+    if (!activated) autoRecoveryGaveUp.add(id)
+    handleRecoveryFailure(error, activated)
+  } finally {
+    appState.activationRecovering = false
   }
 }
 
@@ -236,6 +463,7 @@ export async function switchProject(id: string): Promise<void> {
     await activateProject(id)
     appState.fileViews.clear()
     appState.activeProjectId = id
+    markActiveProject(id)
     for (const p of appState.projects) p.active = p.id === id
     await loadActiveDocs()
     // 激活后项目的 loaded/计数已变化，刷新一次列表
@@ -243,7 +471,10 @@ export async function switchProject(id: string): Promise<void> {
     if (resp) {
       appState.projects = resp.projects
       appState.activeProjectId = resp.activeId
+      markActiveProject(resp.activeId)
     }
+    // 用户手动切换成功 = 该项目的激活通路可用：解除「自动重试放弃」记账
+    autoRecoveryGaveUp.clear()
   } catch (error) {
     appState.error = error instanceof Error ? error.message : String(error)
     throw error
@@ -263,6 +494,7 @@ export async function addProject(input: NewProjectInput): Promise<ProjectInfo> {
     if (resp) {
       appState.projects = resp.projects
       appState.activeProjectId = resp.activeId
+      markActiveProject(resp.activeId)
     }
     await loadActiveDocs()
     return info
@@ -282,19 +514,11 @@ export async function removeProject(id: string): Promise<void> {
   if (resp) {
     appState.projects = resp.projects
     appState.activeProjectId = resp.activeId
+    if (resp.activeId) markActiveProject(resp.activeId)
+    else forgetActiveProject(id)
   }
-  if (appState.activeProjectId === null) {
-    appState.meta = null
-    appState.summaries = []
-    appState.functionIndex = []
-    // 与 bootstrap 无活动项目分支口径一致：洞察、变更集与 Agent 笔记同属活动项目，
-    // 不清会让「含变更」徽标、链路图谱与「Agent 笔记」徽标残留已移除项目的数据
-    appState.insight = null
-    appState.workspaceChangeset = null
-    appState.agentNotes = null
-  } else {
-    await loadActiveDocs()
-  }
+  if (appState.activeProjectId === null) clearActiveScopedState()
+  else await loadActiveDocs()
 }
 
 /** 重新生成当前活动项目文档；I3：返回本次解析层增量统计供成功提示展示 */

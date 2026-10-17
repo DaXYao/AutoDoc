@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import type { FileDocView, FunctionCategory, FunctionDocView } from '@autodoc/shared-types'
+import { isNoActiveProjectError } from '../data/api'
 import { getFileView, invalidateFileView, appState } from '../store/app'
 import { expand, expandDefault, isExpanded, toggle } from '../store/expand'
 import { jumpHighlightId } from '../store/jump'
@@ -13,7 +14,19 @@ const route = useRoute()
 
 const fileId = computed(() => decodeURIComponent(route.params.fileId as string))
 const view = ref<FileDocView | null>(null)
-const error = ref<string | null>(null)
+const loadError = ref<string | null>(null)
+/** 上一次失败是 409：等 store 的自动重激活落定（或用户手动切换项目）后自动重试一次 */
+const pendingRecoveryRetry = ref(false)
+
+/** 409 的措辞要跟着 store 走：钩子是同步触发的，catch 当下 activationRecovering 常常还没置位 */
+const error = computed(() =>
+  pendingRecoveryRetry.value
+    ? appState.activationRecovering
+      ? '本地服务已重启，正在自动恢复活动项目，恢复后自动重试…'
+      : '本地服务当前没有活动项目，请在顶栏「切换项目」重新选择'
+    : loadError.value
+)
+const errorKind = computed(() => (pendingRecoveryRetry.value ? 'warning' : 'error'))
 
 /**
  * 跳转定位（?fn=<fnId>）：目标函数所在三分类区块默认折叠时 `#fn-` 锚点根本未渲染，
@@ -59,16 +72,31 @@ async function load(force = false): Promise<void> {
   } else {
     view.value = null
   }
-  error.value = null
+  loadError.value = null
+  pendingRecoveryRetry.value = false
   try {
     view.value = await getFileView(fileId.value)
     // force=批注增删改后的数据刷新，不重新定位/高亮（避免用户操作时页面跳动）
     const target = route.query.fn
     if (!force && typeof target === 'string') await locateFn(target)
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    if (isNoActiveProjectError(e)) {
+      pendingRecoveryRetry.value = true
+      return
+    }
+    loadError.value = e instanceof Error ? e.message : String(e)
   }
 }
+
+/** 409 只是服务重启后的瞬时态（store 正在自动重激活），不能当终态错误挂着不重试 */
+watch(
+  [() => appState.activationRecovering, () => appState.activeProjectId],
+  ([recovering, id], [wasRecovering, wasId]) => {
+    if (!pendingRecoveryRetry.value) return
+    if (wasRecovering && !recovering) void load()
+    else if (id !== wasId) void load()
+  }
+)
 
 watch(fileId, () => void load(), { immediate: true })
 
@@ -101,7 +129,7 @@ const sourceHref = computed(() =>
 <template>
   <div>
     <n-spin v-if="!view && !error" />
-    <n-alert v-else-if="error" type="error" :title="error" />
+    <n-alert v-else-if="error" :type="errorKind" :title="error" />
     <template v-else-if="view">
       <!-- 文件头：路径、语言、文件级批注入口（可折叠，默认策略可配置） -->
       <section class="mb-4">
