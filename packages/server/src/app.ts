@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse } from '@autodoc/shared-types'
+import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AgentNotesResponse, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse } from '@autodoc/shared-types'
 import { inspectParseCache, resolveShowRecent } from '@autodoc/core'
 import { regenerate, type DocService } from './context.js'
 import { pickFolder } from './pickFolder.js'
@@ -17,6 +17,7 @@ import {
   listImpactCommits
 } from './impact.js'
 import { AskInputError, askCallStep, askFunction } from './ask.js'
+import { exportAgentRules, generateRulesText, loadAgentNotes, suggestTasks } from './agentNotes.js'
 import { getDeepSeekConfig } from './env.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
 
@@ -447,6 +448,44 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       const message = error instanceof Error ? error.message : String(error)
       if (error instanceof AskInputError) return reply.code(400).send({ error: message })
       return reply.code(500).send({ error: `追问失败：${message}` })
+    }
+  })
+
+  /* ------------------------- Agent 笔记通道（E1） ------------------------- */
+
+  // 笔记加载 + 校验 + 建议任务（纯读，不受 readOnly 拦截）；脏文件走 errors 下发，不 4xx
+  app.get('/api/agent-notes', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const { insight, graph } = loadInsight(service)
+    const notesResult = loadAgentNotes(service.rootDir, graph, insight)
+    const suggestions = suggestTasks(graph, insight, notesResult)
+    const body: AgentNotesResponse = { ...notesResult, suggestions }
+    return body
+  })
+
+  // 规则契约文本：每次现生成，保证「目标索引」与当前图谱一致（纯读）；bundle 复用，不重复 loadInsight
+  app.get('/api/agent-rules', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const bundle = loadInsight(service)
+    const notesResult = loadAgentNotes(service.rootDir, bundle.graph, bundle.insight)
+    const suggestions = suggestTasks(bundle.graph, bundle.insight, notesResult)
+    return generateRulesText(bundle, notesResult, suggestions)
+  })
+
+  // 把契约写进目标仓 `.autodoc/AGENT_RULES.md` 供 Agent 直接读取。
+  // 该文件是 AutoDoc 纯生成物（只读展示用），覆盖自身无需备份；`.autodoc/agent/` 笔记永不写回。
+  app.post('/api/agent-rules/export', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    try {
+      return exportAgentRules(service)
+    } catch (error) {
+      // 写盘失败（.autodoc 被占为普通文件、权限等文件系统异常）：统一 { error } 形态 500
+      const message = error instanceof Error ? error.message : String(error)
+      return reply.code(500).send({ error: `导出失败：${message}` })
     }
   })
 
