@@ -37,6 +37,8 @@ const rules = ref<AgentRulesResult | null>(null)
 const rulesExpanded = ref(false)
 const exporting = ref(false)
 const scanning = ref(false)
+// 复制走异步剪贴板 API，可能有权限确认延迟：单独置位供按钮 aria-busy（读屏反馈）
+const copying = ref(false)
 
 async function loadRules(): Promise<void> {
   rules.value = await fetchAgentRules()
@@ -94,9 +96,15 @@ async function handleCopyRules(): Promise<void> {
     message.warning('规则契约未就绪，可先「重新扫描」')
     return
   }
-  const ok = await copyText(rules.value.rulesText)
-  if (ok) message.success('规则已复制，粘贴给 Agent 并要求它把笔记写入 .autodoc/agent/')
-  else message.error('复制失败：请展开规则文本手动选择复制')
+  if (copying.value) return
+  copying.value = true
+  try {
+    const ok = await copyText(rules.value.rulesText)
+    if (ok) message.success('规则已复制，粘贴给 Agent 并要求它把笔记写入 .autodoc/agent/')
+    else message.error('复制失败：请展开规则文本手动选择复制')
+  } finally {
+    copying.value = false
+  }
 }
 
 async function handleExportRules(): Promise<void> {
@@ -157,11 +165,17 @@ const visibleNotes = computed(() =>
 )
 
 async function handleCopySuggestion(suggestion: AgentSuggestion): Promise<void> {
-  const ok = await copyText(
-    `${SUGGESTION_KIND_LABELS[suggestion.kind]}：${suggestion.label}（目标 ${suggestion.targetId}）`
-  )
-  if (ok) message.success('已复制该条建议，可粘贴给 Agent 认领')
-  else message.error('复制失败，请手动选中文字')
+  if (copying.value) return
+  copying.value = true
+  try {
+    const ok = await copyText(
+      `${SUGGESTION_KIND_LABELS[suggestion.kind]}：${suggestion.label}（目标 ${suggestion.targetId}）`
+    )
+    if (ok) message.success('已复制该条建议，可粘贴给 Agent 认领')
+    else message.error('复制失败，请手动选择文本')
+  } finally {
+    copying.value = false
+  }
 }
 </script>
 
@@ -186,6 +200,7 @@ async function handleCopySuggestion(suggestion: AgentSuggestion): Promise<void> 
             class="ad-btn-outline"
             :theme-overrides="adBtnOutlineOverrides"
             :loading="scanning"
+            :aria-busy="scanning"
             aria-label="重新扫描 Agent 笔记目录"
             @click="handleRescan"
           >
@@ -196,6 +211,7 @@ async function handleCopySuggestion(suggestion: AgentSuggestion): Promise<void> 
             size="small"
             class="ad-btn-outline"
             :theme-overrides="adBtnOutlineOverrides"
+            :aria-busy="copying"
             aria-label="复制 Agent 接入规则文本"
             @click="handleCopyRules"
           >
@@ -207,6 +223,7 @@ async function handleCopySuggestion(suggestion: AgentSuggestion): Promise<void> 
             class="ad-btn-ink"
             :theme-overrides="adBtnInkOverrides"
             :loading="exporting"
+            :aria-busy="exporting"
             aria-label="导出规则契约到 .autodoc/AGENT_RULES.md"
             @click="handleExportRules"
           >
@@ -251,7 +268,7 @@ async function handleCopySuggestion(suggestion: AgentSuggestion): Promise<void> 
         class="rounded-[length:var(--ad-radius-sm)] border px-2 py-1"
         :class="
           errorCount > 0
-            ? 'border-red-200 bg-red-50/60 text-red-700'
+            ? 'border-[color:var(--ad-danger-ink)]/25 bg-[color:var(--ad-danger-soft)] text-[color:var(--ad-danger-ink)]'
             : 'border-[color:var(--ad-line)] bg-[color:var(--ad-surface)] text-[color:var(--ad-ink-2)]'
         "
         :aria-label="errorCount > 0 ? `${errorCount} 条校验错误` : '无校验错误'"
@@ -270,7 +287,7 @@ async function handleCopySuggestion(suggestion: AgentSuggestion): Promise<void> 
 
     <!-- ============ 错误清单（有错才显示，不静默丢弃） ============ -->
     <section v-if="errors.length > 0" class="ad-card mb-4 px-4 py-3" role="status">
-      <h3 class="text-sm font-semibold text-red-700 mb-2">校验错误（{{ errors.length }}）</h3>
+      <h3 class="text-sm font-semibold text-[color:var(--ad-danger-ink)] mb-2">校验错误（{{ errors.length }}）</h3>
       <p class="text-xs text-[color:var(--ad-ink-3)] mb-2">
         以下笔记文件不符合契约，未被加载；修正后可「重新扫描」。
       </p>
@@ -310,7 +327,12 @@ async function handleCopySuggestion(suggestion: AgentSuggestion): Promise<void> 
           :key="`${suggestion.kind}-${suggestion.targetId}-${i}`"
           class="flex flex-wrap items-center gap-2 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-2.5 py-1.5 text-xs"
         >
-          <n-tag size="tiny" :bordered="false" type="info">
+          <!-- 徽标套 AA 令牌皮肤（与笔记类型徽标同形状），canvas 底默认 info 仅 4.28:1 -->
+          <n-tag
+            size="tiny"
+            :bordered="true"
+            :color="{ color: 'var(--ad-accent-soft)', textColor: 'var(--ad-accent-ink)', borderColor: 'var(--ad-line)' }"
+          >
             {{ SUGGESTION_KIND_LABELS[suggestion.kind] }}
           </n-tag>
           <span class="min-w-0 flex-1 text-[color:var(--ad-ink-2)]">{{ suggestion.label }}</span>

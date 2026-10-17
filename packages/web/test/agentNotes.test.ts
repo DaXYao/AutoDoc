@@ -1,6 +1,8 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { AgentNote, AgentNoteTargetKind, AgentNoteType } from '@autodoc/shared-types'
 import {
+  AGENT_NOTE_TAG_TOKEN_COLORS,
   AGENT_NOTE_TYPES,
   filterNotesByTypes,
   notesForTarget,
@@ -92,5 +94,27 @@ describe('notesForTarget：内联呼应回查', () => {
 
   it('空输入不抛错', () => {
     expect(notesForTarget([], 'function', 'x')).toEqual([])
+  })
+})
+
+describe('AGENT_NOTE_TAG_TOKEN_COLORS：徽标显式令牌皮肤（E3 对比度合规）', () => {
+  it('覆盖面钉死：faq 走主题默认（5.86 达标），其余四类必须全部有令牌皮肤', () => {
+    expect(Object.keys(AGENT_NOTE_TAG_TOKEN_COLORS).sort()).toEqual([
+      'chain-note',
+      'decision',
+      'overview',
+      'pitfall'
+    ])
+  })
+
+  it('面色/文字色/描边必须引用 --ad-* 设计令牌且令牌真实存在于 style.css（禁私造 hex、防手滑假名）', () => {
+    const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf-8')
+    for (const skin of Object.values(AGENT_NOTE_TAG_TOKEN_COLORS)) {
+      for (const v of [skin!.color, skin!.textColor, skin!.borderColor]) {
+        expect(v).toMatch(/^var\(--ad-[a-z0-9-]+\)$/)
+        // 'var(--ad-x)' → '--ad-x'，声明处形如 '--ad-x: #hex'
+        expect(css).toContain(`${v!.slice(4, -1)}:`)
+      }
+    }
   })
 })

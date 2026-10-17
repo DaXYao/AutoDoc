@@ -29,6 +29,23 @@ export const AGENT_NOTE_TYPE_COLORS: Record<AgentNoteType, TagType> = {
   'chain-note': 'primary'
 }
 
+/**
+ * E3 对比度合规：naive 类型徽标默认为「状态色文字 + 状态色 12% 面色」，面色透明，
+ * 与所在卡片（surface/canvas 两种底）混合后 12px 小字实测约 2.8~4.3:1（随底浮动），不达 AA 4.5:1。
+ * n-tag 公开 `color` prop（{ color, textColor }）优先级高于主题派生值，用显式令牌浅底+深墨
+ * 让对比度与背景无关。decision 面色取 surface 而非 success-soft：ink/soft 组合仅 4.44 不达标，
+ * ink/surface 为 4.95；配 borderColor 描边保住「贴纸感」。pitfall 用 warning-soft 面 + ink-2 墨
+ * （5.54 达 AA；warning 族 pressed #A87122 作文字仅 4.16，故墨色取中性 ink-2 而非族内深墨）。
+ */
+export const AGENT_NOTE_TAG_TOKEN_COLORS: Partial<
+  Record<AgentNoteType, { color: string; textColor: string; borderColor: string }>
+> = {
+  overview: { color: 'var(--ad-accent-soft)', textColor: 'var(--ad-accent-ink)', borderColor: 'var(--ad-line)' },
+  decision: { color: 'var(--ad-surface)', textColor: 'var(--ad-success-ink)', borderColor: 'var(--ad-line)' },
+  pitfall: { color: 'var(--ad-warning-soft)', textColor: 'var(--ad-ink-2)', borderColor: 'var(--ad-line)' },
+  'chain-note': { color: 'var(--ad-accent-soft)', textColor: 'var(--ad-accent-ink)', borderColor: 'var(--ad-line)' }
+}
+
 /** 筛选下拉的类型顺序（与徽标标签同源，禁止各处再写一份字面量数组） */
 export const AGENT_NOTE_TYPES: AgentNoteType[] = [
   'overview',

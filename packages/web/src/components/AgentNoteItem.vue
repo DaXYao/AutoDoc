@@ -7,6 +7,7 @@ import { fnJumpQuery } from '../utils/nav'
 import { formatDate } from '../utils/format'
 import { renderMarkdown } from '../utils/markdown'
 import {
+  AGENT_NOTE_TAG_TOKEN_COLORS,
   AGENT_NOTE_TYPE_COLORS,
   AGENT_NOTE_TYPE_LABELS,
   AGENT_TARGET_KIND_LABELS
@@ -78,7 +79,12 @@ function goTarget(): void {
     class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-3 py-2"
   >
     <div class="flex flex-wrap items-center gap-2 text-xs text-[color:var(--ad-ink-2)]">
-      <n-tag size="tiny" :bordered="false" :type="AGENT_NOTE_TYPE_COLORS[note.type]">
+      <n-tag
+        size="tiny"
+        :bordered="true"
+        :type="AGENT_NOTE_TYPE_COLORS[note.type]"
+        :color="AGENT_NOTE_TAG_TOKEN_COLORS[note.type]"
+      >
         {{ AGENT_NOTE_TYPE_LABELS[note.type] }}
       </n-tag>
       <span class="font-medium text-[color:var(--ad-ink)]">{{ note.title }}</span>

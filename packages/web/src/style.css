@@ -20,6 +20,14 @@
   /* accent 作文字/图标色时用此加深版（白底≈5.5:1）；#4C6FFF 仅保留于填充/边框/图形 */
   --ad-accent-ink: #3B5BE6;
   --ad-accent-soft: #EEF2FF;
+  /* 语义状态令牌：与 theme.ts naive 主题同源（danger=error pressed/suppl、success=success pressed/suppl）。
+     ink 供白/米白底文字（≥4.5:1 AA），soft 供浅底面色 */
+  --ad-danger-ink: #B23A41;
+  --ad-danger-soft: #FBECEC;
+  --ad-success-ink: #2F7E57;
+  /* success-soft 仅作面色装饰：与 success-ink 组合 4.44 不达 AA，文字墨色须配 surface */
+  --ad-success-soft: #EBF5F0;
+  --ad-warning-soft: #FAF3E8; /* = theme.ts warningColorSuppl，pitfall 徽标面 */
   --ad-radius: 10px;
   --ad-radius-sm: 6px;
   --ad-shadow: 0 1px 2px rgba(31, 35, 41, .04);
