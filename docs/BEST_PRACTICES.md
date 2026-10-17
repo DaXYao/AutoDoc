@@ -29,11 +29,22 @@
 - [ ] **图可视化基座范式**：纯函数图模型构建器（三 scope+聚合上限+豁免组）+ 布局 runner（库真实 API 查证+降级标记+指纹缓存 LRU）+ 配置播种规避 patch 兜底 + 自绘 SVG/独立 HTML 双导出；入口按需挂载、computed 记忆化模型（见 2026-10-16 条）。
 - [ ] **变更影响分析范式**：变更集 API（工作区批次=batchDate 同批语义 / 单提交 / 范围闭区间并集）+ 纯前端传播计算（受影响链路=chain.path∩变更集、上游 BFS 最小深度、下游直接 callee）+ 叠加图三色优先级 + 打开视图自动增量重生（探测端点只读哈希、会话内 stale 降级防循环）（见 2026-10-17 条）。
 - [ ] **naive-ui 视觉地基四件套**：:root 令牌唯一色源 + theme.ts GlobalThemeOverrides 单入口（色族带全 hover/pressed/suppl）+ 个别控件皮肤走 per-instance :theme-overrides（避开 inline 主题变量）+ 原生容器/普通 wrapper div 承接布局与响应类（避开 cssr 无层赢 layered）（见 2026-10-17 条）。
-- [ ] （后续不断补充……）
+- [ ] **免 API Key 的 Agent 笔记通道**：文件契约协议（规则文本动态生成：schema+目标索引+示例+建议任务清单；一笔记一文件严格校验+错误清单；第三数据源与批注/自动生成三分离；静态导出嵌入）（见 2026-10-17 条）。
 
 ---
 
 ## 成功经验条目
+
+### 2026-10-17 · 免 API Key 的 Agent 笔记通道：文件契约协议 + 动态规则生成 + 严格校验错误清单
+- **场景**：用户已有订阅制 Agent（Codex/Qoder CN/ChatGPT）积累大量上下文，但订阅 Key 不能外供；AutoDoc 想把这些「代打」的洞察收进产品展示。
+- **做法**：
+  1. **文件契约而非 MCP**：约定 `.autodoc/agent/NNN-slug.json` 一笔记一文件（多 Agent 并发不互踩、git 可版本化、ChatGPT 粘贴也能产出）；MCP server 可日后在同一写入 API 上包一层；
+  2. **规则文本动态生成**：schema 字段表 + 写入协议 + 两个真实 id 示例 + **目标索引**（按模块分组、核心函数≤15/文件≤30 截断）+「引用 ID 必须逐字来自本索引，不得编造」+ **建议任务清单**（图谱推导：核心函数缺 overview、模块缺 decision，≤20）——Agent 照表引用不编造 ID，用户复制即接入；
+  3. **严格校验+错误清单**：必填/枚举/UTF-8 字节上限/读前文件体积闸口/文件名白名单/回显截断防注入长文；不合规逐条展示 file+reason 不静默丢；脏 id 保留笔记标「未关联」；笔记=第三数据源，与批注/自动生成内容三分离（AGENTS 纪律），全 sanitize 渲染、只读白名单、永不执行；
+  4. **展示三层**：独立视图（指南卡/统计/错误/建议/筛选列表）+ 函数卡与模块详情内联分区 + 洞察徽标；静态导出嵌入笔记。
+- **收益**：零 Key 打通「订阅 Agent → 产品数据」通道；规则即文档，Agent 侧无需任何集成成本；错误清单让格式漂移可见可修。
+- **适用条件**任何想把「外部 LLM 产出」收进本地工具展示的场景；契约必须配「目标索引注入」否则 Agent 必编造 ID；校验必须产错误清单否则漂移被静默吞。
+- **关联**：packages/server/src/agentNotes.ts、web/src/views/AgentNotesView.vue、utils/agentNotes.ts；commits ce348ba、201f6c2、6ff6d58。
 
 ### 2026-10-17 · naive-ui 项目视觉地基四件套：令牌 :root + theme.ts 单入口 + per-instance 覆写 + 原生容器避 cssr
 - **场景**：naive-ui + Tailwind v4 混合前端要整体换设计语言（米白暖极简）并重构顶栏；naive 控件与手写样式必须同色板，且不能靠 !important 硬压。

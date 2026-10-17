@@ -23,6 +23,7 @@
 - [ ] 浏览器实机复验前端改动必须 ignoreCache 强制重载文档：哈希跳转不重载 SPA，验的会是旧 bundle 并得出错误结论（高亮/默认折叠等「看似没生效」）。
 - [ ] 给「切 X」watch 加 bootstrap 早退（oldId===null return）时，先确认首屏触发路径是否正挂在该 watch 上——否则修好一个竞态又静默丢掉首屏触发（C3 横幅复位→自动重生不触发，两轮实机才定位）。
 - [ ] naive-ui n-select 的 :input-props aria-label 在非 filterable 分支被静默丢弃（该分支不渲染 input）；可访问名须写到真正可聚焦的 .n-base-selection-label（指令 v-ad-select-label）。
+- [ ] naive n-select 选项协议是 `{label,value}`（valueField='value'，无 key 回退）；照 n-dropdown 的 `{label,key}` 写会静默失效（点击回调收到 undefined），typecheck 也抓不到（value 可选）。
 - [ ] naive-ui 换肤禁止用类覆写 --n-* 变量：主题变量是元素 inline style，且按钮边框画在子 .n-button__border/__state-border 节点；个别皮肤走 per-instance :theme-overrides（见 2026-10-17 D1 条）。
 - [ ] Tailwind v4 工具类在 @layer 内、naive cssr 无层必赢：响应式/display 类直接挂 naive 组件根节点可能无效，包一层普通 div 再挂（见 2026-10-17 D1 条）。
 - [ ] 单行 flex 工具栏：弹性输入项（flex-1/basis 0）必须给 min-width，文字统计项必须 nowrap+ellipsis+min-w-0；否则窄屏输入框压成「空白盒」、中文文字压成竖排（见 2026-10-17 D1 条）。
@@ -31,6 +32,14 @@
 ---
 
 ## 教训条目
+
+### 2026-10-17 · n-select 选项写成 dropdown 的 {label,key}：静默失效且 typecheck 抓不到，D1 起顶栏项目切换即坏
+- **场景**：D1 顶栏把项目切换从 n-dropdown 改成 n-select，选项数组沿用 `{label,key}`；E2 类型筛选下拉照抄同款写法。
+- **现象**：点击选项回调收到 undefined、筛选恒不生效；TS 不报错（SelectBaseOption.value 为可选字段）。
+- **根因**：naive Select 全程读 `option[valueField]`（默认 'value'），无 key 回退；dropdown 与 select 的选项协议不同，换型时未同步。
+- **正确做法**：n-select 一律 `{label,value}`；组件换型必须核对选项协议（读 naive 源码/文档），不能只换标签名。
+- **预防措施**：已加入避坑清单；E2 初审抓出并连带修复顶栏，实机复验筛选/切换均恢复。
+- **关联**：AgentNotesView.vue、App.vue projectOptions；commit 201f6c2。
 
 ### 2026-10-17 · D1 视觉地基三连坑：naive inline 主题变量 / 子节点边框 / layered 输给无层
 - **场景**：顶栏两枚按钮要定制「墨黑底白字」「白底发丝描边」皮肤，按惯例写 `.ad-btn-ink { --n-color: … }` 类覆写；同时给 n-auto-complete 根节点挂 tailwind `hidden lg:block`。
