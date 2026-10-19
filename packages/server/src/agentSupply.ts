@@ -154,7 +154,7 @@ const FILE_NAME_RE = /^([A-Za-z][A-Za-z0-9]{0,31})\.([A-Za-z0-9._-]{1,64})\.json
 
 /**
  * 读前体积闸口：整份 pass 的 map 体量远大于人读笔记（实测本仓 narratives≈53KB、coreJudgment≈9KB/项目，
- * 大仓的 blocks 可到数百 KB），故取 1MB 而非笔记通道的 256KB；超限不进内存直接判错。
+ * 大仓的 blocks 可到数百 KB），故取 1MB；超限不进内存直接判错。
  */
 const SUPPLY_FILE_MAX_BYTES = 1024 * 1024
 /** 单条目 JSON 体积上限：防单条失控产出撑爆合并与界面 */
@@ -184,7 +184,7 @@ const MAX_STEPS_PER_FUNCTION = 80
 const STEP_KINDS: InternalStep['kind'][] = ['step', 'banner', 'todo', 'deadcode']
 const CATEGORIES: Category[] = ['business', 'implementation', 'utility']
 
-/** 索引规模控制：每模块核心函数 / 文件上限沿用笔记通道口径 */
+/** 索引规模控制：每模块核心函数 / 文件上限（防整仓索引撑爆契约文本） */
 const INDEX_CORE_FUNCTIONS_PER_MODULE = 15
 const INDEX_FILES_PER_MODULE = 30
 /** 供给专属索引段：每模块链路 / 待分类函数 / 含注释块函数上限 */

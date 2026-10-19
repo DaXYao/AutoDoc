@@ -1180,15 +1180,6 @@ describe('Agent 供给路由', () => {
     expect((res.json() as { error: string }).error).toContain('导出失败：')
     await app.close()
   })
-
-  it('旧笔记通道路由本轮保留：/api/agent-notes 仍 200', async () => {
-    const dir = freshDir()
-    const service = await makeService(dir, fixtureFiles())
-    const app = await makeApp(service)
-    expect((await app.inject({ method: 'GET', url: '/api/agent-notes' })).statusCode).toBe(200)
-    expect((await app.inject({ method: 'GET', url: '/api/agent-rules' })).statusCode).toBe(200)
-    await app.close()
-  })
 })
 
 /* ------------------------- 服务级入口 ------------------------- */

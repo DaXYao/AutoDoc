@@ -327,11 +327,6 @@ export interface ExportData {
   files: FileDocView[]
   summaries: FileSummary[]
   functionIndex: FunctionIndexEntry[]
-  /**
-   * Agent 笔记（E1）：静态导出时嵌入导出瞬间的加载校验结果（只读快照，无目录时为空数组）。
-   * 旧导出文件无此字段，前端须容错缺省。
-   */
-  agentNotes?: AgentNotesResult
 }
 
 /* ------------------------- 多项目（hub 模式） ------------------------- */
@@ -744,89 +739,6 @@ export interface AskResponse {
   rounds: number
   /** true=触发安全天花板/协议失败后的兜底解答（质量可能下降） */
   degraded: boolean
-}
-
-/* ------------------------- Agent 笔记通道（E1） ------------------------- */
-
-/**
- * Agent 笔记类型：overview=职责概述；decision=设计决策；pitfall=坑与注意点；
- * faq=常见问答；chain-note=链路补充说明。
- */
-export type AgentNoteType = 'overview' | 'decision' | 'pitfall' | 'faq' | 'chain-note'
-
-/** 笔记挂载目标种类；none=不绑定具体目标（项目级杂记） */
-export type AgentNoteTargetKind = 'function' | 'module' | 'file' | 'chain' | 'none'
-
-/**
- * 订阅制 Agent（Codex/Qoder CN/ChatGPT）按 AGENT_RULES.md 契约写入目标仓 `.autodoc/agent/*.json` 的知识笔记。
- * 与批注（Annotation）严格分离：批注是用户在 AutoDoc 界面里手写的数据，笔记是外部 Agent 产出的文件，
- * AutoDoc 只读取校验、永不写回，展示时也分通道呈现。
- */
-export interface AgentNote {
-  /** 笔记稳定标识：JSON 内 id 字段，缺省取文件名（去 .json 后缀） */
-  id: string
-  type: AgentNoteType
-  title: string
-  /** Markdown 正文（渲染前需 sanitize，见 AGENTS.md 安全约束） */
-  body: string
-  /** 产出该笔记的 Agent 标识（如 codex / qoder / chatgpt） */
-  agent: string
-  /** Agent 写入时间（可选；校验时若提供须可 Date.parse） */
-  writtenAt?: string
-  /**
-   * 挂载目标（服务端加载时规范化补全）：
-   * resolved=false 表示 id 在当前图谱/洞察中未命中（笔记保留不丢，展示时标记「目标失效」）。
-   */
-  target: {
-    kind: AgentNoteTargetKind
-    id?: string
-    resolved?: boolean
-  }
-}
-
-/** 单个笔记文件的校验错误：file=文件名，reason=具体不合规原因（不静默丢弃） */
-export interface AgentNoteError {
-  file: string
-  reason: string
-}
-
-/** 加载 + 校验 `.autodoc/agent/` 目录的结果 */
-export interface AgentNotesResult {
-  notes: AgentNote[]
-  errors: AgentNoteError[]
-}
-
-/**
- * 建议任务：AutoDoc 依据图谱/洞察算出的「尚缺笔记」缺口，供 Agent 认领。
- * function-overview=核心函数尚无已解析笔记；module-note=模块尚无已解析的 decision/overview 笔记。
- */
-export interface AgentSuggestion {
-  kind: 'function-overview' | 'module-note'
-  targetId: string
-  label: string
-}
-
-/** GET /api/agent-notes 响应：笔记加载结果 + 建议任务清单 */
-export interface AgentNotesResponse extends AgentNotesResult {
-  suggestions: AgentSuggestion[]
-}
-
-/** GET /api/agent-rules 响应：每次现生成的规则契约文本 + 规模统计 */
-export interface AgentRulesResult {
-  rulesText: string
-  generatedAt: string
-  stats: {
-    noteCount: number
-    errorCount: number
-    suggestionCount: number
-  }
-}
-
-/** POST /api/agent-rules/export 响应：写盘路径与是否覆盖了既有同名文件 */
-export interface AgentRulesExportResponse {
-  ok: true
-  path: string
-  overwritten: boolean
 }
 
 /* ------------------------- Agent 语义供给通道（G1） ------------------------- */
