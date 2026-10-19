@@ -1,5 +1,4 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-import AgentNotesView from './views/AgentNotesView.vue'
 import FileList from './views/FileList.vue'
 import FilePage from './views/FilePage.vue'
 import ImpactView from './views/ImpactView.vue'
@@ -16,8 +15,6 @@ export const router = createRouter({
     { path: '/files', name: 'files', component: FileList },
     { path: '/impact', name: 'impact', component: ImpactView },
     { path: '/projects', name: 'projects', component: ProjectHub },
-    // E2：Agent 笔记通道（接入指南 + 笔记/错误/建议浏览）
-    { path: '/agent-notes', name: 'agent-notes', component: AgentNotesView },
     { path: '/module/:moduleId', name: 'module', component: ModuleDetail },
     // fileId 为相对路径（含斜杠），用通配段捕获
     { path: '/file/:fileId(.*)', name: 'file', component: FilePage }
@@ -30,7 +27,6 @@ const ROUTE_TITLES: Record<string, string> = {
   files: '文件',
   impact: '变更影响',
   projects: '项目',
-  'agent-notes': 'Agent 笔记',
   module: '模块详情',
   file: '文件文档'
 }

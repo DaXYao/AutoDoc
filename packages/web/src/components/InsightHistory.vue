@@ -21,6 +21,8 @@ import {
   snapshotTriggerLabel,
   summarizeDiff
 } from '../utils/insightHistory'
+import { snapshotSourceTag } from '../utils/agentSupply'
+import { adAgentTagSkin } from '../theme'
 
 /**
  * 历史 AI 洞察快照区（H2/H3）：
@@ -63,6 +65,14 @@ const activeSnapshot = computed(
 )
 const archivedCount = computed(() => history.value?.archivedCount ?? 0)
 const canCompare = computed(() => selectedIds.value.length === 2)
+
+/**
+ * G3 快照级来源：id → { label, agent }（本地 KEY API 生成的旧快照为 null，不额外标注）。
+ * 预计算成 Map：模板里 v-if 与内容共用同一份结果，避免每行调两次函数。
+ */
+const sourceTags = computed(
+  () => new Map(snapshots.value.map((s) => [s.id, snapshotSourceTag(s)]))
+)
 
 /**
  * 历史版本列表默认收起（渐进披露），展开态持久化到 store/expand.ts（按项目区分命名空间）。
@@ -334,6 +344,19 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
                     :type="snapshot.trigger === 'partition' ? 'info' : 'default'"
                   >
                     {{ snapshotTriggerLabel(snapshot.trigger) }}
+                  </n-tag>
+                  <!-- G3 快照级来源：这一版的语义是谁写的（本地 KEY API 不额外标注） -->
+                  <n-tag
+                    v-if="sourceTags.get(snapshot.id)"
+                    size="tiny"
+                    :bordered="true"
+                    :color="adAgentTagSkin"
+                    :title="`本版语义来源：${sourceTags.get(snapshot.id)!.label}${sourceTags.get(snapshot.id)!.agent ? ` · 生效 agent：${sourceTags.get(snapshot.id)!.agent}` : ''}`"
+                  >
+                    {{ sourceTags.get(snapshot.id)!.label
+                    }}<template v-if="sourceTags.get(snapshot.id)!.agent">
+                      @{{ sourceTags.get(snapshot.id)!.agent }}</template
+                    >
                   </n-tag>
                   <n-tag
                     v-if="snapshot.id === activeId"

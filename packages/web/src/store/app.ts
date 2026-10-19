@@ -1,6 +1,6 @@
 import { computed, reactive } from 'vue'
 import type {
-  AgentNotesResponse,
+  AgentSupplyResponse,
   FileDocView,
   FileSummary,
   FunctionIndexEntry,
@@ -15,7 +15,7 @@ import type {
 import {
   activateProject,
   addProject as apiAddProject,
-  fetchAgentNotes,
+  fetchAgentSupply,
   fetchChangeset,
   fetchFileView,
   fetchFunctionIndex,
@@ -27,12 +27,16 @@ import {
   initDataSource,
   isHubEnabled,
   isNoActiveProjectError,
+  mergeAgentSupply,
   refreshDocs,
   removeProject as apiRemoveProject,
   requestInsightAI,
   requestInsightPartition,
-  setNoActiveProjectHandler
+  scanAgentSupply,
+  setNoActiveProjectHandler,
+  type AgentSupplyMergeResponse
 } from '../data/api'
+import { buildWinnerIndex } from '../utils/agentSupply'
 import { toast } from '../utils/toast'
 
 /** 全局应用状态：元信息、项目列表、文件列表、函数索引与按需加载的文件视图缓存 */
@@ -66,11 +70,13 @@ export interface AppState {
    */
   workspaceChangeset: ImpactChangeset | null
   /**
-   * E2：Agent 笔记通道数据（笔记+校验错误+建议任务）。
-   * 与批注严格分离：只读展示外部 Agent 产出，AutoDoc 永不写回。
-   * 静态模式为导出瞬间的快照（suggestions 恒空）；拉取失败静默 null（不弹 toast，徽标/分区据此隐藏）。
+   * G3：Agent 语义供给扫描结果（条目/错误/忽略/建议/基线）。
+   * 与批注严格分离：只读展示外部 Agent 供给，合并走后端字段级合并。
+   * 静态模式恒为 null；拉取失败静默 null（不弹 toast，状态条据此隐藏）。
    */
-  agentNotes: AgentNotesResponse | null
+  agentSupply: AgentSupplyResponse | null
+  /** 最近一次自动/手动合并的结果（面板「本次合并明细」用）；未合并过为 null */
+  agentSupplyMerge: AgentSupplyMergeResponse | null
   /** fileId → 视图（serve 模式下按需拉取） */
   fileViews: Map<string, FileDocView>
 }
@@ -88,7 +94,8 @@ export const appState = reactive<AppState>({
   functionIndex: [],
   insight: null,
   workspaceChangeset: null,
-  agentNotes: null,
+  agentSupply: null,
+  agentSupplyMerge: null,
   fileViews: new Map()
 })
 
@@ -107,10 +114,18 @@ export const appReady = computed(
 )
 
 /**
+ * winners → `pass:objectId` 索引（对象级 @agent 徽标悬浮要回查来源文件名）。
+ * computed 缓存：winners 变化才重建，徽标逐个 O(1) 命中，避免每卡对 winners 线性扫描。
+ */
+export const agentWinnerIndex = computed(() =>
+  buildWinnerIndex(appState.agentSupply?.winners ?? [])
+)
+
+/**
  * loadActiveDocs 代际令牌：每次进入（bootstrap/切项目/增删项目/reloadAll）自增。
  * 竞态场景：快速连续切项目时，旧一次加载的在途请求可能晚于新一次返回，
- * 直接写回会用旧项目的洞察/变更集/笔记覆盖新项目数据——每个 await 梯队写回前校验令牌，
- * 过期即丢弃。refreshAgentNotes/refreshInsight 等非代际推进的补拉用当前令牌自守卫。
+ * 直接写回会用旧项目的洞察/变更集/供给覆盖新项目数据——每个 await 梯队写回前校验令牌，
+ * 过期即丢弃。refreshAgentSupply/refreshInsight 等非代际推进的补拉用当前令牌自守卫。
  */
 let loadToken = 0
 
@@ -162,8 +177,8 @@ function forgetActiveProject(id: string): void {
 
 /**
  * 清空「活动项目作用域」数据（bootstrap 无活动项目分支 / loadActiveDocs / removeProject / 409 回收共用）。
- * 洞察、变更集与 Agent 笔记同属活动项目，不清会让「含变更」徽标、链路图谱与
- * 「Agent 笔记」徽标残留上一个项目的数据。
+ * 洞察、变更集与 Agent 供给同属活动项目，不清会让「含变更」徽标、链路图谱与
+ * 供给状态条残留上一个项目的数据。
  */
 function clearActiveScopedState(): void {
   appState.meta = null
@@ -171,7 +186,8 @@ function clearActiveScopedState(): void {
   appState.functionIndex = []
   appState.insight = null
   appState.workspaceChangeset = null
-  appState.agentNotes = null
+  appState.agentSupply = null
+  appState.agentSupplyMerge = null
 }
 
 /**
@@ -219,26 +235,111 @@ async function loadWorkspaceChangeset(token: number): Promise<void> {
   }
 }
 
-/** 拉取 Agent 笔记（E2 数据源）；失败静默置 null（徽标/内联分区是增强信息，不弹 toast、不拖垮 Promise.all） */
-async function loadAgentNotes(token: number): Promise<void> {
+/**
+ * 供给拉取的公共写回口径：以代际令牌自守卫——期间若发生切项目（token 推进），本次结果作废，
+ * 由 loadActiveDocs 拉新项目数据。失败静默置 null（增强信息不弹 toast、不拖垮 Promise.all）。
+ * token 缺省取当前值（refresh/rescan 这类非代际推进的补拉）；loadActiveDocs 传入它自己那一次的令牌。
+ * 返回本次结果（令牌过期/失败 → null）：自动合并的闸门必须吃返回值而非 store——
+ * 切项目瞬间 store 里还挂着上一个项目的供给（见 mergeAgentSupplyIfNeeded）。
+ */
+async function applyAgentSupply(
+  fetcher: () => Promise<AgentSupplyResponse | null>,
+  token = loadToken
+): Promise<AgentSupplyResponse | null> {
   try {
-    const result = await fetchAgentNotes()
-    if (token === loadToken) appState.agentNotes = result
+    const result = await fetcher()
+    if (token !== loadToken) return null
+    appState.agentSupply = result
+    return result
   } catch {
-    if (token === loadToken) appState.agentNotes = null
+    if (token === loadToken) appState.agentSupply = null
+    return null
   }
 }
 
-/** E2：Agent 笔记视图「重新扫描」——服务端每次现读现校验 `.autodoc/agent/`，无缓存，直接重拉即可 */
-export async function refreshAgentNotes(): Promise<void> {
-  // 期间若发生切项目（token 推进），本次结果作废，由 loadActiveDocs 拉新项目数据
-  await loadAgentNotes(loadToken)
+/** G3：重扫供给——服务端每次现读现校验供给目录，无缓存；返回本次结果供调用方当闸门（忽略亦可） */
+export async function refreshAgentSupply(): Promise<AgentSupplyResponse | null> {
+  return applyAgentSupply(fetchAgentSupply)
+}
+
+/**
+ * G3：面板「重新扫描」的显式动作（POST /scan，语义同 GET，但给 Agent/用户一个「我写完了，请复查」的按钮）。
+ */
+export async function rescanAgentSupply(): Promise<void> {
+  await applyAgentSupply(scanAgentSupply)
+}
+
+/**
+ * 手动合并（面板「合并供给」按钮）：一律把后端判别结果写回 store 供「本次合并明细」回显；
+ * merged 时重拉生效洞察（新语义 + agentSources 立即上屏），blocked/noop 不改视图。
+ * 不做 toast——调用方按 code 自行表述（自动合并的静默口径见 mergeAgentSupplyIfNeeded）。
+ * 写回前校验代际令牌：合并在途时切了项目，结果属于旧项目，写回会拿旧 snapshotId/stats 冒充新项目的「本次合并明细」。
+ */
+export async function mergeAgentSupplyNow(): Promise<AgentSupplyMergeResponse> {
+  const token = loadToken
+  const result = await mergeAgentSupply()
+  if (token !== loadToken) return result
+  appState.agentSupplyMerge = result
+  if (result.code === 'merged') await refreshInsight()
+  return result
+}
+
+/**
+ * 会话内「同一合并结果只 toast 一次」的去重签名：不同项目/不同快照内容签名不同，仍会各提示一次。
+ * noop（内容未变 / deduplicated）一律不提示，故重进洞察页不会刷屏。
+ */
+let lastAutoMergeSignature: string | null = null
+/** 单飞：自动合并串行，避免并发进入洞察页重复触发 merge */
+let autoMergeInFlight = false
+/** 单飞期间被吞掉的触发：结束后补跑一次（切项目与进洞察页重叠时，第二次触发不得静默丢失） */
+let autoMergePending = false
+
+/**
+ * 进入洞察页自动扫一次 → 有合规供给且非回滚态才 merge（G3 决策③）。
+ * - readOnly / 静态模式 / 无 winners：不做任何写请求；
+ * - 回滚态（baseline.rolledBack）：不触发 merge（后端会 409 blocked），原因由状态条呈现，避免错误风暴；
+ * - merged：toast 明示「已合并 N 项（来源 @x），可在历史里回滚」，并 refreshInsight 让新语义即时生效；
+ * - noop/blocked/异常：静默（409 无活动项目的自愈由 api 层观察者钩子负责）。
+ * 闸门吃 refreshAgentSupply 的返回值而非 store：切项目时本函数在微任务里可能先于新项目的 GET 落定被触发，
+ * 此刻 store 里挂的还是上一个项目的供给，读 store 会拿 A 的回滚态否决 B 的自动合并（反向亦然）。
+ */
+export async function mergeAgentSupplyIfNeeded(): Promise<void> {
+  if (getMode() !== 'api') return
+  if (appState.meta?.readOnly) return
+  if (autoMergeInFlight) {
+    autoMergePending = true
+    return
+  }
+  autoMergeInFlight = true
+  try {
+    const supply = await refreshAgentSupply()
+    if (!supply || supply.winners.length === 0 || supply.baseline.rolledBack) return
+    const result = await mergeAgentSupplyNow()
+    if (result.code !== 'merged') return
+    const sig = `merged:${result.snapshotId ?? ''}:${result.stats?.winnerCount ?? 0}`
+    if (sig === lastAutoMergeSignature) return
+    lastAutoMergeSignature = sig
+    const agents = (result.stats?.agents ?? []).map((a) => `@${a}`).join(' ')
+    const n = result.stats?.winnerCount ?? supply.winners.length
+    toast.success(`已合并 ${n} 项${agents ? `（来源 ${agents}）` : ''}，可在历史里回滚`)
+  } catch {
+    // 增强信息不弹错误风暴；409 无活动项目的恢复由 api 层钩子驱动，此处静默
+  } finally {
+    autoMergeInFlight = false
+    // 补跑至多一次（先清标志再重入）：补跑期间若又有新触发被吞会再次置位 pending，不会无限循环
+    if (autoMergePending) {
+      autoMergePending = false
+      void mergeAgentSupplyIfNeeded()
+    }
+  }
 }
 
 /** 加载当前活动项目的文档数据（meta/summaries/index）；无活动项目时清空 */
 async function loadActiveDocs(): Promise<void> {
   // 代际推进：此后任何更晚的 loadActiveDocs 进入都会使本次在途响应过期（写回前逐梯队校验）
   const token = ++loadToken
+  // 合并明细属于上一个项目：A→B 切换不经过 clearActiveScopedState，不在此清会跨项目残留
+  appState.agentSupplyMerge = null
   if (appState.activeProjectId === null && appState.hubEnabled) {
     clearActiveScopedState()
     return
@@ -254,12 +355,12 @@ async function loadActiveDocs(): Promise<void> {
   appState.functionIndex = index
   // C3：变更集与文档数据同属活动项目，随 bootstrap/reloadAll/切项目一起刷新
   //（regenerateActive 走 reloadAll → 本函数，重生后的新快照批次即在此拉回）；
-  // E2：Agent 笔记同口径——只随活动项目数据拉一次，内部吞错不拖垮 Promise.all；
-  // 洞察/变更集/笔记互不依赖，并行拉取减少串行等待
+  // G3：Agent 供给同口径——只随活动项目数据拉一次，内部吞错不拖垮 Promise.all；
+  // 洞察/变更集/供给互不依赖，并行拉取减少串行等待
   const [insight] = await Promise.all([
     fetchInsight(),
     loadWorkspaceChangeset(token),
-    loadAgentNotes(token)
+    applyAgentSupply(fetchAgentSupply, token)
   ])
   if (token !== loadToken) return
   appState.insight = insight
@@ -296,6 +397,9 @@ export async function refreshInsight(): Promise<void> {
   appState.insight = insight
   // C3：回滚路径不经过 reloadAll，但徽标变更集须与当前生效数据同步刷新，此处一并拉取
   await loadWorkspaceChangeset(token)
+  // G3：回滚 / 回到实时 / 删除当前回滚快照都会改变供给的合并基线（rolledBack 与拒绝原因），
+  // 不一起刷新，状态条与抽屉会一直挂着过期的「回滚视图 · 合并被拒」
+  await applyAgentSupply(fetchAgentSupply, token)
 }
 
 export async function bootstrap(): Promise<void> {

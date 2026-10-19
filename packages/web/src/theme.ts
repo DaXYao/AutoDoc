@@ -1,4 +1,4 @@
-import type { ButtonProps, GlobalThemeOverrides } from 'naive-ui'
+import type { ButtonProps, GlobalThemeOverrides, TagProps } from 'naive-ui'
 
 /**
  * D1 米白极简设计系统的 Naive UI 主题覆写唯一入口。
@@ -132,6 +132,17 @@ export const adBtnInkOverrides: NonNullable<ButtonProps['themeOverrides']> = {
   rippleColor: '#1F2329',
   borderRadiusSmall: '8px',
   fontSizeSmall: '12px'
+}
+
+/**
+ * G3：@agent 来源徽标的 n-tag 显式令牌皮肤（唯一出口，四处徽标共用）。
+ * naive 把主题变量写成 inline style，类选择器压不过，只能走 color prop；
+ * 三槽一律 --ad-* 令牌，令牌存在性由 test/agentSupply.utils.test.ts 判别性钉死。
+ */
+export const adAgentTagSkin: NonNullable<TagProps['color']> = {
+  color: 'var(--ad-accent-soft)',
+  textColor: 'var(--ad-accent-ink)',
+  borderColor: 'var(--ad-line)'
 }
 
 /** 顶栏次操作按钮皮肤：白底 + 发丝强线描边 + 主墨字 */

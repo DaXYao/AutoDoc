@@ -1,7 +1,8 @@
 import type {
-  AgentNotesResponse,
-  AgentRulesExportResponse,
-  AgentRulesResult,
+  AgentSupplyExportResponse,
+  AgentSupplyPass,
+  AgentSupplyResponse,
+  AgentSupplyRulesResult,
   Annotation,
   AnnotationKind,
   AskResponse,
@@ -419,44 +420,92 @@ export async function refreshDocs(): Promise<IncrementalParseStats | undefined> 
   return data.incremental
 }
 
-/* ------------------------- Agent 笔记通道（E2） ------------------------- */
+/* ------------------------- Agent 语义供给通道（G3） ------------------------- */
 
 /**
- * 笔记 + 校验错误 + 建议任务。
- * 静态模式：读导出瞬间嵌入的 `agentNotes` 快照（无此字段=旧导出，返回 null 由视图走空态）；
- * 建议任务为服务端实时推导，静态快照不含，固定空数组。
- * API 模式失败（含 409 无活动项目）静默返回 null——笔记是增强信息，store 侧不弹 toast。
+ * 供给扫描结果（GET，纯读）。静态模式返回 null（导出站不含供给数据）；
+ * API 模式失败（含 409 无活动项目）静默返回 null——供给是增强信息，store 侧不弹 toast。
+ * 注意：fetchJson 内的 apiError 仍会在 409 时触发观察者钩子（R1 自愈），吞错不影响自愈。
  */
-export async function fetchAgentNotes(): Promise<AgentNotesResponse | null> {
-  if (mode !== 'api') {
-    const embedded = staticData?.agentNotes
-    return embedded
-      ? { notes: embedded.notes, errors: embedded.errors, suggestions: [] }
-      : null
-  }
+export async function fetchAgentSupply(): Promise<AgentSupplyResponse | null> {
+  if (mode !== 'api') return null
   try {
-    return await fetchJson<AgentNotesResponse>('/api/agent-notes')
+    return await fetchJson<AgentSupplyResponse>('/api/agent-supply')
   } catch {
     return null
   }
 }
 
 /**
- * 规则契约文本（接入指南预览用）；静态模式返回 null。
- * 失败抛 ApiError（含 409 无活动项目）——视图须区分两种原因给出不同文案，故不再吞错。
+ * 显式重扫（POST，语义同 GET，纯读不写盘，不受 readOnly 拦截）。
+ * 供面板「重新扫描」用；失败静默返回 null，409 仍触发观察者钩子。
  */
-export async function fetchAgentRules(): Promise<AgentRulesResult | null> {
+export async function scanAgentSupply(): Promise<AgentSupplyResponse | null> {
   if (mode !== 'api') return null
-  return fetchJson<AgentRulesResult>('/api/agent-rules')
+  try {
+    const res = await fetch('/api/agent-supply/scan', { method: 'POST' })
+    if (!res.ok) throw apiError(res, `供给扫描失败：${res.status}`)
+    return (await res.json()) as AgentSupplyResponse
+  } catch {
+    return null
+  }
+}
+
+/** POST /api/agent-supply/merge 响应（后端 MergeEndpointResult 的前端镜像，服务端类型不在共享包） */
+export interface AgentSupplyMergeResponse {
+  /** merged=产生新快照；noop=合法但无新归档；blocked=回滚视图拒绝合并（HTTP 409） */
+  code: 'merged' | 'noop' | 'blocked'
+  merged: boolean
+  reason?: string
+  snapshotId?: string
+  deduplicated?: boolean
+  stats?: {
+    winnerCount: number
+    changedFields: number
+    agents: string[]
+    perPass: { pass: AgentSupplyPass; count: number; agents: string[] }[]
+  }
+}
+
+/**
+ * 合并供给 + 归档快照（写操作）。
+ * 错误口径按后端判别字段分流，不靠文案匹配：
+ * - code:'blocked'（回滚视图 409）→ 正常返回 { code:'blocked', reason }，调用方在状态条呈现，不弹错误风暴；
+ * - 403 只读 / 409 无活动项目 / 500 存储异常 → 抛 ApiError（409 触发 R1 自愈钩子），status 可区分。
+ * 静态模式不发请求，直接抛错（写操作仅服务模式可用）。
+ */
+export async function mergeAgentSupply(): Promise<AgentSupplyMergeResponse> {
+  if (mode !== 'api') throw new Error('合并供给仅服务模式可用')
+  const res = await fetch('/api/agent-supply/merge', { method: 'POST' })
+  if (res.ok) return (await res.json()) as AgentSupplyMergeResponse
+  const detail = (await res.json().catch(() => ({}))) as {
+    code?: string
+    reason?: string
+    error?: string
+  }
+  // 回滚态拒绝合并：后端在 409 body 里带 code:'blocked'，与「无活动项目」的 409 区分开
+  if (detail.code === 'blocked') {
+    return { code: 'blocked', merged: false, reason: detail.reason ?? '回滚视图下拒绝合并供给' }
+  }
+  throw apiError(res, detail.error ?? `合并供给失败：${res.status}`)
+}
+
+/**
+ * 供给契约文本（接入指南预览用）；静态模式返回 null。
+ * 失败抛 ApiError（含 409 无活动项目）——面板须区分两种原因给出不同文案，故不吞错。
+ */
+export async function fetchAgentSupplyRules(): Promise<AgentSupplyRulesResult | null> {
+  if (mode !== 'api') return null
+  return fetchJson<AgentSupplyRulesResult>('/api/agent-supply-rules')
 }
 
 /**
  * 导出契约到目标仓 `.autodoc/AGENT_RULES.md`（写操作）。
- * 403=只读、409=无活动项目、500=写盘失败：抛带后端 error 文案的 Error，由调用方弹 message。
+ * 403=只读、409=无活动项目、500=写盘失败：抛带后端 error 文案的 ApiError，由调用方弹 message。
  */
-export async function exportAgentRules(): Promise<AgentRulesExportResponse> {
-  if (mode !== 'api') throw new Error('导出规则契约仅服务模式可用')
-  const res = await fetch('/api/agent-rules/export', { method: 'POST' })
-  if (!res.ok) throw await errorFromResponse(res, '导出规则契约失败')
-  return (await res.json()) as AgentRulesExportResponse
+export async function exportAgentSupplyRules(): Promise<AgentSupplyExportResponse> {
+  if (mode !== 'api') throw new Error('导出供给契约仅服务模式可用')
+  const res = await fetch('/api/agent-supply-rules/export', { method: 'POST' })
+  if (!res.ok) throw await errorFromResponse(res, '导出供给契约失败')
+  return (await res.json()) as AgentSupplyExportResponse
 }

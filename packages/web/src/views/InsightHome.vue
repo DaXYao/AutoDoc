@@ -2,14 +2,26 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import { isNoActiveProjectError } from '../data/api'
-import { appState, ensureInsightAI, findFunctionEntry, regenerateInsightAI, repartitionInsight } from '../store/app'
+import { getMode, isNoActiveProjectError } from '../data/api'
+import {
+  appReady,
+  appState,
+  ensureInsightAI,
+  findFunctionEntry,
+  mergeAgentSupplyIfNeeded,
+  regenerateInsightAI,
+  repartitionInsight
+} from '../store/app'
 import { AI_PASS_LABELS, AI_PASS_ORDER, AI_STATUS_META } from '../utils/format'
+import { PASS_SOURCE_META, resolvePassSourceState, summarizeAgentSupply } from '../utils/agentSupply'
+import { adAgentTagSkin } from '../theme'
 import { formatIncrementalSummary } from '../utils/incremental'
 import { fnJumpQuery } from '../utils/nav'
 import { drillTargetId, toggleGraphGroup } from '../utils/flow'
 import { flowTreeModel } from '../utils/graphModel'
 import { getGraphCfg, patchGraphCfg, setGraphCfg } from '../utils/graphPersist'
+import AgentSourceBadge from '../components/AgentSourceBadge.vue'
+import AgentSupplyPanel from '../components/AgentSupplyPanel.vue'
 import FlowTree from '../components/FlowTree.vue'
 import GraphView from '../components/graph/GraphView.vue'
 import InsightHistory from '../components/InsightHistory.vue'
@@ -139,15 +151,34 @@ function onGraphDrill(nodeId: string): void {
   patchGraphCfg(graphScopeKey.value, { expandedGroups: expandedGroups.value })
 }
 
-/** AI 各段执行状态（可观测性）：六段固定顺序，status 缺失视为未执行 */
+/**
+ * AI 各段执行状态 + 来源四态（可观测性）：九段固定顺序。
+ * 四态由 resolvePassSourceState(aiSource, aiStatus) 得出——只看 aiStatus 会把
+ * 「Agent 供给的 ok」与「本地 KEY API 的 ok」说成同一件事（G3 决策②）。
+ * aiStatus / aiSource 全缺省时整区不渲染（纯静态且无供给）。
+ */
 const aiPasses = computed(() => {
   const st = insight.value?.aiStatus
-  if (!st) return []
-  return AI_PASS_ORDER.map((key) => ({
-    key,
-    label: AI_PASS_LABELS[key],
-    status: st[key]
-  }))
+  const src = insight.value?.aiSource
+  if (!st && !src) return []
+  return AI_PASS_ORDER.map((key) => {
+    const status = st?.[key]
+    const sourceState = resolvePassSourceState(src?.[key], status)
+    const meta = PASS_SOURCE_META[sourceState]
+    const statusLabel = status ? AI_STATUS_META[status].label : '未执行'
+    // 'mixed' 的标签本身就是「部分」，再挂「部分成功」是同一句话说两遍
+    const redundant = sourceState === 'mixed' && status === 'partial'
+    return {
+      key,
+      label: AI_PASS_LABELS[key],
+      status,
+      sourceState,
+      sourceLabel: meta.label,
+      /** 状态后缀：只在「非 ok 且不与来源标签重复」时追加，避免每个徽标都拖三段文字 */
+      statusSuffix: status && status !== 'ok' && !redundant ? ` · ${statusLabel}` : '',
+      title: `${AI_PASS_LABELS[key]}：来源 ${meta.label}，状态 ${statusLabel}`
+    }
+  })
 })
 
 /**
@@ -184,12 +215,41 @@ function goModule(id: string): void {
   void router.push({ name: 'module', params: { moduleId: id } })
 }
 
-/** E2：Agent 笔记摘要徽标（数据来自 store，N=0 或未加载时隐藏），点击跳笔记视图 */
-const agentNoteCount = computed(() => appState.agentNotes?.notes.length ?? 0)
+/* ------------------------- G3：Agent 语义供给状态条 + 抽屉面板 ------------------------- */
 
-function goAgentNotes(): void {
-  void router.push({ name: 'agent-notes' })
-}
+/**
+ * 静态导出站不含供给数据，整条状态条隐藏。
+ * getMode() 读的是模块级非响应式状态：无依赖 computed 首算即永久缓存，
+ * 故以 appReady 作门闩 + 依赖（bootstrap 落定后才可信，与 AgentSupplyPanel 的 isStatic 同范式）。
+ */
+const isStatic = computed(() => appReady.value && getMode() === 'static')
+
+/** 状态条摘要；null = 供给未就绪（无活动项目/拉取失败）→ 状态条隐藏，不制造错误噪音 */
+const supplySummary = computed(() => summarizeAgentSupply(appState.agentSupply))
+
+const supplyDrawer = ref(false)
+
+/**
+ * 进入洞察页 / 切项目 / 409 自愈落定后各扫一次，有合规供给且非回滚态就自动合并（G3 决策③）。
+ * 去重、noop 静默、409 blocked 与 403 readOnly 不弹错误风暴的口径都在
+ * store.mergeAgentSupplyIfNeeded / api.mergeAgentSupply 里，视图只负责发起。
+ */
+watch(
+  [appReady, () => appState.activeProjectId, () => appState.activationRecovering],
+  ([ready, , recovering]) => {
+    if (!ready || isStatic.value || recovering) return
+    void mergeAgentSupplyIfNeeded()
+  },
+  { immediate: true }
+)
+
+/** 合并产生新快照 → 历史区要能立刻看见它（自动合并与面板手动合并走同一条通路） */
+watch(
+  () => appState.agentSupplyMerge,
+  (result) => {
+    if (result?.code === 'merged') void historyRef.value?.reload()
+  }
+)
 </script>
 
 <template>
@@ -229,19 +289,48 @@ function goAgentNotes(): void {
       </template>
     </n-empty>
     <template v-else>
+      <!-- G3：Agent 语义供给状态条（静态导出站隐藏）；整条即抽屉开关。
+           置于历史区之上：回滚态时「合并被拒」与紧随其后的「回到实时」按钮上下相邻，动线连贯 -->
+      <section v-if="!isStatic && supplySummary" class="ad-card ad-card--hover mb-3 px-4 py-2">
+        <button
+          class="flex w-full flex-wrap items-center gap-x-2 gap-y-1 text-left text-xs"
+          :aria-expanded="supplyDrawer"
+          aria-label="打开 Agent 语义供给面板"
+          @click="supplyDrawer = true"
+        >
+          <span class="font-semibold text-[color:var(--ad-ink-2)]">Agent 供给</span>
+          <template v-if="supplySummary.empty">
+            <span class="text-[color:var(--ad-ink-3)]">尚无供给文件 · 查看接入指南</span>
+          </template>
+          <template v-else>
+            <span class="text-[color:var(--ad-ink-2)]">
+              生效 <span class="font-semibold text-[color:var(--ad-ink)]">{{ supplySummary.winnerCount }}</span> 项
+            </span>
+            <span v-if="supplySummary.agentTags" class="text-[color:var(--ad-accent-ink)]">
+              {{ supplySummary.agentTags }}
+            </span>
+            <span
+              :class="supplySummary.errorCount > 0 ? 'text-[color:var(--ad-danger-ink)]' : 'text-[color:var(--ad-ink-3)]'"
+            >
+              错误 {{ supplySummary.errorCount }}
+            </span>
+            <span class="text-[color:var(--ad-ink-3)]">忽略 {{ supplySummary.ignoredCount }}</span>
+            <span class="text-[color:var(--ad-ink-3)]">建议 {{ supplySummary.suggestionCount }}</span>
+          </template>
+          <n-tag
+            size="tiny"
+            :bordered="true"
+            class="ml-auto"
+            :type="supplySummary.rolledBack ? 'warning' : 'default'"
+            :title="supplySummary.rolledBack ? supplySummary.mergeBlockedReason : '索引与 id 校验基于实时视图，供给可直接合并'"
+          >
+            {{ supplySummary.rolledBack ? '回滚视图 · 合并被拒' : '实时视图' }}
+          </n-tag>
+        </button>
+      </section>
+
       <!-- 历史版本区（含回滚态横幅 +「回到实时」；静态模式自动隐藏） -->
       <InsightHistory ref="historyRef" />
-
-      <!-- E2：Agent 笔记摘要徽标（N=0 或未加载时隐藏），点击跳「Agent 接入」视图 -->
-      <div v-if="agentNoteCount > 0" class="-mt-1 mb-3 flex justify-end">
-        <button
-          class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-surface)] px-2 py-1 text-xs text-[color:var(--ad-ink-2)] hover:border-[color:var(--ad-accent)]"
-          aria-label="查看 Agent 笔记"
-          @click="goAgentNotes"
-        >
-          Agent 笔记 {{ agentNoteCount }}
-        </button>
-      </div>
 
       <!-- AI 状态提示 -->
       <n-alert
@@ -266,7 +355,7 @@ function goAgentNotes(): void {
       <!-- 项目概述 -->
       <p v-if="insight.summary" class="text-sm text-[color:var(--ad-ink-2)] mb-4">{{ insight.summary }}</p>
 
-      <!-- AI 各段执行状态徽标：一眼看出哪段 AI 未完全生效（failed/skipped/partial 显眼） -->
+      <!-- AI 各段执行状态 + 来源四态：一眼看出哪段未生效、以及是谁给的（@agent / KEY API） -->
       <section v-if="aiPasses.length" class="mb-4">
         <div class="flex flex-wrap items-center gap-2">
           <span class="text-xs text-[color:var(--ad-ink-3)] mr-1">AI 段状态：</span>
@@ -274,15 +363,16 @@ function goAgentNotes(): void {
             v-for="p in aiPasses"
             :key="p.key"
             size="small"
-            :bordered="false"
+            :bordered="p.sourceState === 'agent'"
             :type="p.status ? AI_STATUS_META[p.status].type : 'default'"
+            :color="p.sourceState === 'agent' ? adAgentTagSkin : undefined"
             :class="p.status && p.status !== 'ok' ? 'font-semibold' : ''"
-            :title="p.status ? `${p.label}：${AI_STATUS_META[p.status].label}` : `${p.label}：未执行`"
+            :title="p.title"
           >
             <span v-if="p.status === 'partial'" class="mr-0.5" aria-hidden="true">◐</span>
             {{ p.label }}
             <span class="opacity-70">·</span>
-            {{ p.status ? AI_STATUS_META[p.status].label : '未执行' }}
+            {{ p.sourceLabel }}{{ p.statusSuffix }}
           </n-tag>
         </div>
         <p v-if="incrementalSummary" class="mt-1.5 text-xs text-[color:var(--ad-ink-3)]">
@@ -408,7 +498,10 @@ function goAgentNotes(): void {
                 {{ mod.fileCount }} 文件 · {{ mod.functionCount }} 函数 · {{ mod.chainIds.length }} 链路
               </span>
             </div>
-            <p class="mt-1 text-xs text-[color:var(--ad-ink-2)]">{{ mod.description }}</p>
+            <div class="mt-1 flex items-start gap-1.5">
+              <p class="min-w-0 flex-1 text-xs text-[color:var(--ad-ink-2)]">{{ mod.description }}</p>
+              <AgentSourceBadge pass="modules" :object-id="mod.id" />
+            </div>
             <div v-if="mod.coreFunctionIds.length" class="mt-2 flex flex-wrap gap-1">
               <span
                 v-for="cid in mod.coreFunctionIds.slice(0, 4)"
@@ -423,5 +516,8 @@ function goAgentNotes(): void {
       </section>
       </template>
     </template>
+
+    <!-- G3：Agent 语义供给抽屉（接入指南 / 基线 / 统计 / 错误 / 忽略 / 建议 / 本次合并明细） -->
+    <AgentSupplyPanel v-model:show="supplyDrawer" />
   </div>
 </template>

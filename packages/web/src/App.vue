@@ -92,14 +92,6 @@ async function handleRefresh(): Promise<void> {
             <router-link to="/impact" class="ad-nav-pill" active-class="ad-nav-pill--active">
               变更影响
             </router-link>
-            <router-link
-              to="/agent-notes"
-              class="ad-nav-pill"
-              active-class="ad-nav-pill--active"
-              title="Agent 笔记通道：接入指南与笔记浏览"
-            >
-              Agent 接入
-            </router-link>
           </nav>
 
           <!-- 搜索槽包一层普通 div：tailwind 响应类在原生节点才稳赢 naive cssr 的 display 规则 -->

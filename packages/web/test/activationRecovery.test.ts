@@ -23,6 +23,38 @@ const SERVER_META = {
   functionCount: 2
 }
 
+/** G3：供给扫描响应替身（一条生效条目，供「重载后数据回来了」的断言用） */
+const AGENT_SUPPLY = {
+  dir: 'E:/ad/.autodoc/supply/p1/insight',
+  empty: false,
+  entries: [],
+  winners: [
+    {
+      pass: 'modules',
+      objectId: 'mod:0',
+      agent: 'qoder',
+      writtenAt: '2026-10-17T00:00:00Z',
+      file: 'modules.qoder.json',
+      contenders: 1
+    }
+  ],
+  errors: [],
+  ignored: [],
+  stats: {
+    fileCount: 1,
+    entryCount: 1,
+    winnerCount: 1,
+    errorCount: 0,
+    ignoredCount: 0,
+    agents: ['qoder'],
+    perPass: { modules: 1 }
+  },
+  scannedAt: '2026-10-17T00:00:00Z',
+  projectId: 'p1',
+  suggestions: [],
+  baseline: { activeSnapshotId: null, rolledBack: false, mergeBlockedReason: '', basis: 'b1' }
+}
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status })
 }
@@ -73,7 +105,7 @@ class FakeHubService {
     if (url === '/api/meta') return json(SERVER_META)
     if (url === '/api/files') return json([{ fileId: 'src/a.ts' }])
     if (url === '/api/functions/index') return json([])
-    if (url === '/api/agent-notes') return json({ notes: [{ id: 'n1' }], errors: [], suggestions: [] })
+    if (url === '/api/agent-supply') return json(AGENT_SUPPLY)
     return json({})
   }
 
@@ -160,11 +192,11 @@ describe('hub 活动项目记住与 409 自愈', () => {
     await store.bootstrap()
     expect(store.appState.activeProjectId).toBe('p1')
     expect(ls.get(LAST_ACTIVE_KEY)).toBe('p1')
-    expect(store.appState.agentNotes?.notes).toHaveLength(1)
+    expect(store.appState.agentSupply?.winners).toHaveLength(1)
     const metaCalls = hub.count('GET /api/meta')
 
     hub.restart()
-    await Promise.all([store.refreshAgentNotes(), store.refreshAgentNotes()])
+    await Promise.all([store.refreshAgentSupply(), store.refreshAgentSupply()])
     await vi.waitFor(() => expect(toastDouble.success).toHaveBeenCalledTimes(1))
     await settle()
 
@@ -173,7 +205,7 @@ describe('hub 活动项目记住与 409 自愈', () => {
     expect(store.appState.activeProjectId).toBe('p1')
     expect(store.appState.activationLost).toBe(false)
     expect(store.appState.error).toBeNull()
-    expect(store.appState.agentNotes?.notes).toHaveLength(1)
+    expect(store.appState.agentSupply?.winners).toHaveLength(1)
     expect(hub.count('GET /api/meta')).toBeGreaterThan(metaCalls)
   })
 
@@ -183,7 +215,7 @@ describe('hub 活动项目记住与 409 自愈', () => {
 
     hub.registered = ['p2']
     hub.restart()
-    await store.refreshAgentNotes()
+    await store.refreshAgentSupply()
     await vi.waitFor(() => expect(toastDouble.warning).toHaveBeenCalledTimes(1))
     await settle()
 
@@ -194,7 +226,8 @@ describe('hub 活动项目记住与 409 自愈', () => {
     expect(store.appState.functionIndex).toEqual([])
     expect(store.appState.insight).toBeNull()
     expect(store.appState.workspaceChangeset).toBeNull()
-    expect(store.appState.agentNotes).toBeNull()
+    expect(store.appState.agentSupply).toBeNull()
+    expect(store.appState.agentSupplyMerge).toBeNull()
     expect(store.appState.activationLost).toBe(true)
     expect(store.appState.error).toBeNull()
     expect(ls.has(LAST_ACTIVE_KEY)).toBe(false)
@@ -205,13 +238,13 @@ describe('hub 活动项目记住与 409 自愈', () => {
     await store.bootstrap()
 
     hub.restart()
-    await store.refreshAgentNotes()
+    await store.refreshAgentSupply()
     await vi.waitFor(() => expect(toastDouble.success).toHaveBeenCalledTimes(1))
     await settle()
     expect(hub.activateCalls).toBe(1)
 
     hub.restart()
-    await store.refreshAgentNotes()
+    await store.refreshAgentSupply()
     await vi.waitFor(() => expect(toastDouble.success).toHaveBeenCalledTimes(2))
     await settle()
     expect(hub.activateCalls).toBe(2)
@@ -227,7 +260,7 @@ describe('hub 活动项目记住与 409 自愈', () => {
 
     hub.restart()
     hub.activateFails = true
-    await store.refreshAgentNotes()
+    await store.refreshAgentSupply()
     await vi.waitFor(() => expect(toastDouble.warning).toHaveBeenCalledTimes(1))
     await settle()
     expect(hub.activateCalls).toBe(1)
@@ -236,7 +269,7 @@ describe('hub 活动项目记住与 409 自愈', () => {
 
     // 再一次丢失：放弃记账生效，不再重发注定失败的激活，也不再叠警告
     hub.restart()
-    await store.refreshAgentNotes()
+    await store.refreshAgentSupply()
     await settle()
     expect(hub.activateCalls).toBe(1)
     expect(toastDouble.warning).toHaveBeenCalledTimes(1)
@@ -247,7 +280,7 @@ describe('hub 活动项目记住与 409 自愈', () => {
     expect(store.appState.activationLost).toBe(false)
 
     hub.restart()
-    await store.refreshAgentNotes()
+    await store.refreshAgentSupply()
     await vi.waitFor(() => expect(toastDouble.success).toHaveBeenCalledTimes(1))
     await settle()
     expect(hub.activateCalls).toBe(3)
@@ -286,7 +319,7 @@ describe('hub 活动项目记住与 409 自愈', () => {
     const metaBefore = store.appState.meta
 
     hub.restart()
-    await store.refreshAgentNotes()
+    await store.refreshAgentSupply()
     await vi.waitFor(() => expect(toastDouble.success).toHaveBeenCalledTimes(1))
     await settle()
 
@@ -306,7 +339,7 @@ describe('hub 活动项目记住与 409 自愈', () => {
 
     hub.restart()
     hub.blocked = [{ prefix: '/api/meta', status: 500, error: '存储读取失败' }]
-    await store.refreshAgentNotes()
+    await store.refreshAgentSupply()
     // GET 失败沿用「请求失败：<status> <url>」口径（fetchJson 不读后端 error），恢复流程原样转告真实错误
     await vi.waitFor(() =>
       expect(toastDouble.error).toHaveBeenCalledWith('请求失败：500 /api/meta')
@@ -389,7 +422,7 @@ describe('hub 活动项目记住与 409 自愈', () => {
 
     hub.restart()
     hub.activateFails = true
-    await store.refreshAgentNotes()
+    await store.refreshAgentSupply()
     await vi.waitFor(() => expect(toastDouble.warning).toHaveBeenCalledTimes(1))
     await settle()
 
@@ -409,13 +442,13 @@ describe('hub 活动项目记住与 409 自愈', () => {
 
     hub.registered = ['p2']
     hub.restart()
-    await store.refreshAgentNotes()
+    await store.refreshAgentSupply()
     await vi.waitFor(() => expect(toastDouble.warning).toHaveBeenCalledTimes(1))
     await settle()
     expect(ls.has(LAST_ACTIVE_KEY)).toBe(false)
 
-    await store.refreshAgentNotes()
-    await store.refreshAgentNotes()
+    await store.refreshAgentSupply()
+    await store.refreshAgentSupply()
     await settle()
     expect(toastDouble.warning).toHaveBeenCalledTimes(1)
     expect(hub.activateCalls).toBe(0)
@@ -428,7 +461,7 @@ describe('hub 活动项目记住与 409 自愈', () => {
 
     hub.restart()
     hub.registryFails = true
-    await store.refreshAgentNotes()
+    await store.refreshAgentSupply()
     await vi.waitFor(() => expect(store.appState.activationLost).toBe(true))
     await settle()
 

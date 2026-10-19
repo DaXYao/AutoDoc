@@ -2,14 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
   addAnnotation,
-  exportAgentRules,
-  fetchAgentNotes,
-  fetchAgentRules,
+  exportAgentSupplyRules,
+  fetchAgentSupply,
+  fetchAgentSupplyRules,
   fetchMeta,
   getMode,
   initDataSource,
   isHubEnabled,
   isNoActiveProjectError,
+  mergeAgentSupply,
   requestInsightAI,
   requestInsightPartition,
   setNoActiveProjectHandler
@@ -100,12 +101,12 @@ describe('ApiError 与 409 观察钩子', () => {
     expect(hooked()).toBe(0)
   })
 
-  it('POST /api/agent-rules/export 的 409 同样触发钩子，且保留后端 error 文案', async () => {
+  it('POST /api/agent-supply-rules/export 的 409 同样触发钩子，且保留后端 error 文案', async () => {
     await enterHubMode()
     const hooked = countingHandler()
-    stubRoutes({ '/api/agent-rules/export': noActiveProject })
+    stubRoutes({ '/api/agent-supply-rules/export': noActiveProject })
 
-    const error = await exportAgentRules().catch((e: unknown) => e)
+    const error = await exportAgentSupplyRules().catch((e: unknown) => e)
 
     expect(isNoActiveProjectError(error)).toBe(true)
     expect((error as Error).message).toBe('no active project')
@@ -160,17 +161,18 @@ describe('initDataSource 能力探测阶段排除钩子', () => {
   })
 })
 
-describe('Agent 通道两个接口的错误口径', () => {
-  it('fetchAgentRules 409 抛错（视图要分文案，不能吞成 null）', async () => {
+describe('Agent 供给通道的错误口径', () => {
+  it('fetchAgentSupplyRules 409 抛错（面板要分文案，不能吞成 null）', async () => {
     await enterHubMode()
-    countingHandler()
-    stubRoutes({ '/api/agent-rules': noActiveProject })
+    const hooked = countingHandler()
+    stubRoutes({ '/api/agent-supply-rules': noActiveProject })
 
-    const error = await fetchAgentRules().catch((e: unknown) => e)
+    const error = await fetchAgentSupplyRules().catch((e: unknown) => e)
     expect(isNoActiveProjectError(error)).toBe(true)
+    expect(hooked()).toBe(1)
   })
 
-  it('fetchAgentRules 静态模式返回 null 且不发请求', async () => {
+  it('fetchAgentSupplyRules 静态模式返回 null 且不发请求', async () => {
     stubRoutes({
       '/api/projects': () => json({ error: 'not found' }, 404),
       '/api/meta': () => json({ error: 'not found' }, 404),
@@ -180,17 +182,75 @@ describe('Agent 通道两个接口的错误口径', () => {
     expect(getMode()).toBe('static')
 
     const urls = stubRoutes({})
-    await expect(fetchAgentRules()).resolves.toBeNull()
+    await expect(fetchAgentSupplyRules()).resolves.toBeNull()
     expect(urls).toEqual([])
   })
 
-  it('fetchAgentNotes 409 仍静默返回 null（增强数据不弹 toast），但照常触发恢复', async () => {
+  it('fetchAgentSupply 409 仍静默返回 null（增强数据不弹 toast），但照常触发恢复', async () => {
     await enterHubMode()
     const hooked = countingHandler()
-    stubRoutes({ '/api/agent-notes': noActiveProject })
+    stubRoutes({ '/api/agent-supply': noActiveProject })
 
-    await expect(fetchAgentNotes()).resolves.toBeNull()
+    await expect(fetchAgentSupply()).resolves.toBeNull()
     expect(hooked()).toBe(1)
+  })
+
+  it('mergeAgentSupply 按判别字段分流：409+code=blocked 正常返回，不当作激活丢失', async () => {
+    await enterHubMode()
+    const hooked = countingHandler()
+    stubRoutes({
+      '/api/agent-supply/merge': () =>
+        json({ code: 'blocked', merged: false, reason: '回滚视图下拒绝合并' }, 409)
+    })
+
+    const result = await mergeAgentSupply()
+
+    // 判别依据是 body 的 code 字段，不是状态码，也不是文案
+    expect(result.code).toBe('blocked')
+    expect(result.merged).toBe(false)
+    expect(result).not.toBeInstanceOf(ApiError)
+    expect(hooked()).toBe(0)
+  })
+
+  it('mergeAgentSupply 的 409（无 code=blocked）仍是激活丢失：抛 ApiError 并触发钩子', async () => {
+    await enterHubMode()
+    const hooked = countingHandler()
+    stubRoutes({ '/api/agent-supply/merge': noActiveProject })
+
+    const error = await mergeAgentSupply().catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(409)
+    expect(isNoActiveProjectError(error)).toBe(true)
+    expect(hooked()).toBe(1)
+  })
+
+  it('mergeAgentSupply 500 抛 ApiError 且不触发钩子（存储异常不是激活丢失）', async () => {
+    await enterHubMode()
+    const hooked = countingHandler()
+    stubRoutes({
+      '/api/agent-supply/merge': () => json({ error: '合并失败：存储写入异常' }, 500)
+    })
+
+    const error = await mergeAgentSupply().catch((e: unknown) => e)
+
+    expect((error as ApiError).status).toBe(500)
+    expect(isNoActiveProjectError(error)).toBe(false)
+    expect(hooked()).toBe(0)
+  })
+
+  it('mergeAgentSupply 静态模式不发请求，直接抛错（写操作仅服务模式可用）', async () => {
+    stubRoutes({
+      '/api/projects': () => json({ error: 'not found' }, 404),
+      '/api/meta': () => json({ error: 'not found' }, 404),
+      'autodoc-data.json': () => json(EXPORT_DATA)
+    })
+    await initDataSource()
+    expect(getMode()).toBe('static')
+
+    const urls = stubRoutes({})
+    await expect(mergeAgentSupply()).rejects.toThrow()
+    expect(urls).toEqual([])
   })
 })
 

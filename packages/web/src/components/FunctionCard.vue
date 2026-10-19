@@ -15,9 +15,8 @@ import { splitCallChain } from '../utils/callChain'
 import { groupInternalSteps } from '../utils/internalSteps'
 import { compactPath, roleOf, selectTopChains } from '../utils/chains'
 import { changePointsOf } from '../utils/impact'
-import { notesForTarget } from '../utils/agentNotes'
 import { fnJumpQuery } from '../utils/nav'
-import AgentNoteItem from './AgentNoteItem.vue'
+import AgentSourceBadge from './AgentSourceBadge.vue'
 import AnnotationPanel from './AnnotationPanel.vue'
 import CallNode from './CallNode.vue'
 import GraphView from './graph/GraphView.vue'
@@ -308,14 +307,6 @@ const chainPathKey = (chainId: string): string => `card:${props.fn.id}:chain:${c
 const changesKey = (): string => `card:${props.fn.id}:changes`
 const annotationsKey = (): string => `card:${props.fn.id}:annotations`
 const followupsKey = (): string => `card:${props.fn.id}:followups`
-const agentNotesKey = (): string => `card:${props.fn.id}:agentnotes`
-
-/**
- * E2 内联呼应：挂载到本函数的 Agent 笔记（target kind=function 且 id=本函数稳定 ID）。
- * 数据来自 appState.agentNotes（bootstrap 拉一次 + 笔记视图「重新扫描」刷新）；
- * store 为 null（加载失败/静态无快照）时返回空数组 → 分区不渲染，与「无笔记」同口径。
- */
-const fnAgentNotes = computed(() => notesForTarget(appState.agentNotes?.notes ?? [], 'function', props.fn.id))
 </script>
 
 <template>
@@ -340,6 +331,13 @@ const fnAgentNotes = computed(() => notesForTarget(appState.agentNotes?.notes ??
         >
           核心{{ fi.coreSource === 'ai' ? '(AI)' : '' }}
         </n-tag>
+        <!-- G3 决策④：对象级 @agent 徽标（核心判定），objectId 用函数稳定 ID（与后端 winners 同口径）。
+             不能只看 isCore：Agent 供给 core:false（负供给）合并同样生效，coreSource='agent' 时也要给出归属 -->
+        <AgentSourceBadge
+          v-if="fi && (fi.isCore || fi.coreSource === 'agent')"
+          pass="coreJudgment"
+          :object-id="fn.id"
+        />
         <n-tag v-if="fn.visibility === 'private'" size="tiny" type="warning" :bordered="false">
           private
         </n-tag>
@@ -352,6 +350,7 @@ const fnAgentNotes = computed(() => notesForTarget(appState.agentNotes?.notes ??
         >
           AI 判定: {{ CATEGORY_LABELS[fi.aiCategory] }}
         </n-tag>
+        <AgentSourceBadge v-if="fi?.aiCategory" pass="categories" :object-id="fn.id" />
         <n-tag
           v-for="decorator in fn.decorators"
           :key="decorator"
@@ -375,8 +374,9 @@ const fnAgentNotes = computed(() => notesForTarget(appState.agentNotes?.notes ??
         </span>
       </div>
       <p class="mt-1 text-sm text-[color:var(--ad-ink-2)]">{{ fn.purpose }}</p>
-      <p v-if="fi?.systemRole" class="mt-1 text-xs text-green-700">
-        系统角色：{{ fi.systemRole }}
+      <p v-if="fi?.systemRole" class="mt-1 flex items-start gap-1.5 text-xs text-green-700">
+        <span class="min-w-0">系统角色：{{ fi.systemRole }}</span>
+        <AgentSourceBadge pass="coreRoles" :object-id="fn.id" />
       </p>
       <details v-if="fn.docComment" class="mt-1 text-xs text-[color:var(--ad-ink-2)]">
         <summary class="cursor-pointer select-none">文档注释</summary>
@@ -407,10 +407,13 @@ const fnAgentNotes = computed(() => notesForTarget(appState.agentNotes?.notes ??
         </div>
       </template>
       <template v-else>
-        <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(stepsKey(), expandDefault('internalSteps'))">
-          内部步骤（{{ stepsGroup.steps.length }}）
-          {{ isExpanded(stepsKey(), expandDefault('internalSteps')) ? '▾' : '▸' }}
-        </button>
+        <div class="flex items-center gap-1.5">
+          <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(stepsKey(), expandDefault('internalSteps'))">
+            内部步骤（{{ stepsGroup.steps.length }}）
+            {{ isExpanded(stepsKey(), expandDefault('internalSteps')) ? '▾' : '▸' }}
+          </button>
+          <AgentSourceBadge pass="blocks" :object-id="fn.id" />
+        </div>
         <ol v-if="isExpanded(stepsKey(), expandDefault('internalSteps'))" class="mt-2 flex flex-col gap-1.5">
           <li v-for="(group, i) in stepsGroup.steps" :key="i" class="text-xs">
             <div class="flex items-start gap-2">
@@ -582,7 +585,10 @@ const fnAgentNotes = computed(() => notesForTarget(appState.agentNotes?.notes ??
             </span>
           </div>
           <!-- ① AI 链路叙事：缺失时灰字标注，静态路径骨架照画，不伪造句子（AI 失败降级） -->
-          <p v-if="chain.narrative" class="text-[color:var(--ad-ink-2)]">{{ chain.narrative }}</p>
+          <div v-if="chain.narrative" class="flex items-start gap-1.5">
+            <p class="min-w-0 flex-1 text-[color:var(--ad-ink-2)]">{{ chain.narrative }}</p>
+            <AgentSourceBadge pass="narratives" :object-id="chain.id" />
+          </div>
           <p v-else class="text-[color:var(--ad-ink-3)]">叙事未生成</p>
           <!-- ② 我的角色：函数级 chainRoles → 链路级 stepRoles 回退，缺失同上灰字标注 -->
           <p class="mt-1">
@@ -790,17 +796,6 @@ const fnAgentNotes = computed(() => notesForTarget(appState.agentNotes?.notes ??
           <!-- 追问记录按 Markdown 渲染（已禁用 HTML，防 XSS） -->
           <div class="annotation-body mt-1 text-sm" v-html="renderMarkdown(followup.content)" />
         </article>
-      </div>
-    </div>
-
-    <!-- Agent 笔记（E2 内联呼应）：外部 Agent 只读产出，与批注/追问严格分离；无笔记不渲染本分区 -->
-    <div v-if="fnAgentNotes.length > 0" class="border-t border-[color:var(--ad-line)] px-4 py-2">
-      <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(agentNotesKey(), false)">
-        Agent 笔记（{{ fnAgentNotes.length }}）
-        {{ isExpanded(agentNotesKey(), false) ? '▾' : '▸' }}
-      </button>
-      <div v-if="isExpanded(agentNotesKey(), false)" class="mt-2 flex flex-col gap-2">
-        <AgentNoteItem v-for="note in fnAgentNotes" :key="note.id" :note="note" :show-target="false" />
       </div>
     </div>
   </article>
