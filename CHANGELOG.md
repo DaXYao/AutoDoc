@@ -2,6 +2,16 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-20 · G2~G4：Agent 供给合并生效、前端改造与笔记通道退役 · server+core+web+shared-types
+
+- **G2 合并与归档**（1cacb26）：`agentSupplyMerge.ts` 以「纯本地视图」（`loadInsight(..., {ignoreSnapshot:true, supplyOverlay:false})`）为基线拷副本做**字段级合并**，只覆盖 Agent 实际供给的字段、冲突以 Agent 为准；归档为 `trigger/source='agent'` 的新快照并**清空回滚指针**——生效靠「`supply:<pass>` 缓存 + 实时装配路径 overlay」，快照只承担版本化/回滚/diff（指针若指向新快照，`baseline` 会判 rolledBack，第二次合并永久 409 **自锁**，这是初审抓出的 🔴）。内容哈希去重（所有 map 排序序列化、回看最近 3 份），同批文件重复合并不再多存快照。缓存条目内嵌 `fingerprint` + `basis`，任一不符即失效；`force` 与 `forcePartition` 都清缓存且不套用（谁跑谁赢），增量路径与**无 KEY 场景**一律套用（两条链路地位平等，不许显示「未生成」）。来源三级：对象级 `agentSources`（并集累积、同值也记来源）、pass 级 `aiSource=api|agent|mixed`（本地 ok/partial 保持原状态只标 mixed，**不把降级信号抹成 ok**）、快照级 `source`/`agent` 落库（SQLite `insight_history` 补两列 + `toSnapshotMeta` 白名单 + `trigger` 扩 `'agent'`，两后端一致）。顺带修两个既有缺陷：`syncCore` 未同步 `modules[].coreFunctionIds`（实测函数级 isCore 56 个、模块核心表并集只 36 个，模块详情/脉络树/契约索引都吃后者）；categories 供给未登记候选 WeakSet 会让下次增量整批重跑。**终审自查另修一处 🔴**：`winners` 为空时提前 return 绕过缓存重写 → Agent 撤回供给文件后实时视图仍显示已撤回语义且无入口可清。
+- **G3 前端改造**（559406d）：删掉「Agent 接入」独立导航/视图/内联分区/笔记 utils；接入指南、契约复制导出、基线状态、错误与忽略清单、建议清单、合并明细收进洞察页**状态条 + `AgentSupplyPanel` 抽屉**。进入项目自动扫描 + 自动合并（noop/deduplicated/blocked 一律静默，同一结果只提示一次；回滚态不发 merge 请求，把 `mergeBlockedReason` 显示在状态条与抽屉）。三级来源标注落地：对象级 `AgentSourceBadge`（模块职责/链路叙事/核心判定含 `core:false` 负供给/三分类/系统角色/内部步骤五处，`role="img"` + aria-label 念出「语义类别 + @agent + 来源文件」）、pass 级四态（`@agent 供给 / KEY API / 部分 / 未生成`，由 `aiStatus`+`aiSource` 组合判定；modules 供给**不会**把「模块划分」谎报成已生成）、快照级历史列表来源徽标。初审修 2 🔴（自动合并闸门读 store 里**上一个项目**的数据 → 改吃本次返回值；`agentSupplyMerge` 跨项目残留 → 纳入代际令牌）+ 6 🟡；**终审自查另修**：`refreshInsight` 未刷新供给基线，导致点「回到实时视图」后状态条仍挂着过期的「回滚视图·合并被拒」。R1 的 9 条 409 自愈回归换触发器后断言强度未降，另补自动合并 5 例、供给纯函数 19 例。
+- **G4 笔记通道退役**（73f3984）：删 `agentNotes.ts`、三条旧路由、静态导出的 `agentNotes` 嵌入、`AgentNote*` 类型段与 `ExportData.agentNotes`、旧测试 39 例、`.autodoc/agent/` 下 30 个笔记文件；`AGENT_RULES.md` 保留（现为供给契约导出目标）。全仓 grep 零残留；旧路由 404、四条供给路由 200；静态导出顶层键只剩 `meta/files/summaries/functionIndex`；`tsc` 不清理已删源文件的旧产物，故手动移除 `dist/agentNotes.*`。
+- **实机验收**（真实项目，验完恢复原状）：回滚态 merge → 409 `code=blocked` + 指路文案；回实时视图后写 6 份合规供给 → 自动合并只弹一次 toast、状态条「生效 6 项 @codex @qoder · 错误 0 · 建议 104」、五处对象级徽标全部出现（含 `core:false` 负供给）、历史列表显示「Agent 供给合并 · @codex,qoder」；期间项目自身触发了一次 AI 重新划分（basis `6f480588`→`455304df`），两条位置化 id 供给立刻被判「契约已过期，请重新导出规则契约」而四条稳定 id 供给照常生效——**G1 的双重对账在真实场景挡住了张冠李戴**；撤回供给 → 实时视图回到本地语义、`agentSources` 归零、`supply:*` 缓存键清零；探针快照删除、指针复位、供给目录清空。
+- **测试**：`pnpm lint` 全绿；`pnpm test` 全绿（core 170 / web 233 / server 319；server 较 G3 时减 40 = 删掉的笔记测试 39 例 + 1 条「旧路由本轮保留」断言）。
+- **遗留 / 下一步**：第二期做变更侧三层供给（提交级叙事、受影响链路业务解释、每变更函数角色）。另有两条独立缺陷待决策：本地 `narratives:v2` 缓存里 `stepRoles` 的键有时是函数标签而非 functionId（prompt 要 id、产出未校验就入库）；`loadInsight` 命中回滚快照时不比对图指纹（本轮只在供给层用 `ignoreSnapshot` 规避，未改回滚语义）。
+- **关联 commit**：1cacb26、559406d、73f3984。
+
 ## 2026-10-19 · G1：Agent 语义供给通道地基（按 pass 供给 / 逐条校验 / 实时索引 / 契约重写） · shared-types+server
 
 - **动机**：用户否掉了 E 轮的「Agent 笔记」形态——它把外部 Agent 的产出做成了挂在旁边的独立模块（自由文本笔记 + 独立导航），没有继承既有模块划分。真实意图是：让 Codex / Qoder CN 这类订阅制应用（无 API Key）读代码后**按我们的格式产出 AI 语义层结果**，AutoDoc 校验后合进既有洞察/变更视图，与 KEY API 产物**地位平等**（都表现为洞察历史版本）。经 16 轮板卡确认边界后开工，G1 只做后端地基。
