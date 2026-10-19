@@ -24,9 +24,14 @@ import { adAgentTagSkin, adBtnInkOverrides, adBtnOutlineOverrides } from '../the
 import {
   SUPPLY_PASS_LABELS,
   SUPPLY_SUGGESTION_KIND_LABELS,
+  changesDirOf,
+  changesScopeLabel,
   groupErrorsByFile,
   groupSuggestionsByPass,
-  summarizeAgentSupply
+  mergeBlockedReasonOf,
+  sortedPerPass,
+  summarizeAgentSupply,
+  supplyErrorPassLabel
 } from '../utils/agentSupply'
 
 /**
@@ -64,6 +69,53 @@ const errorGroups = computed(() => groupErrorsByFile(supply.value?.errors ?? [])
 const ignored = computed(() => supply.value?.ignored ?? [])
 const suggestionGroups = computed(() => groupSuggestionsByPass(supply.value?.suggestions ?? []))
 const merge = computed(() => appState.agentSupplyMerge)
+
+/** 各 pass 生效条目明细（按 SUPPLY_PASS_ORDER 定序；洞察侧与变更侧混在同一个 perPass 里） */
+const perPassRows = computed(() => sortedPerPass(supply.value?.stats.perPass))
+
+/** 变更侧供给目录：后端显式下发 changesDir 时优先，否则按洞察侧 dir 推同级 changes/（纯函数在 utils） */
+const changesDir = computed(() => changesDirOf(supply.value))
+
+/**
+ * 洞察侧 / 变更侧生效条目分开数：合并只作用于洞察 pass（后端对 changes 条目一律跳过），
+ * 变更语义是读时合并、不进快照，所以「只有变更侧供给」时合并按钮必须禁用并说明原因。
+ */
+const insightWinnerCount = computed(
+  () => (supply.value?.winners ?? []).filter((w) => w.pass !== 'changes').length
+)
+const changesWinnerCount = computed(
+  () => (supply.value?.winners ?? []).filter((w) => w.pass === 'changes').length
+)
+const changesOnlySupply = computed(
+  () => insightWinnerCount.value === 0 && changesWinnerCount.value > 0
+)
+
+/**
+ * 变更侧 winners 明细（objectId = scopeId）：后端只校验 id 在图谱内、不校验属于当前查看的
+ * scope，抽屉必须自证「生效的是哪个提交/批次、由哪家 Agent 供给」，否则影响页无落点时用户无从对账。
+ */
+const changesWinnerRows = computed(() =>
+  (supply.value?.winners ?? [])
+    .filter((w) => w.pass === 'changes')
+    .map((w) => ({
+      scopeId: w.objectId,
+      label: changesScopeLabel(w.objectId),
+      agent: w.agent,
+      file: w.file
+    }))
+)
+
+/** 「合并供给」不可用的原因（null = 可用）：判定抽成 utils 纯函数（有单测），disabled 与 title 同源 */
+const mergeBlocked = computed(() =>
+  mergeBlockedReasonOf({
+    writeBlockedReason: writeBlockedReason.value,
+    rolledBack: summary.value?.rolledBack ?? false,
+    insightWinnerCount: insightWinnerCount.value,
+    changesWinnerCount: changesWinnerCount.value
+  })
+)
+
+const mergeTitle = computed(() => mergeBlocked.value ?? '以实时视图为基合并洞察侧供给并归档快照')
 
 /** 供给数据不可用的原因分述：无活动项目 / 加载失败是两回事，混在一句里用户无从下手 */
 const supplyUnavailableText = computed(() => {
@@ -353,8 +405,18 @@ function passLabel(pass: AgentSupplyPass): string {
 
         <!-- 供给文件落点：Agent 该往哪写（在 AutoDoc 侧，绝不写进被分析项目） -->
         <p v-if="supply" class="mt-2 text-xs text-[color:var(--ad-ink-3)]">
-          供给文件写入目录（AutoDoc 侧，按项目分区）：
+          洞察侧供给写入目录（AutoDoc 侧，按项目分区）：
           <code class="font-mono text-[color:var(--ad-ink-2)] break-all">{{ supply.dir }}</code>
+        </p>
+        <p v-if="changesDir" class="mt-1 text-xs text-[color:var(--ad-ink-3)]">
+          变更侧供给写入其同级 <code class="font-mono text-[color:var(--ad-ink-2)]">changes/</code> 目录：
+          <code class="font-mono text-[color:var(--ad-ink-2)] break-all">{{ changesDir }}</code>
+        </p>
+        <!-- 变更侧口径：读时生效，用户最容易误以为「还要点合并」，这里显式说清 -->
+        <p v-if="!isStatic" class="mt-1 text-xs text-[color:var(--ad-ink-3)]">
+          变更侧三层语义（提交叙事 / 链路影响解释 / 变更函数角色）<strong class="font-semibold text-[color:var(--ad-ink-2)]">读时生效</strong>：
+          在「变更影响分析」页取变更集时合并进响应，<strong class="font-semibold text-[color:var(--ad-ink-2)]">不进洞察快照、不参与合并与回滚</strong>，
+          Agent 撤回供给文件后下次请求即消失——不需要点下方「合并供给」。
         </p>
       </section>
 
@@ -389,7 +451,8 @@ function passLabel(pass: AgentSupplyPass): string {
             文件 <span class="font-semibold text-[color:var(--ad-ink)]">{{ supply?.stats.fileCount ?? 0 }}</span>
           </span>
           <span class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-surface)] px-2 py-1 text-[color:var(--ad-ink-2)]">
-            生效条目 <span class="font-semibold text-[color:var(--ad-ink)]">{{ summary.winnerCount }}</span>
+            生效条目 洞察 <span class="font-semibold text-[color:var(--ad-ink)]">{{ insightWinnerCount }}</span>
+            / 变更 <span class="font-semibold text-[color:var(--ad-ink)]">{{ changesWinnerCount }}</span>
             <span class="text-[color:var(--ad-ink-3)]">（校验通过 {{ supply?.stats.entryCount ?? 0 }}）</span>
           </span>
           <span
@@ -424,17 +487,37 @@ function passLabel(pass: AgentSupplyPass): string {
         </div>
         <p v-else class="text-xs text-[color:var(--ad-ink-3)]">{{ supplyUnavailableText }}</p>
 
-        <!-- 各 pass 生效条目分布（无生效条目的 pass 不出现） -->
-        <div v-if="supply && !summary?.empty" class="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+        <!-- 各 pass 生效条目分布（无生效条目的 pass 不出现；含变更侧 changes） -->
+        <div v-if="perPassRows.length > 0" class="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
           <n-tag
-            v-for="(count, pass) in supply.stats.perPass"
-            :key="pass"
+            v-for="row in perPassRows"
+            :key="row.pass"
             size="tiny"
             :bordered="false"
-            :title="`${passLabel(pass as AgentSupplyPass)}：${count} 条生效供给`"
+            :title="
+              `${row.label}：${row.count} 条生效供给` +
+              (row.pass === 'changes' ? '（读时合并，不需点「合并供给」）' : '')
+            "
           >
-            {{ passLabel(pass as AgentSupplyPass) }} {{ count }}
+            {{ row.label }} {{ row.count }}
           </n-tag>
+        </div>
+
+        <!-- 变更侧 winners 的 scopeId 明细：哪个提交/批次由哪家 Agent 供给（读时合并的作用点自证） -->
+        <div v-if="changesWinnerRows.length > 0" class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[color:var(--ad-ink-3)]">
+          <span>变更侧生效于：</span>
+          <span
+            v-for="row in changesWinnerRows"
+            :key="row.scopeId"
+            class="flex items-center gap-1"
+          >
+            <code class="font-mono text-[color:var(--ad-ink-2)]" :title="`${row.scopeId}（来源文件 ${row.file}）`">
+              {{ row.label }}
+            </code>
+            <n-tag size="tiny" :bordered="true" :color="adAgentTagSkin" :title="`供给文件 ${row.file}`">
+              @{{ row.agent }}
+            </n-tag>
+          </span>
         </div>
 
         <!-- 写操作：合并供给（readOnly / 静态站禁用并说明原因） -->
@@ -442,18 +525,10 @@ function passLabel(pass: AgentSupplyPass): string {
           <n-button
             size="small"
             type="primary"
-            :disabled="!!writeBlockedReason || summary?.rolledBack || (summary?.winnerCount ?? 0) === 0"
+            :disabled="mergeBlocked !== null"
             :loading="merging"
             :aria-busy="merging"
-            :title="
-              writeBlockedReason
-                ? writeBlockedReason
-                : summary?.rolledBack
-                  ? '回滚视图下合并被拒，请先回到实时视图'
-                  : (summary?.winnerCount ?? 0) === 0
-                    ? '当前没有校验通过的供给条目可合并'
-                    : '以实时视图为基合并供给并归档快照'
-            "
+            :title="mergeTitle"
             aria-label="合并 Agent 供给并归档快照"
             @click="handleMerge"
           >
@@ -464,6 +539,9 @@ function passLabel(pass: AgentSupplyPass): string {
           </span>
           <span v-else-if="summary?.rolledBack" class="text-xs text-[color:var(--ad-ink-3)]">
             回滚视图下合并被拒，请先回到实时视图
+          </span>
+          <span v-else-if="changesOnlySupply" class="text-xs text-[color:var(--ad-ink-3)]">
+            当前只有变更侧供给：变更语义读时生效，无需合并（洞察侧没有可合并的条目）
           </span>
         </div>
       </section>
@@ -522,13 +600,15 @@ function passLabel(pass: AgentSupplyPass): string {
         </h3>
         <p class="text-xs text-[color:var(--ad-ink-3)] mb-2">
           以下供给不符合契约，未被采纳（逐条列出，不静默丢弃）；修正后「重新扫描」。
+          pass 列区分来源：洞察侧（六个 pass）与变更侧（<code class="font-mono">变更语义</code>）。
         </p>
         <div class="max-h-[320px] overflow-auto">
           <table class="w-full text-left text-xs">
             <thead>
               <tr class="text-[color:var(--ad-ink-3)]">
                 <th class="w-[180px] py-1 pr-3 font-medium">文件</th>
-                <th class="w-[220px] py-1 pr-3 font-medium">文件内定位</th>
+                <th class="w-[88px] py-1 pr-3 font-medium">pass</th>
+                <th class="w-[200px] py-1 pr-3 font-medium">文件内定位</th>
                 <th class="w-[160px] py-1 pr-3 font-medium">对象 id</th>
                 <th class="py-1 font-medium">原因</th>
               </tr>
@@ -542,6 +622,9 @@ function passLabel(pass: AgentSupplyPass): string {
                 >
                   <td class="py-1.5 pr-3 font-mono text-[color:var(--ad-ink-2)] break-all">
                     {{ i === 0 ? group.file : '' }}
+                  </td>
+                  <td class="py-1.5 pr-3 text-[color:var(--ad-ink-2)]">
+                    {{ supplyErrorPassLabel(item.pass) }}
                   </td>
                   <td class="py-1.5 pr-3 font-mono text-[color:var(--ad-ink-3)] break-all">{{ item.path ?? '—' }}</td>
                   <td class="py-1.5 pr-3 font-mono text-[color:var(--ad-ink-3)] break-all">{{ item.objectId ?? '—' }}</td>

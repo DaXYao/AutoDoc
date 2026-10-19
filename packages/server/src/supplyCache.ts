@@ -49,6 +49,12 @@ function supplyCacheKey(pass: AgentSupplyPass): string {
  * 以本次扫描的 winners 为事实来源整份重写供给缓存：有数据的 pass 覆盖写，无数据的 pass 删除。
  * （只增不删会让「Agent 撤回某类供给」后旧值永久驻留。）
  */
+/**
+ * 只有洞察侧 pass 进缓存：变更侧（changes）是**读时合并**到 changeset 响应的，
+ * 不参与洞察装配、也不进快照，写进 supply:* 只会留下没人读的键。
+ */
+const CACHEABLE_SUPPLY_PASSES = SUPPLY_PASSES.filter((p) => p !== 'changes')
+
 export function writeSupplyCache(
   cache: AiCache,
   fingerprint: string,
@@ -57,7 +63,7 @@ export function writeSupplyCache(
   agents: string[]
 ): void {
   const mergedAt = new Date().toISOString()
-  for (const pass of SUPPLY_PASSES) {
+  for (const pass of CACHEABLE_SUPPLY_PASSES) {
     const data = passData.get(pass)
     if (data && Object.keys(data).length > 0) {
       cache.setGlobal(supplyCacheKey(pass), { fingerprint, basis, data, agents, mergedAt } satisfies SupplyCacheEntry)
@@ -69,7 +75,7 @@ export function writeSupplyCache(
 
 export function clearSupplyCache(cache: AiCache): number {
   let removed = 0
-  for (const pass of SUPPLY_PASSES) {
+  for (const pass of CACHEABLE_SUPPLY_PASSES) {
     if (cache.deleteGlobal(supplyCacheKey(pass))) removed++
   }
   return removed
@@ -81,7 +87,7 @@ export function readSupplyCache(
   basis: string
 ): Map<AgentSupplyPass, { data: Record<string, SupplyValueEntry>; agents: string[] }> {
   const out = new Map<AgentSupplyPass, { data: Record<string, SupplyValueEntry>; agents: string[] }>()
-  for (const pass of SUPPLY_PASSES) {
+  for (const pass of CACHEABLE_SUPPLY_PASSES) {
     const entry = cache.getGlobal<SupplyCacheEntry>(supplyCacheKey(pass))
     if (!entry || typeof entry !== 'object') continue
     // 指纹与 basis 任一不符即跳过：图变了或划分变了，位置化 id 与函数集都不可信

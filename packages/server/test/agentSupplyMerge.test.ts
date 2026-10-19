@@ -718,13 +718,16 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
     expect([...after.keys()]).toEqual(['coreRoles'])
   })
 
-  it('缓存覆盖的 pass 集合与 agentSupply 导出的 SUPPLY_PASSES 同源（单一来源，不会漂移）', () => {
+  it('缓存覆盖的 pass 集合 = SUPPLY_PASSES 去掉 changes（变更侧读时生效，不进缓存）', () => {
     const dir = freshDir()
     const cache = new AiCache(dir)
+    const cached = SUPPLY_PASSES.filter((p) => p !== 'changes')
     const all = passDataOf(SUPPLY_PASSES.map((p) => [p, 'mod:0', { name: MOD0_NAME, description: 'd' }] as [AgentSupplyPass, string, unknown]))
     writeSupplyCache(cache, FINGERPRINT, BASIS, all, ['qoder'])
-    expect([...readSupplyCache(cache, FINGERPRINT, BASIS).keys()]).toEqual([...SUPPLY_PASSES])
-    expect(clearSupplyCache(cache)).toBe(SUPPLY_PASSES.length)
+    expect([...readSupplyCache(cache, FINGERPRINT, BASIS).keys()]).toEqual([...cached])
+    // 变更侧即使有 winner 也不许落缓存：那是没人读的键（读时合并直接吃供给文件）
+    expect(cache.getGlobal('supply:changes')).toBeUndefined()
+    expect(clearSupplyCache(cache)).toBe(cached.length)
     expect(readSupplyCache(cache, FINGERPRINT, BASIS).size).toBe(0)
   })
 

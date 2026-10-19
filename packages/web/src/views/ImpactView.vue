@@ -18,13 +18,18 @@ import {
   upstreamRipple
 } from '../utils/impact'
 import { fnJumpQuery } from '../utils/nav'
+import { indexChangesSemantics } from '../utils/agentSupply'
 import GraphView from '../components/graph/GraphView.vue'
+import ChangesSourceBadge from '../components/ChangesSourceBadge.vue'
 
 /**
  * C2：变更影响分析独立视图。
  * 数据流：变更集（后端 /api/impact/*，C1）+ 洞察图谱（appState.insight 的 chains/callerIds/calleeIds）
  * → utils/impact 纯函数推导受影响链路 / 上游波及 / 下游依赖 → 列表 + GraphView 叠加图。
  * 本视图不做任何 AI 请求与写操作，切换变更集只重取 changeset（纯读、毫秒级）。
+ * G6：changeset.agentSemantics（变更侧 Agent 供给，读时合并）挂进既有区块——层二按
+ * chainId + entryId 锚点双条件匹配（chain:N 是位置化 id，回滚快照下可能指向另一条链路），
+ * 层三按 functionId 匹配；未落点的供给显式计数提示，不静默失效、不补造文案。
  */
 
 const router = useRouter()
@@ -375,6 +380,14 @@ const insightFunctions = computed(() => insight.value?.functions ?? {})
 const changedFunctions = computed(() => changeset.value?.changedFunctions ?? [])
 const changedIds = computed(() => new Set(changedFunctions.value.map((f) => f.functionId)))
 
+/* ------------------------- G6：变更侧 Agent 语义（读时合并，随 changeset 一起到） ------------------------- */
+
+/** null = 该 scope 无有效供给（或 Agent 已撤回文件）：三层各自不渲染，视图回到纯静态推导 */
+const semantics = computed(() => indexChangesSemantics(changeset.value?.agentSemantics))
+/** 徽标只吃标量：把整份 semantics 当 prop 传会让每次渲染新建对象，重置子组件内部状态 */
+const semanticsAgent = computed(() => semantics.value?.agent ?? '')
+const semanticsWrittenAt = computed(() => semantics.value?.writtenAt ?? '')
+
 const affected = computed(() => affectedChains(chains.value, changedIds.value))
 const ripple = computed(() => upstreamRipple(insightFunctions.value, changedIds.value))
 const rippleIds = computed(() => new Set(ripple.value.map((r) => r.functionId)))
@@ -383,6 +396,18 @@ const downstream = computed(() => downstreamOf(insightFunctions.value, changedId
 const downstreamCount = computed(
   () => new Set(downstream.value.flatMap((g) => g.calleeIds)).size
 )
+/**
+ * 下游依赖行视图模型：每行一个变更函数（changedFunctions 的 functionId 口径 = 稳定 ID），
+ * 附 G6 层三的「本次变更角色」——按 functionId 匹配，匹配不到不显示。
+ */
+const downstreamCards = computed(() =>
+  downstream.value.map((group) => ({
+    ...group,
+    changeRole: semantics.value?.changeRoles.get(group.functionId) ?? null
+  }))
+)
+/** 有任一行真挂到变更角色时才解释口径（size>0 但全未命中时会指向不存在的内容） */
+const hasChangeRoles = computed(() => downstreamCards.value.some((c) => c.changeRole))
 
 /* ------------------------- 受影响链路排序 ------------------------- */
 
@@ -406,13 +431,61 @@ const sortedAffected = computed(() => {
   return list
 })
 
-/** 链路卡片视图模型：叙事 + 变更点标号 + 重要性分（排序与展示同源，避免两处各算一遍） */
+/**
+ * 链路卡片视图模型：叙事 + 变更点标号 + 重要性分（排序与展示同源，避免两处各算一遍）。
+ * G6 层二匹配条件：chainId 命中 **且** 供给的 entryId 与 chain.entryId 锚点一致——
+ * chain:N 是位置化 id，回滚到历史快照时同一下标可能指向另一条链路，无锚点相符不得渲染。
+ */
 const chainCards = computed(() =>
-  sortedAffected.value.map((chain) => ({
-    chain,
-    importance: chainImportance(chain, insightFunctions.value),
-    points: changePointsOf(chain, changedIds.value)
-  }))
+  sortedAffected.value.map((chain) => {
+    const supplied = semantics.value?.chainImpacts.get(chain.id)
+    return {
+      chain,
+      importance: chainImportance(chain, insightFunctions.value),
+      points: changePointsOf(chain, changedIds.value),
+      impact: supplied && supplied.entryId === chain.entryId ? supplied.impact : null
+    }
+  })
+)
+
+/* ------------------------- G6：供给已生效但未落在当前 scope 的显式提示 ------------------------- */
+
+/**
+ * 层二未匹配数 = 供给键数 − 卡片上真渲染出解释的条数。后端只校验 chainId/functionId 在
+ * 实时图谱内、不校验属于该 scope，且锚点不符/链路不受本变更影响都会落空——差值必须显式
+ * 告诉用户，否则「抽屉显示 变更语义 1」而影响页什么都没有，成了静默失效。
+ */
+const unmatchedChainImpacts = computed(() => {
+  const total = semantics.value?.chainImpacts.size ?? 0
+  if (total === 0) return 0
+  return total - chainCards.value.reduce((n, c) => (c.impact ? n + 1 : n), 0)
+})
+/** 层三未匹配数：供给的 functionId 不在当前 changedFunctions 集合内（属于其它提交，或变更集已变） */
+const unmatchedChangeRoles = computed(() => {
+  const roles = semantics.value?.changeRoles
+  if (!roles || roles.size === 0) return 0
+  const ids = changedIds.value
+  let matched = 0
+  for (const id of roles.keys()) if (ids.has(id)) matched++
+  return roles.size - matched
+})
+/** 层一卡片下的合并提示；两侧都无未匹配时 null（不渲染） */
+const unmatchedHint = computed(() => {
+  const parts: string[] = []
+  if (unmatchedChainImpacts.value > 0) parts.push(`${unmatchedChainImpacts.value} 条链路影响解释`)
+  if (unmatchedChangeRoles.value > 0) parts.push(`${unmatchedChangeRoles.value} 个变更函数角色`)
+  if (parts.length === 0) return null
+  return `另有 ${parts.join(' / ')}未落在当前变更集（可能属于其它提交，或链路划分已变）——供给已生效，只是在这个 scope 里没有落点`
+})
+const chainUnmatchedHint = computed(() =>
+  unmatchedChainImpacts.value > 0
+    ? `另有 ${unmatchedChainImpacts.value} 条链路影响解释未命中下方链路（可能属于其它提交，或 chainId+entryId 锚点与当前划分不符）`
+    : null
+)
+const rolesUnmatchedHint = computed(() =>
+  unmatchedChangeRoles.value > 0
+    ? `另有 ${unmatchedChangeRoles.value} 个变更函数角色未落在当前变更集（可能属于其它提交，或函数已不在本次变更中）`
+    : null
 )
 
 /* ------------------------- 影响叠加图 ------------------------- */
@@ -607,6 +680,48 @@ function goFunction(id: string): void {
       </section>
 
       <n-spin :show="changesetLoading">
+        <!-- ============ G6 层一：提交级叙事（Agent 供给，读时合并） ============
+             放在空态分支之前：变更集为空（无函数级变更）时叙事照样有价值，不该跟着整页空态消失 -->
+        <section
+          v-if="changeset && semantics?.narrative"
+          class="ad-card mb-4 px-4 py-3"
+          aria-label="本次变更语义（Agent 供给）"
+        >
+          <div class="flex flex-wrap items-center gap-2">
+            <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">本次变更语义</h3>
+            <ChangesSourceBadge
+              label="提交叙事"
+              :agent="semanticsAgent"
+              :written-at="semanticsWrittenAt"
+            />
+            <span class="text-xs text-[color:var(--ad-ink-3)]">
+              读时生效 · 不进洞察快照 · Agent 撤回供给文件后自动消失
+            </span>
+          </div>
+          <p class="mt-2 text-sm text-[color:var(--ad-ink)]">{{ semantics.narrative.what }}</p>
+          <p class="mt-1 text-xs text-[color:var(--ad-ink-2)]">
+            <span class="font-semibold">为什么改：</span>{{ semantics.narrative.why }}
+          </p>
+          <div v-if="semantics.narrative.risks.length > 0" class="mt-2">
+            <p class="text-xs font-semibold text-[color:var(--ad-ink-2)]">
+              风险点（{{ semantics.narrative.risks.length }}）
+            </p>
+            <ul class="mt-1 grid gap-1">
+              <li
+                v-for="(risk, i) in semantics.narrative.risks"
+                :key="`${risk}-${i}`"
+                class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-warning-soft)] px-2 py-1 text-xs text-[color:var(--ad-ink-2)]"
+              >
+                {{ risk }}
+              </li>
+            </ul>
+          </div>
+          <!-- G6：供给生效但在当前 scope 无落点时不得静默（🔴2） -->
+          <p v-if="unmatchedHint" class="mt-2 text-xs text-[color:var(--ad-ink-3)]">
+            {{ unmatchedHint }}
+          </p>
+        </section>
+
         <n-empty
           v-if="selectionIncomplete"
           description="请先选择提交（选择完整后自动加载变更集）"
@@ -670,6 +785,10 @@ function goFunction(id: string): void {
                 <n-radio-button value="changes">变更点数</n-radio-button>
               </n-radio-group>
             </div>
+            <!-- G6：供给生效但未命中本 scope 任何链路时显式说明，杜绝静默失效 -->
+            <p v-if="chainUnmatchedHint" class="mb-2 text-xs text-[color:var(--ad-ink-3)]">
+              {{ chainUnmatchedHint }}
+            </p>
             <p v-if="affected.length === 0" class="text-xs text-[color:var(--ad-ink-3)]">
               没有链路的调用路径包含该变更集的函数：新增函数可能尚未进入任何链路，
               或链路数据未生成（可在洞察页生成 AI 洞察后回来看）。
@@ -698,6 +817,23 @@ function goFunction(id: string): void {
                   <n-tag size="tiny" :bordered="false" class="ml-auto">
                     重要性 {{ card.importance }}
                   </n-tag>
+                </div>
+                <!-- G6 层二：Agent 给的这条链路受此变更的业务解释（按 chainId 匹配，未供给则整块不出现） -->
+                <div
+                  v-if="card.impact"
+                  class="mt-2 flex flex-wrap items-start gap-1.5 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-2 py-1.5"
+                >
+                  <span class="shrink-0 text-xs font-semibold text-[color:var(--ad-accent-ink)]">
+                    变更影响解释
+                  </span>
+                  <span class="min-w-0 flex-1 text-xs text-[color:var(--ad-ink-2)]">
+                    {{ card.impact }}
+                  </span>
+                  <ChangesSourceBadge
+                    label="链路影响解释"
+                    :agent="semanticsAgent"
+                    :written-at="semanticsWrittenAt"
+                  />
                 </div>
               </div>
             </div>
@@ -738,9 +874,17 @@ function goFunction(id: string): void {
                 每个变更函数直接调用的项目内函数
               </span>
             </h3>
+            <p v-if="hasChangeRoles" class="mb-2 text-xs text-[color:var(--ad-ink-3)]">
+              下方「本次变更角色」由 Agent 供给，说的是该函数在这次变更里承担什么，
+              与文件页调用链里的调用点角色（核心实现 / 参数/状态校验 / 异常处理）不是同一个东西
+            </p>
+            <!-- G6：角色供给生效但未落在当前变更集时显式说明，杜绝静默失效 -->
+            <p v-if="rolesUnmatchedHint" class="mb-2 text-xs text-[color:var(--ad-ink-3)]">
+              {{ rolesUnmatchedHint }}
+            </p>
             <div class="grid gap-2">
               <div
-                v-for="group in downstream"
+                v-for="group in downstreamCards"
                 :key="group.functionId"
                 class="ad-card px-4 py-2.5"
               >
@@ -766,6 +910,21 @@ function goFunction(id: string): void {
                     </button>
                   </template>
                   <span v-else class="text-xs text-[color:var(--ad-ink-3)]">无项目内下游</span>
+                </div>
+                <!-- G6 层三：本次变更角色（按 functionId 匹配）。措辞与配色都刻意区别于
+                     链路里的「调用点角色」（核心实现/参数校验/异常处理，绿/灰/红圆点）——两者语义不同源 -->
+                <div v-if="group.changeRole" class="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  <span
+                    class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-accent-soft)] px-1.5 py-0.5 text-[11px] text-[color:var(--ad-accent-ink)]"
+                    title="Agent 供给的变更上下文角色：该函数在这次变更里承担什么；与文件页调用链里的调用点角色（核心实现 / 参数/状态校验 / 异常处理）不是同一个东西"
+                  >
+                    本次变更角色 · {{ group.changeRole }}
+                  </span>
+                  <ChangesSourceBadge
+                    label="变更函数角色"
+                    :agent="semanticsAgent"
+                    :written-at="semanticsWrittenAt"
+                  />
                 </div>
               </div>
             </div>

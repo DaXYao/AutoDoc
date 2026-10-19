@@ -156,6 +156,85 @@ describe('mergeAgentSupplyIfNeeded 自动合并闸门', () => {
     expect(toastDouble.success).not.toHaveBeenCalled()
   })
 
+  it('只有变更侧供给：不发 merge 请求（变更语义读时生效，与抽屉禁用口径一致）', async () => {
+    const svc = new FakeSupplyService()
+    svc.supply = supplyResponse({
+      winners: [
+        {
+          pass: 'changes',
+          objectId: 'commit:abc1234',
+          agent: 'qoder',
+          writtenAt: '2026-10-20T00:00:00Z',
+          file: 'changes.qoder.json',
+          contenders: 1
+        }
+      ],
+      stats: {
+        fileCount: 1,
+        entryCount: 1,
+        winnerCount: 1,
+        errorCount: 0,
+        ignoredCount: 0,
+        agents: ['qoder'],
+        perPass: { changes: 1 }
+      }
+    })
+    const { store } = await setup(svc)
+    await store.bootstrap()
+
+    await store.mergeAgentSupplyIfNeeded()
+
+    expect(svc.count('POST /api/agent-supply/merge')).toBe(0)
+    expect(toastDouble.success).not.toHaveBeenCalled()
+    expect(toastDouble.error).not.toHaveBeenCalled()
+  })
+
+  it('洞察侧 + 变更侧同时有供给：照常合并，提示里的项数只算洞察侧', async () => {
+    const svc = new FakeSupplyService()
+    svc.supply = supplyResponse({
+      winners: [
+        {
+          pass: 'modules',
+          objectId: 'mod:0',
+          agent: 'qoder',
+          writtenAt: '2026-10-17T00:00:00Z',
+          file: 'modules.qoder.json',
+          contenders: 1
+        },
+        {
+          pass: 'changes',
+          objectId: 'commit:abc1234',
+          agent: 'qoder',
+          writtenAt: '2026-10-20T00:00:00Z',
+          file: 'changes.qoder.json',
+          contenders: 1
+        }
+      ],
+      stats: {
+        fileCount: 2,
+        entryCount: 2,
+        winnerCount: 2,
+        errorCount: 0,
+        ignoredCount: 0,
+        agents: ['qoder'],
+        perPass: { modules: 1, changes: 1 }
+      }
+    })
+    svc.mergeResult = {
+      code: 'merged',
+      merged: true,
+      snapshotId: 'snap-9',
+      stats: { winnerCount: 2, changedFields: 1, agents: ['qoder'], perPass: [] }
+    }
+    const { store } = await setup(svc)
+    await store.bootstrap()
+
+    await store.mergeAgentSupplyIfNeeded()
+
+    expect(svc.count('POST /api/agent-supply/merge')).toBe(1)
+    expect(toastDouble.success).toHaveBeenCalledWith('已合并 1 项（来源 @qoder），可在历史里回滚')
+  })
+
   it('merge 返回 noop/deduplicated：静默，不 toast', async () => {
     const svc = new FakeSupplyService()
     svc.mergeResult = {

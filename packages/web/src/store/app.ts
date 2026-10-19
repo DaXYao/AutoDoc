@@ -313,14 +313,17 @@ export async function mergeAgentSupplyIfNeeded(): Promise<void> {
   autoMergeInFlight = true
   try {
     const supply = await refreshAgentSupply()
-    if (!supply || supply.winners.length === 0 || supply.baseline.rolledBack) return
+    if (!supply || supply.baseline.rolledBack) return
+    // 只有洞察侧需要合并（变更侧是读时生效、不进快照），口径与抽屉里合并按钮的禁用原因一致
+    const insightWinners = supply.winners.filter((w) => w.pass !== 'changes')
+    if (insightWinners.length === 0) return
     const result = await mergeAgentSupplyNow()
     if (result.code !== 'merged') return
     const sig = `merged:${result.snapshotId ?? ''}:${result.stats?.winnerCount ?? 0}`
     if (sig === lastAutoMergeSignature) return
     lastAutoMergeSignature = sig
     const agents = (result.stats?.agents ?? []).map((a) => `@${a}`).join(' ')
-    const n = result.stats?.winnerCount ?? supply.winners.length
+    const n = insightWinners.length
     toast.success(`已合并 ${n} 项${agents ? `（来源 ${agents}）` : ''}，可在历史里回滚`)
   } catch {
     // 增强信息不弹错误风暴；409 无活动项目的恢复由 api 层钩子驱动，此处静默
