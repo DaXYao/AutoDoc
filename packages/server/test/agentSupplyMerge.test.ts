@@ -362,7 +362,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
     expect(result.agentSources[`coreRoles:${FN_B}`]).toBe('qoder')
     expect(result.agentSources[`coreJudgment:${FN_A}`]).toBe('qoder')
     expect(result.agentSources[`modules:mod:0`]).toBe('qoder')
-    expect(result.perPass.map((p) => p.pass).sort()).toEqual([...SUPPLY_PASSES].sort())
+    expect(result.perPass.map((p) => p.pass).sort()).toEqual(SUPPLY_PASSES.filter((p) => p !== 'changes').sort())
     expect(result.perPass.every((p) => p.agents.join() === 'qoder')).toBe(true)
     expect(result.insight.agentSources).toEqual(result.agentSources)
     expect(result.insight.aiGenerated).toBe(true)

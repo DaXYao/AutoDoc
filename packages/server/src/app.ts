@@ -19,6 +19,7 @@ import {
 import { AskInputError, askCallStep, askFunction } from './ask.js'
 import { collectAgentSupply, exportAgentSupplyRules, generateSupplyRulesText } from './agentSupply.js'
 import { executeMerge } from './agentSupplyMerge.js'
+import { collectChangesSupplyLight, resolveChangesAgentSemantics, scopeToSupplyId } from './agentSupplyChanges.js'
 import { getDeepSeekConfig } from './env.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
 
@@ -279,15 +280,29 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   })
 
   // 某一范围（workspace / commit:<hash> / range:<hashA>..<hashB>）的函数级变更集
+  // G5：读时合并变更侧 Agent 语义（撤回供给文件后自然消失，不缓存不归档）
   app.get('/api/impact/changeset', async (req, reply) => {
     const service = manager.getActive()
-    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const projectId = manager.getActiveId()
+    if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
     const { scope } = req.query as { scope?: string }
     if (typeof scope !== 'string' || scope.trim().length === 0) {
       return reply.code(400).send({ error: '缺少 scope（workspace / commit:<hash> / range:<hashA>..<hashB>）' })
     }
     try {
-      return getChangeset(service, scope)
+      const changeset = getChangeset(service, scope)
+      // 🟡5：轻量读时合并——复用 changeset 已取到的 snapshotRecords，供给目录无文件即早退
+      const snapshotRecords = service.storage.listChangeRecords({ source: 'snapshot' })
+      const supplyId = scopeToSupplyId(scope, snapshotRecords)
+      if (supplyId) {
+        const { graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+        const light = collectChangesSupplyLight(service, projectId, graph, snapshotRecords)
+        if (light) {
+          const semantics = resolveChangesAgentSemantics(supplyId, light.winners, light.entries)
+          if (semantics) changeset.agentSemantics = semantics
+        }
+      }
+      return changeset
     } catch (error) {
       if (error instanceof ImpactInputError) return reply.code(400).send({ error: error.message })
       throw error
@@ -507,7 +522,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         suggestions: ctx.suggestions,
         projectId,
         dir: ctx.dir,
-        baseline: ctx.baseline
+        baseline: ctx.baseline,
+        changes: ctx.changes
       })
     } catch (error) {
       return reply.code(500).send({ error: `契约生成失败：${error instanceof Error ? error.message : String(error)}` })

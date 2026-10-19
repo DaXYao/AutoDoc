@@ -16,14 +16,15 @@ import type { TagType } from './format'
  * 错误/建议分组、状态条摘要。全部脱离 Vue/网络，可独立单测。
  */
 
-/** 一期六个可供给 pass 的展示顺序（与后端 SUPPLY_PASSES 同序） */
+/** 一期六个可供给 pass + 变更侧的展示顺序（与后端 SUPPLY_PASSES 同序） */
 export const SUPPLY_PASS_ORDER: AgentSupplyPass[] = [
   'modules',
   'narratives',
   'categories',
   'coreJudgment',
   'coreRoles',
-  'blocks'
+  'blocks',
+  'changes'
 ]
 
 /** pass → 中文语义名 */
@@ -33,7 +34,8 @@ export const SUPPLY_PASS_LABELS: Record<AgentSupplyPass, string> = {
   categories: '三分类',
   coreJudgment: '核心判定',
   coreRoles: '系统角色',
-  blocks: '内部步骤'
+  blocks: '内部步骤',
+  changes: '变更语义'
 }
 
 /** 建议任务种类 → 中文徽标 */
@@ -43,7 +45,10 @@ export const SUPPLY_SUGGESTION_KIND_LABELS: Record<AgentSupplySuggestionKind, st
   'function-category': '函数三分类',
   'function-core': '核心判定',
   'function-purpose': '系统角色',
-  'function-steps': '内部步骤'
+  'function-steps': '内部步骤',
+  'changes-narrative': '提交叙事',
+  'changes-chain-impact': '链路影响',
+  'changes-function-role': '函数角色'
 }
 
 /**

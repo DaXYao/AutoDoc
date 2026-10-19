@@ -694,6 +694,22 @@ export interface ImpactChangeset {
   changedFunctions: ChangedFunctionRef[]
   /** 当前文档生成时间（与 /api/meta 一致） */
   generatedAt: string
+  /** G5：变更侧 Agent 语义（读时合并，撤回供给文件后自然消失）；无有效供给时缺省 */
+  agentSemantics?: ImpactChangesetAgentSemantics
+}
+
+/** G5：变更侧 Agent 供给的读时合并结果（附在 changeset 响应上） */
+export interface ImpactChangesetAgentSemantics {
+  /** 层一：提交级叙事 */
+  narrative?: AgentSupplyChangesNarrative
+  /** 层二：受影响链路的业务解释 */
+  affectedChains?: Record<string, AgentSupplyChangesChainImpact>
+  /** 层三：变更函数角色（与 coreRoles/stepRoles/CallEdge.role 语义不同：表达本次变更上下文角色） */
+  changeRoles?: Record<string, string>
+  /** 生效的 Agent 标识 */
+  agent: string
+  /** 供给文件写入时间 */
+  writtenAt: string
 }
 
 /* ------------------------- 增量重生探测（C3） ------------------------- */
@@ -771,6 +787,7 @@ export type AgentSupplyPass =
   | 'coreJudgment'
   | 'coreRoles'
   | 'blocks'
+  | 'changes'
 
 /**
  * ①模块名称与职责描述：moduleId → 对账锚点 + 一句话职责（成员归属仍由本地静态计算，不接受供给）。
@@ -815,6 +832,41 @@ export interface AgentSupplyCoreValue {
   reason: string
 }
 
+/* ------------------------- G5：变更侧三层语义供给 ------------------------- */
+
+/** 提交级叙事：这次变更干了什么 / 为什么改 / 风险点 */
+export interface AgentSupplyChangesNarrative {
+  /** 这次变更做了什么（一句话或短段落） */
+  what: string
+  /** 为什么要做这次变更 */
+  why: string
+  /** 风险点（可为空数组表示无明显风险） */
+  risks: string[]
+}
+
+/** 受影响链路的业务解释：chainId → 锚点 + 影响说明 */
+export interface AgentSupplyChangesChainImpact {
+  /** 对账锚点：必须逐字等于当前划分里该 chainId 的入口函数稳定 id */
+  entryId: string
+  /** 这条链路受此变更影响的业务解释 */
+  impact: string
+}
+
+/**
+ * 变更侧供给值（三层皆可选，至少提供一层）。
+ * scopeId（values 的键）= `commit:<hash>` 或 `workspace:<batchDate>`。
+ * changeRoles 与既有 coreRoles（系统角色）/ stepRoles（链路步骤角色）/ CallEdge.role（调用点角色）语义不同：
+ * 这里表达的是「该函数在本次变更中承担什么」，是变更上下文角色。
+ */
+export interface AgentSupplyChangesValue {
+  /** 层一：提交级叙事 */
+  narrative?: AgentSupplyChangesNarrative
+  /** 层二：受影响链路的业务解释；key = chainId（位置化 id，需 entryId 锚点对账） */
+  affectedChains?: Record<string, AgentSupplyChangesChainImpact>
+  /** 层三：变更函数角色；key = functionId（稳定 id），value = 一句话说明该函数在本次变更里的角色 */
+  changeRoles?: Record<string, string>
+}
+
 /**
  * pass → 单条目值形状（= `ai-cache.json` 里该 pass 的值形状，`values` 的键是对象 id）：
  * - modules      → 本地 `<图指纹>:partition:latest`（PartitionEnvelope.modules[i]，moduleId `mod:i` 即下标 i；只写回 name/description，name 兼作对账锚点）
@@ -833,6 +885,8 @@ export interface AgentSupplyValueShapes {
   coreRoles: string
   /** ④内部步骤：注释块归一后的有序大纲（blockIndexes 指向该函数 codeBlocks 下标） */
   blocks: InternalStep[]
+  /** G5：变更侧三层语义（提交叙事 / 链路影响 / 函数角色） */
+  changes: AgentSupplyChangesValue
 }
 
 /**
@@ -882,6 +936,8 @@ export interface AgentSupplyError {
   path?: string
   objectId?: string
   reason: string
+  /** 来源 pass（区分洞察侧/变更侧错误） */
+  pass?: AgentSupplyPass
 }
 
 /**
@@ -948,12 +1004,15 @@ export type AgentSupplySuggestionKind =
   | 'function-core'
   | 'function-purpose'
   | 'function-steps'
+  | 'changes-narrative'
+  | 'changes-chain-impact'
+  | 'changes-function-role'
 
 export interface AgentSupplySuggestion {
   kind: AgentSupplySuggestionKind
   pass: AgentSupplyPass
   targetId: string
-  /** 可读标签（模块名 / 函数「类.名」/ 链路入口→步数） */
+  /** 可读标签（模块名 / 函数「类.名」/ 链路入口→步数 / 变更 scope 标签） */
   label: string
 }
 

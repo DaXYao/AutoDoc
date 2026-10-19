@@ -378,7 +378,7 @@ describe('scanAgentSupply（信封校验 + 文件名纪律）', () => {
     expect(byFile.get('externals.qoder.json')).toContain('本地 AI 专属')
     expect(byFile.get('keySteps.qoder.json')).toContain('不在第一期四类语义范围内')
     expect(byFile.get('partition.qoder.json')).toContain('模块成员归属')
-    expect(byFile.get('notes.qoder.json')).toContain(`pass 不在一期支持列表 [${SUPPLY_PASSES.join(' / ')}]`)
+    expect(byFile.get('notes.qoder.json')).toContain(`pass 不在支持列表 [${SUPPLY_PASSES.join(' / ')}]`)
   })
 
   it('子目录与非 .json 文件：忽略且不进 fileCount', () => {
@@ -964,8 +964,8 @@ describe('generateSupplyRulesText（契约文本）', () => {
     expect(t).toContain('**`proj-x`**')
     expect(t).toContain('narratives.qoder.json')
     expect(t).toContain('绝不写进被分析的目标项目')
-    // 六个 pass 与本地 ai-cache 键的映射表
-    for (const pass of SUPPLY_PASSES) expect(t).toContain(`| \`${pass}\` |`)
+    // 六个洞察侧 pass 与本地 ai-cache 键的映射表（changes 在第 9 节）
+    for (const pass of SUPPLY_PASSES.filter((p) => p !== 'changes')) expect(t).toContain(`| \`${pass}\` |`)
     expect(t).toContain('`chunk:blocks:<hash>`')
     expect(t).toContain('`<图指纹>:narratives:v2`')
     expect(t).toContain('`<图指纹>:coreJudgment`')

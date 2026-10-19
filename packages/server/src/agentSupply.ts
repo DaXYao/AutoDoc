@@ -32,6 +32,7 @@ import type { DocService } from './context.js'
 import { flowsBasis } from './flow.js'
 import type { ProjectGraph } from './graph.js'
 import { loadInsight } from './insight.js'
+import { collectChangesSupply, buildChangesRulesSection, type ChangesSupplyContext } from './agentSupplyChanges.js'
 
 /**
  * G1：Agent 语义供给通道（后端契约层）。
@@ -67,7 +68,8 @@ export const SUPPLY_PASSES: AgentSupplyPass[] = [
   'categories',
   'coreJudgment',
   'coreRoles',
-  'blocks'
+  'blocks',
+  'changes'
 ]
 
 interface PassMeta {
@@ -133,6 +135,14 @@ const PASS_META: Record<AgentSupplyPass, PassMeta> = {
     cacheKey: 'chunk:blocks:<hash>',
     shape: 'InternalStep[]（blockIndexes/title/detail?/kind）',
     suggestion: 'function-steps'
+  },
+  changes: {
+    label: '变更侧语义（提交叙事/链路影响/函数角色）',
+    group: '⑤',
+    idKind: 'functionId',
+    cacheKey: '（读时合并，不写缓存）',
+    shape: '{ narrative?, affectedChains?, changeRoles? }',
+    suggestion: 'changes-narrative'
   }
 }
 
@@ -141,7 +151,8 @@ const REJECTED_PASS_REASONS: Record<string, string> = {
   flows: '递归脉络树是本地 AI 专属能力，供给通道不接受',
   externals: '外部库补全是本地 AI 专属能力，供给通道不接受',
   keySteps: '主干识别不在第一期四类语义范围内，由本地 AI 生成',
-  partition: '模块划分含模块成员归属，属本地静态层；只想供给模块名称与职责请改用 modules pass'
+  partition: '模块划分含模块成员归属，属本地静态层；只想供给模块名称与职责请改用 modules pass',
+  changes: 'changes 属于变更侧供给，请写进 changes/ 子目录（文件名 changes.<agent>.json），见契约第 9 节'
 }
 
 /** 位置化 id（mod:i / chain:N）的 pass：信封必须携带文件级 basis 对账；函数类 pass（稳定 id）禁止携带 */
@@ -196,26 +207,26 @@ const SUGGESTIONS_PER_KIND = 20
 
 /* ------------------------- 通用小工具 ------------------------- */
 
-function errorMessage(e: unknown): string {
+export function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
 /** reason / path 插值统一截断：Agent 可控内容（文件名、字段值、异常消息）进入错误原因前一律限长 */
-function cutEcho(s: string): string {
+export function cutEcho(s: string): string {
   return s.length > REASON_ECHO_MAX ? `${s.slice(0, REASON_ECHO_MAX)}…` : s
 }
 
 /** 回显字段值：JSON.stringify 保留类型信息（字符串带引号、对象可读结构），再截断 */
-function echoValue(v: unknown): string {
+export function echoValue(v: unknown): string {
   return cutEcho(JSON.stringify(v) ?? String(v))
 }
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
+export function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
 /** 条目在文件内的定位串（错误清单用；对象 id 是 Agent 可控内容，同样截断） */
-function pathOf(objectId: string, field?: string): string {
+export function pathOf(objectId: string, field?: string): string {
   const base = `values[${JSON.stringify(cutEcho(objectId))}]`
   if (!field) return base
   return field.startsWith('[') ? `${base}${field}` : `${base}.${field}`
@@ -225,7 +236,7 @@ function pathOf(objectId: string, field?: string): string {
  * projectId 参与路径拼接，故按白名单收敛（注册表 id 可能被手写）：
  * 只留字母数字/中文/._-，其余转 '-'；整段为 `.`/`..` 时转 '-'，杜绝穿越到别的分区。
  */
-function safeProjectSegment(projectId: string): string {
+export function safeProjectSegment(projectId: string): string {
   const cleaned = projectId.replace(/[^A-Za-z0-9\u4e00-\u9fa5._-]/g, '-')
   return cleaned === '.' || cleaned === '..' || cleaned.length === 0 ? '-' : cleaned
 }
@@ -631,6 +642,10 @@ function validateEntry(
         entryOf(pass, objectId, value, agent, writtenAt, file)
       )
     }
+    case 'changes': {
+      // changes pass 不在 insight 目录校验（已在文件扫描层拒绝），此处不可达
+      return errorAt('changes pass 不属于洞察侧校验范围')
+    }
   }
 }
 
@@ -795,14 +810,15 @@ export function scanAgentSupply(opts: AgentSupplyScanOptions): AgentSupplyScanRe
       continue
     }
     const [, filePass, fileAgent] = matched
-    if (!isSupplyPass(filePass)) {
+    if (!isSupplyPass(filePass) || filePass === 'changes') {
       const why = REJECTED_PASS_REASONS[filePass]
       errors.push({
         file,
         path: 'pass',
+        pass: filePass === 'changes' ? 'changes' : undefined,
         reason: why
-          ? `${why}（一期支持：${SUPPLY_PASSES.join(' / ')}）`
-          : `pass 不在一期支持列表 [${SUPPLY_PASSES.join(' / ')}] 中：${cutEcho(filePass)}`
+          ? `${why}（洞察侧支持：${SUPPLY_PASSES.filter((p) => p !== 'changes').join(' / ')}）`
+          : `pass 不在支持列表 [${SUPPLY_PASSES.join(' / ')}] 中：${cutEcho(filePass)}`
       })
       continue
     }
@@ -1218,7 +1234,8 @@ function buildRulesText(
 
   L.push('## 1. 供给范围（能写什么、不能写什么）')
   L.push('')
-  L.push('- 只供给 **AI 语义层**，一期四类语义 / 六个 pass（见第 4 节）。')
+  L.push('- 洞察侧：一期四类语义 / 六个 pass（见第 4 节），落盘在 `insight/` 子目录。')
+  L.push('- 变更侧：`changes` pass（提交叙事/链路影响/函数角色），落盘在 `changes/` 子目录（见第 9 节）。')
   L.push(
     '- **静态层由本地计算，不可覆盖**：tree-sitter 图谱、调用边、函数稳定 ID、变更集、注释块提取、**模块成员归属**。'
   )
@@ -1271,7 +1288,7 @@ function buildRulesText(
   L.push('')
   L.push('| 字段 | 必填 | 约束 |')
   L.push('| --- | --- | --- |')
-  L.push(`| pass | 是 | 枚举：${SUPPLY_PASSES.join(' / ')}；须与文件名第一段一致 |`)
+  L.push(`| pass | 是 | 枚举：${SUPPLY_PASSES.filter((p) => p !== 'changes').join(' / ')}；须与文件名第一段一致（changes 见第 9 节） |`)
   L.push('| agent | 是 | 非空字符串，须与文件名第二段一致 |')
   L.push('| writtenAt | 是 | ISO 时间字符串（须可被 Date.parse 解析）；**文件级时间戳，对该文件每个条目生效** |')
   L.push(
@@ -1297,11 +1314,12 @@ function buildRulesText(
   L.push('- 校验结果与错误/忽略清单：`GET /api/agent-supply`；写完调 `POST /api/agent-supply/scan` 重新扫描复查。')
   L.push('')
 
-  L.push('## 4. 六个 pass 的值形状（与本地 ai-cache 逐字段对齐）')
+  L.push('## 4. 六个洞察侧 pass 的值形状（与本地 ai-cache 逐字段对齐；变更侧 changes pass 见第 9 节）')
   L.push('')
   L.push('| pass | 语义 | 对象 id | 值形状 | 本地 ai-cache 键 |')
   L.push('| --- | --- | --- | --- | --- |')
   for (const pass of SUPPLY_PASSES) {
+    if (pass === 'changes') continue
     const meta = PASS_META[pass]
     L.push(
       `| \`${pass}\` | ${meta.group}${meta.label} | ${meta.idKind} | \`${meta.shape}\` | \`${meta.cacheKey}\` |`
@@ -1584,6 +1602,8 @@ export interface SupplyRulesInput {
   projectId: string
   dir: string
   baseline: AgentSupplyBaseline
+  /** G5：变更侧上下文（缺省时不生成变更章节） */
+  changes?: ChangesSupplyContext
 }
 
 /**
@@ -1591,11 +1611,22 @@ export interface SupplyRulesInput {
  * 索引在建议清单之后构建：建议引用的 id 一律 force-include，杜绝「建议里有、索引里查不到」。
  */
 export function generateSupplyRulesText(input: SupplyRulesInput): AgentSupplyRulesResult {
-  const { graph, scan, suggestions, projectId, dir, baseline } = input
+  const { graph, scan, suggestions, projectId, dir, baseline, changes } = input
   const index = buildSupplyIndex(graph, suggestions)
   const generatedAt = new Date().toISOString()
+  let rulesText = buildRulesText(graph, scan, suggestions, index, projectId, dir, generatedAt, baseline)
+  if (changes) {
+    const changesSection = buildChangesRulesSection(
+      changes.scopes,
+      changes.suggestions,
+      changes.winners,
+      baseline.basis,
+      changes.dir
+    )
+    rulesText = rulesText + '\n' + changesSection.join('\n')
+  }
   return {
-    rulesText: buildRulesText(graph, scan, suggestions, index, projectId, dir, generatedAt, baseline),
+    rulesText,
     generatedAt,
     stats: {
       fileCount: scan.stats.fileCount,
@@ -1617,6 +1648,8 @@ export interface AgentSupplyContext {
   scan: AgentSupplyScanResult
   suggestions: AgentSupplySuggestion[]
   baseline: AgentSupplyBaseline
+  /** G5：变更侧供给上下文 */
+  changes: ChangesSupplyContext
 }
 
 /**
@@ -1649,13 +1682,49 @@ export function collectAgentSupply(service: DocService, projectId: string): Agen
   const { graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
   const dir = supplyDirOf(service.storage.dataPath, projectId)
   const classification = service.normalized.config.classification
-  const scan = scanAgentSupply({ dir, graph, classification })
+  const insightScan = scanAgentSupply({ dir, graph, classification })
+
+  // G5：变更侧供给（同时扫描 changes/ 子目录）
+  const changes = collectChangesSupply(service, projectId, graph)
+
+  // 裁决①：统一到同一套 entries/winners/errors/stats
+  const allEntries = [...insightScan.entries, ...changes.entries]
+  const allWinners = [...insightScan.winners, ...changes.winners]
+  const allErrors = [...insightScan.errors, ...changes.errors]
+  const allAgents = [...new Set(allEntries.map((e) => e.agent))].sort((a, b) => a.localeCompare(b))
+
+  const perPass: Partial<Record<AgentSupplyPass, number>> = { ...insightScan.stats.perPass }
+  const changesWinnerCount = allWinners.filter((w) => w.pass === 'changes').length
+  if (changesWinnerCount > 0) perPass.changes = changesWinnerCount
+
+  const scan: AgentSupplyScanResult = {
+    dir,
+    empty: insightScan.empty && changes.fileCount === 0,
+    entries: allEntries,
+    winners: allWinners,
+    errors: allErrors,
+    ignored: insightScan.ignored,
+    stats: {
+      fileCount: insightScan.stats.fileCount + changes.fileCount,
+      entryCount: allEntries.length,
+      winnerCount: allWinners.length,
+      errorCount: allErrors.length,
+      ignoredCount: insightScan.stats.ignoredCount,
+      agents: allAgents,
+      perPass
+    },
+    scannedAt: insightScan.scannedAt
+  }
+
+  const allSuggestions = [...suggestSupplyTasks(graph, insightScan, classification), ...changes.suggestions]
+
   return {
     graph,
     dir,
     scan,
-    suggestions: suggestSupplyTasks(graph, scan, classification),
-    baseline: supplyBaselineOf(service, graph)
+    suggestions: allSuggestions,
+    baseline: supplyBaselineOf(service, graph),
+    changes
   }
 }
 
@@ -1675,9 +1744,11 @@ export function exportAgentSupplyRules(
     suggestions: ctx.suggestions,
     projectId,
     dir: ctx.dir,
-    baseline: ctx.baseline
+    baseline: ctx.baseline,
+    changes: ctx.changes
   })
   mkdirSync(ctx.dir, { recursive: true })
+  mkdirSync(ctx.changes.dir, { recursive: true })
   const targetDir = join(service.rootDir, '.autodoc')
   mkdirSync(targetDir, { recursive: true })
   const path = join(targetDir, 'AGENT_RULES.md')
