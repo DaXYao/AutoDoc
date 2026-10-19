@@ -539,13 +539,19 @@ export interface ProjectInsight {
   /** 各 AI 段执行状态（可观测性） */
   aiStatus?: Partial<Record<AiPassKey, AiPassStatus>>
   /**
+   * 各 AI 段的**来源**（谁给的），与 aiStatus（有没有语义/完整度）正交。
+   * 只登记 Agent 实际供给过的 pass；缺省的 key = 本地 KEY API（'api'）或该段无语义。
+   * 随 insight 载荷一起进快照，故历史版本也能回答「这一版某段是谁写的」。
+   */
+  aiSource?: Partial<Record<AiPassKey, SemanticSource>>
+  /**
    * 外部库符号 AI 补全（外层 key=模块说明符，内层 key=函数名）。
    * 由 AI 凭训练知识对「裸模块说明符的外部调用」补全用途/签名，非项目内确证内容；
    * 与自动生成的 FunctionDoc/CallEdge 分离，只存于洞察层。AI 未生成/失败时缺省（前端保持既有文案）。
    */
   externals?: Record<string, Record<string, ExternalSymbolInfo>>
   /**
-   * G1 预留（G2 合并时写入）：Agent 供给的字段级来源标记，随 insight 载荷一起进快照
+   * Agent 供给的字段级来源标记（G2 合并/实时 overlay 写入），随 insight 载荷一起进快照
    * （SQLite 的 insight_json / JSON 存储的整份对象都能原样回读），故历史快照也能回答「这一版是谁写的」。
    * key = `${AgentSupplyPass}:${objectId}`，value = 生效的 agent 标识；未列出的 pass/对象 = 本地生成。
    */
@@ -585,8 +591,8 @@ export interface InsightSnapshotStats {
   aiPassStatus: Partial<Record<AiPassKey, AiPassStatus>>
 }
 
-/** 快照触发来源：refresh=普通刷新；partition=按建议重新划分 */
-export type InsightSnapshotTrigger = 'refresh' | 'partition'
+/** 快照触发来源：refresh=普通刷新；partition=按建议重新划分；agent=外部 Agent 供给合并 */
+export type InsightSnapshotTrigger = 'refresh' | 'partition' | 'agent'
 
 /** 快照元信息（不含 insight 载荷，供历史列表下发） */
 export interface InsightSnapshotMeta {
@@ -611,13 +617,11 @@ export interface InsightSnapshotMeta {
   /** 用户可编辑的备注（长文本补充）；缺省/空串则列表不显示备注行 */
   note?: string
   /**
-   * G1 预留（G2 写入）：本快照的语义来源。缺省（旧快照）= 'local'（本地 KEY API）。
-   * 注意持久化缺口：core 的 toSnapshotMeta 只白名单复制固定字段、SQLite 的 insight_history 也没有对应列，
-   * 因此该字段目前只在「内存中的快照对象」上成立；G2 若要让它跨重启可读，需同步改 core 存储层
-   * （或改从 insight.agentSources 派生，那份载荷已能原样回读）。
+   * 本快照的语义来源（G2 落库：SQLite insight_history.source 列 / JSON 存储整份对象）。
+   * 缺省（旧快照）= 本地 KEY API。'mixed' = 该版本既有本地产出又叠了 Agent 供给。
    */
   source?: SemanticSource
-  /** G1 预留（G2 写入）：source='agent' 时生效的 agent 标识（如 qoder / codex） */
+  /** source 含 'agent' 时生效的 agent 标识（多家以逗号连接，排序去重） */
   agent?: string
 }
 
@@ -828,12 +832,14 @@ export interface AgentRulesExportResponse {
 /* ------------------------- Agent 语义供给通道（G1） ------------------------- */
 
 /**
- * AI 语义层的单值来源口径：local=本地 KEY API（DeepSeek）生成；agent=外部订阅制 Agent 供给。
+ * AI 语义层的单值来源口径：api=本地 KEY API（DeepSeek）生成；agent=外部订阅制 Agent 供给；
+ * mixed=同一 pass 内两条链路都出了内容（本地已 ok/partial，Agent 又覆盖了一部分对象）。
  * 两条链路地位平等，最终都表现为洞察（及其历史快照）里的同一批字段，只是来源标记不同。
  * 注意：`AiPassStatus`（ok/partial/failed/skipped）表达的是**质量状态**而非来源，故不扩该枚举；
- * 来源统一由本类型 + ProjectInsight.agentSources + FunctionInsight.coreSource='agent' 表达。
+ * 来源统一由本类型（ProjectInsight.aiSource / InsightSnapshotMeta.source）
+ * + ProjectInsight.agentSources + FunctionInsight.coreSource='agent' 表达。
  */
-export type SemanticSource = 'local' | 'agent'
+export type SemanticSource = 'api' | 'agent' | 'mixed'
 
 /**
  * G1 预留（G2 合并时写入 ProjectInsight.agentSources）：字段级来源标记。

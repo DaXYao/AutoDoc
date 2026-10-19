@@ -19,6 +19,7 @@ import {
 import { AskInputError, askCallStep, askFunction } from './ask.js'
 import { exportAgentRules, generateRulesText, loadAgentNotes, suggestTasks } from './agentNotes.js'
 import { collectAgentSupply, exportAgentSupplyRules, generateSupplyRulesText } from './agentSupply.js'
+import { executeMerge } from './agentSupplyMerge.js'
 import { getDeepSeekConfig } from './env.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
 
@@ -563,6 +564,22 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       return exportAgentSupplyRules(service, projectId)
     } catch (error) {
       return reply.code(500).send({ error: `导出失败：${error instanceof Error ? error.message : String(error)}` })
+    }
+  })
+
+  // G2：合并 + 归档 + 生效（写操作，readOnly 403；回滚态 409 带 mergeBlockedReason）
+  app.post('/api/agent-supply/merge', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    const projectId = manager.getActiveId()
+    if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
+    try {
+      const result = executeMerge(service, projectId)
+      // 状态码按显式判别字段定，不靠文案猜（文案改一个字就会静默降级）
+      if (result.code === 'blocked') return reply.code(409).send(result)
+      return result
+    } catch (error) {
+      return reply.code(500).send({ error: `合并失败：${error instanceof Error ? error.message : String(error)}` })
     }
   })
 

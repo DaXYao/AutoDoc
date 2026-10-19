@@ -1644,7 +1644,9 @@ function supplyBaselineOf(service: DocService, graph: ProjectGraph): AgentSupply
 export function collectAgentSupply(service: DocService, projectId: string): AgentSupplyContext {
   // ignoreSnapshot：供给层一律走实时视图（graph 已套用缓存里的 AI 划分，且只读缓存、绝不发起 AI 请求）。
   // 不吃快照短路——那条路径的 graph 是目录划分版本，mod:i 语义与界面所见不一致，且快照可能陈旧到漏掉新文件的函数。
-  const { graph } = loadInsight(service, '', { ignoreSnapshot: true })
+  // supplyOverlay:false：basis / 索引 / 建议只由「静态 + 本地 AI」决定，不能吃 Agent 自己的供给
+  // （否则 coreJudgment 供给改掉模块核心表 → flowsBasis 变 → 同一批文件在合并后被自己判成契约过期）。
+  const { graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
   const dir = supplyDirOf(service.storage.dataPath, projectId)
   const classification = service.normalized.config.classification
   const scan = scanAgentSupply({ dir, graph, classification })

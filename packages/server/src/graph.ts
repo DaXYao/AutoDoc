@@ -5,7 +5,8 @@ import type {
   FunctionDoc,
   FunctionInsight,
   InsightChain,
-  InsightModule
+  InsightModule,
+  ProjectInsight
 } from '@autodoc/shared-types'
 
 /**
@@ -295,6 +296,34 @@ export interface CoreJudgment {
 }
 
 /**
+ * 按当前 isCore 重算各模块 coreFunctionIds（coreScore 降序）。
+ * 任何就地改写核心判定的路径（本地 applyCoreJudgment、Agent coreJudgment 供给）之后都必须调用，
+ * 否则模块核心表与 functions[].isCore 自相矛盾（ModuleDetail / flow / 供给索引都吃这份表）。
+ */
+export function rebuildModuleCores(graph: ProjectGraph): void {
+  for (const mod of graph.modules) {
+    mod.coreFunctionIds = mod.functionIds
+      .filter((id) => graph.insights.get(id)?.isCore)
+      .sort(
+        (a, b) =>
+          (graph.insights.get(b)?.coreScore ?? 0) - (graph.insights.get(a)?.coreScore ?? 0)
+      )
+  }
+}
+
+/**
+ * 把 graph.modules 的核心表镜像到 insight.modules（两者是浅拷贝关系，按 id 对齐）。
+ * 任何改写核心判定的路径之后都要调用，否则前端读的 insight.modules[].coreFunctionIds 停在旧值。
+ */
+export function syncModuleCores(insight: ProjectInsight, graph: ProjectGraph): void {
+  const byId = new Map(graph.modules.map((m) => [m.id, m]))
+  for (const m of insight.modules) {
+    const g = byId.get(m.id)
+    if (g) m.coreFunctionIds = [...g.coreFunctionIds]
+  }
+}
+
+/**
  * 应用 AI 核心判定（按功能重要性）：未列入者视为非核心。
  * 覆盖静态中心度的 isCore，并重算各模块 coreFunctionIds。
  */
@@ -311,12 +340,5 @@ export function applyCoreJudgment(graph: ProjectGraph, judgments: CoreJudgment):
     ins.coreSource = 'ai'
     ins.coreReason = j.reason ?? ''
   }
-  for (const mod of graph.modules) {
-    mod.coreFunctionIds = mod.functionIds
-      .filter((id) => graph.insights.get(id)?.isCore)
-      .sort(
-        (a, b) =>
-          (graph.insights.get(b)?.coreScore ?? 0) - (graph.insights.get(a)?.coreScore ?? 0)
-      )
-  }
+  rebuildModuleCores(graph)
 }

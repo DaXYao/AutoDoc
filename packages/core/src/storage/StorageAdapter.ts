@@ -34,6 +34,9 @@ export function toSnapshotMeta(snapshot: InsightSnapshot): InsightSnapshotMeta {
   // 用户命名/备注（H3）：仅在有值时携带，旧数据缺省保持 undefined
   if (snapshot.label !== undefined) meta.label = snapshot.label
   if (snapshot.note !== undefined) meta.note = snapshot.note
+  // G2：语义来源与 agent 标识
+  if (snapshot.source !== undefined) meta.source = snapshot.source
+  if (snapshot.agent !== undefined) meta.agent = snapshot.agent
   return meta
 }
 

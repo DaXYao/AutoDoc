@@ -32,8 +32,10 @@ import {
   type FlowDeps,
   type FlowGenStats
 } from './flow.js'
-import { applyCoreJudgment, applyPartition, buildGraph, type CoreJudgment, type Partition, type ProjectGraph } from './graph.js'
+import { applyCoreJudgment, applyPartition, buildGraph, syncModuleCores, type CoreJudgment, type Partition, type ProjectGraph } from './graph.js'
 import { collectWorkspacePackageNames } from './workspacePackages.js'
+import { isCategoryCandidate, markClassified } from './categoryCandidates.js'
+import { applySupplyOverlay, clearSupplyCache, snapshotSourceOf } from './supplyCache.js'
 
 /** AI 划分信封（缓存单元）：members 为函数在索引表中的下标 */
 interface PartitionEnvelope {
@@ -320,19 +322,6 @@ function chunkItemsOf(graph: ProjectGraph, filter: (fn: FunctionDoc) => boolean)
   return indexTable(graph)
     .map((id) => ({ id, fn: graph.nodes.get(id)!, file: graph.fileOf.get(id)! }))
     .filter((x) => filter(x.fn))
-}
-
-/**
- * I2：applyCategories 会把 pending 函数的 category 就地改写为 AI 判定值（三分类分组/统计需即时反映），
- * 但这会使下一次 refresh 的「pending 候选集」漂移 → chunkHash 漂移 → 缓存永不命中且 aiCategory 丢失。
- * 用 WeakSet 记录「曾被 AI 分类」的 FunctionDoc（键 = service.files 中的对象本身：跨项目天然隔离、
- * regenerate 后随旧对象释放），候选 = 当前 pending ∪ 曾判定者，使 chunk 划分跨多次刷新稳定。
- */
-const aiClassifiedFns = new WeakSet<FunctionDoc>()
-
-/** categories 候选判定（refresh 的 hadPending 与 chunk plan 共用同一口径） */
-function isCategoryCandidate(fn: FunctionDoc): boolean {
-  return fn.category === 'pending' || aiClassifiedFns.has(fn)
 }
 
 /** categories chunk 输入行（= prompt 数据段，同时是 chunkHash 数据源）；idx 为 chunk 内局部序号 */
@@ -1219,10 +1208,10 @@ function applyCategories(
     f.aiCategory = v.category
     f.aiCategoryReason = v.reason
     // 同步到图谱/服务内存中的 FunctionDoc，使三分类分组与统计反映 AI 判定；
-    // I2：记入 WeakSet，使 categories 候选集跨刷新稳定（否则 pending 消失 → chunkHash 漂移，见 aiClassifiedFns）
+    // I2：记入 WeakSet，使 categories 候选集跨刷新稳定（否则 pending 消失 → chunkHash 漂移，见 categoryCandidates）
     const node = graph.nodes.get(fnId)
     if (node && node.category === 'pending') {
-      aiClassifiedFns.add(node)
+      markClassified(node)
       node.category = v.category
     }
   }
@@ -1294,7 +1283,12 @@ function applyExternals(
   insight.externals = copy
 }
 
-/** 将图谱的核心判定同步到 insight.functions */
+/**
+ * 将图谱的核心判定同步到 insight.functions。
+ * 同时同步 insight.modules[].coreFunctionIds：insight.modules 是 graph.modules 的浅拷贝
+ * （buildInsight / rebuildInsightFromGraph），且拷贝发生在 applyCoreJudgment 之前，
+ * 不同步就会让「函数级 isCore」与「模块级核心表」互相矛盾（界面与索引都吃后者）。
+ */
 function syncCore(insight: ProjectInsight, graph: ProjectGraph): void {
   for (const [id, ins] of Object.entries(insight.functions)) {
     const g = graph.insights.get(id)
@@ -1303,6 +1297,7 @@ function syncCore(insight: ProjectInsight, graph: ProjectGraph): void {
     ins.coreSource = g.coreSource
     ins.coreReason = g.coreReason
   }
+  syncModuleCores(insight, graph)
 }
 
 function applyRoles(insight: ProjectInsight, roles: Record<string, string>): void {
@@ -1385,6 +1380,8 @@ export function saveInsightSnapshot(
   trigger: InsightSnapshotTrigger
 ): InsightSnapshot | null {
   try {
+    // 归档必须能反映来源：overlay 已在调用前叠好，agentSources/aiSource 就是这一版的出处凭据
+    const { source, agent } = snapshotSourceOf(insight)
     const snapshot: InsightSnapshot = {
       id: randomUUID(),
       savedAt: new Date().toISOString(),
@@ -1395,6 +1392,8 @@ export function saveInsightSnapshot(
       aiGenerated: insight.aiGenerated,
       summary: insight.summary,
       stats: computeSnapshotStats(insight, graph),
+      source,
+      ...(agent ? { agent } : {}),
       insight
     }
     service.storage.addInsightSnapshot(snapshot)
@@ -1431,6 +1430,15 @@ export interface LoadInsightOptions {
    * 供给层的索引/校验/建议必须与 G2 的合并基线同源，故不能吃快照短路（快照路径的 graph 未套用 AI 划分）。
    */
   ignoreSnapshot?: boolean
+  /**
+   * G2：是否套用 Agent 供给缓存（缺省 true = 实时视图所见即含供给）。
+   * 供给层自身（collectAgentSupply 的 basis/索引/建议、executeMerge 的合并基线）必须传 false：
+   * ① basis 只该由静态 + 本地 AI 决定，否则 Agent 的 coreJudgment 供给改写模块核心表后会反过来
+   *    改掉 basis（flowsBasis 含 coreFunctionIds）→ 同一批供给文件在合并后被自己判成「契约过期」；
+   * ② 基线若已 overlay 过，aiStatus/aiSource 会在上一轮结果上再判一次（agent 被误升为 mixed），
+   *    且合并结果依赖上一轮状态 → 不幂等，内容哈希去重失效。
+   */
+  supplyOverlay?: boolean
 }
 
 /** 读取洞察：静态 + 命中缓存的 AI（不触发网络） */
@@ -1449,8 +1457,13 @@ export function loadInsight(
   }
   const aiEnabled = getDeepSeekConfig() !== null
   const insight = buildInsight(graph, aiEnabled, feedback)
-  if (!aiEnabled) return { insight, graph }
   const cache = new AiCache(dirname(service.storage.dataPath))
+  const overlay = opts.supplyOverlay !== false
+  // 无 KEY 时 Agent 供给同样是合法来源，增量路径也要套用（两条链路地位平等，不许显示「未生成」）
+  if (!aiEnabled) {
+    if (overlay) applySupplyOverlay(insight, graph, cache)
+    return { insight, graph }
+  }
   const fp = graph.fingerprint
   let touched = false
   // M1：feedback='' 时优先用 partition:latest（与 refresh 的 previous 语义对齐），
@@ -1538,7 +1551,9 @@ export function loadInsight(
       blocks: blocksStatusOf(blocksRead.out, blocksRead.misses, true)
     }
   }
-  insight.aiGenerated = touched
+  // G2：增量路径套用供给缓存（本地 pass 之后再叠一层 Agent 供给，冲突以 Agent 为准）
+  if (overlay) applySupplyOverlay(insight, graph, cache)
+  insight.aiGenerated = touched || insight.aiGenerated
   return { insight, graph }
 }
 
@@ -1570,8 +1585,17 @@ export async function refreshInsightAI(
   const graph = buildGraph(service.files)
   const aiEnabled = getDeepSeekConfig() !== null
   const insight = buildInsight(graph, aiEnabled, feedback)
-  if (!aiEnabled) return { insight, graph }
   const cache = new AiCache(dirname(service.storage.dataPath))
+  // G2：force（整份重算）与 forcePartition（重新划分）都清除供给缓存——谁跑谁赢，旧版本留在快照里。
+  // forcePartition 尤其必须清：graph.fingerprint 只含节点 id + 边对，重新划分后指纹不变，
+  // 旧 modules/chain:N 供给会被贴到新划分下的另一个对象上（张冠李戴）。
+  const skipSupply = opts.force === true || opts.forcePartition === true
+  if (skipSupply) clearSupplyCache(cache)
+  // 无 KEY 也要套用供给：Agent 供给是合法来源，两条链路地位平等（早退之前就得叠上）
+  if (!aiEnabled) {
+    if (!skipSupply) applySupplyOverlay(insight, graph, cache)
+    return { insight, graph }
+  }
   const fp = graph.fingerprint
   const fbKey = `partition:${hash8(feedback)}`
   const status: Partial<Record<AiPassKey, AiPassStatus>> = {}
@@ -1866,6 +1890,13 @@ export async function refreshInsightAI(
   )
   cache.set(fp, 'aiStatus', status)
   insight.aiStatus = status
+  // G2：force / forcePartition 不套用供给（已在入口清掉 supply:* 键）；其余路径叠一层 Agent 供给（Agent 字段赢）。
+  // 写前重读：本实例全程持有一份内存副本，AiCache 每次写已自带 staleness 重读，
+  // 这里再显式对齐一次，确保读到的是并发 merge 刚写入的最新 supply:*。
+  if (!skipSupply) {
+    cache.reload()
+    applySupplyOverlay(insight, graph, cache)
+  }
   // I2：chunk 增量统计入日志与返回值；I3：同时记入 service，供 /api/insight 家族响应附带下发
   console.log(
     `[autodoc] AI chunk 增量：categories 复用 ${aiChunkStats.categories.reused}/重跑 ${aiChunkStats.categories.rerun}、` +

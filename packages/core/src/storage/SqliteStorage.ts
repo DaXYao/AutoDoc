@@ -99,7 +99,9 @@ export class SqliteStorage implements StorageAdapter {
       'ALTER TABLE changes ADD COLUMN commit_json TEXT',
       'ALTER TABLE annotations ADD COLUMN kind TEXT',
       'ALTER TABLE insight_history ADD COLUMN label TEXT',
-      'ALTER TABLE insight_history ADD COLUMN note TEXT'
+      'ALTER TABLE insight_history ADD COLUMN note TEXT',
+      'ALTER TABLE insight_history ADD COLUMN source TEXT',
+      'ALTER TABLE insight_history ADD COLUMN agent TEXT'
     ]) {
       try {
         this.db.exec(ddl)
@@ -306,7 +308,7 @@ export class SqliteStorage implements StorageAdapter {
     // 只 SELECT meta 列（不取 insight_json），按保存时间倒序（新→旧）
     const rows = this.conn()
       .prepare(
-        'SELECT id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, label, note FROM insight_history ORDER BY saved_at DESC'
+        'SELECT id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, label, note, source, agent FROM insight_history ORDER BY saved_at DESC'
       )
       .all()
     return rows.map((row) => this.rowToSnapshotMeta(row))
@@ -337,7 +339,7 @@ export class SqliteStorage implements StorageAdapter {
     this.backupOnce()
     this.conn()
       .prepare(
-        'INSERT INTO insight_history (id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, insight_json, label, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO insight_history (id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, insight_json, label, note, source, agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
       .run(
         snapshot.id,
@@ -351,7 +353,9 @@ export class SqliteStorage implements StorageAdapter {
         JSON.stringify(snapshot.stats),
         JSON.stringify(snapshot.insight),
         snapshot.label ?? null,
-        snapshot.note ?? null
+        snapshot.note ?? null,
+        snapshot.source ?? null,
+        snapshot.agent ?? null
       )
     return toSnapshotMeta(snapshot)
   }
@@ -476,11 +480,12 @@ export class SqliteStorage implements StorageAdapter {
         // stats_json 损坏时保留空摘要，不阻断历史读取
       }
     }
+    const trigger = row.trigger
     return {
       id: String(row.id),
       savedAt: String(row.saved_at),
       graphFingerprint: typeof row.fingerprint === 'string' ? row.fingerprint : '',
-      trigger: row.trigger === 'partition' ? 'partition' : 'refresh',
+      trigger: trigger === 'partition' ? 'partition' : trigger === 'agent' ? 'agent' : 'refresh',
       partitionFeedback: typeof row.partition_feedback === 'string' ? row.partition_feedback : '',
       aiEnabled: Number(row.ai_enabled) === 1,
       aiGenerated: Number(row.ai_generated) === 1,
@@ -488,7 +493,10 @@ export class SqliteStorage implements StorageAdapter {
       stats,
       // 用户命名/备注（H3）：NULL（旧行/未设置）→ undefined；空串按原样读出
       label: typeof row.label === 'string' ? row.label : undefined,
-      note: typeof row.note === 'string' ? row.note : undefined
+      note: typeof row.note === 'string' ? row.note : undefined,
+      // G2：语义来源与 agent 标识
+      source: row.source === 'agent' || row.source === 'mixed' || row.source === 'api' ? row.source : undefined,
+      agent: typeof row.agent === 'string' && row.agent.length > 0 ? row.agent : undefined
     }
   }
 

@@ -7,7 +7,9 @@ import { AI_PASS_LABELS, AI_STATUS_META, CATEGORY_LABELS, CATEGORY_ORDER } from 
 
 /** 快照触发来源 → 中文标签 */
 export function snapshotTriggerLabel(trigger: InsightSnapshotTrigger): string {
-  return trigger === 'partition' ? '按建议划分' : '重新生成'
+  if (trigger === 'partition') return '按建议划分'
+  if (trigger === 'agent') return 'Agent 供给合并'
+  return '重新生成'
 }
 
 /**

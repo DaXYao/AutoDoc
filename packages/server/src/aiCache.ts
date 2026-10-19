@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 /**
@@ -8,6 +8,8 @@ import { dirname, join } from 'node:path'
 export class AiCache {
   private readonly path: string
   private data: Record<string, unknown> = {}
+  /** 上次读/写时的文件身份（mtime+size）：用于「写前重读」判定磁盘是否被别的实例改过 */
+  private stamp: string | null = null
 
   constructor(baseDir: string) {
     this.path = join(baseDir, 'ai-cache.json')
@@ -18,16 +20,50 @@ export class AiCache {
     try {
       if (existsSync(this.path)) {
         this.data = JSON.parse(readFileSync(this.path, 'utf-8')) as Record<string, unknown>
+        this.stamp = this.statStamp()
       }
     } catch {
       this.data = {}
+      this.stamp = null
     }
+  }
+
+  private statStamp(): string | null {
+    try {
+      const st = statSync(this.path)
+      return `${st.mtimeMs}:${st.size}`
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 写前重读：本实例持有一份内存副本，而同一进程里可能有另一个实例（长流程 refreshInsightAI
+   * 全程持有一个，合并端点另开一个）已经改过磁盘。若不在每次写之前吸收磁盘内容，
+   * 后写的那次 flush 会用旧副本整份覆盖，把别人写的键（如 `supply:*`）静默抹掉。
+   * 只在文件身份（mtime+size）真的变了时才重读，故常态下每次写只多一次 stat。
+   */
+  private absorb(): void {
+    const stamp = this.statStamp()
+    if (stamp === null || stamp === this.stamp) return
+    this.load()
+  }
+
+  /**
+   * 显式重读整份缓存（无条件丢弃当前内存副本）。
+   * 供长流程在关键节点（如 refreshInsightAI 套用供给之前）主动对齐磁盘。
+   */
+  reload(): void {
+    this.data = {}
+    this.stamp = null
+    this.load()
   }
 
   private flush(): void {
     try {
       mkdirSync(dirname(this.path), { recursive: true })
       writeFileSync(this.path, JSON.stringify(this.data), 'utf-8')
+      this.stamp = this.statStamp()
     } catch {
       // 缓存写失败不影响主流程
     }
@@ -38,6 +74,7 @@ export class AiCache {
   }
 
   set(fingerprint: string, key: string, value: unknown): void {
+    this.absorb()
     this.data[`${fingerprint}:${key}`] = value
     this.flush()
   }
@@ -52,12 +89,14 @@ export class AiCache {
   }
 
   setGlobal(key: string, value: unknown): void {
+    this.absorb()
     this.data[key] = value
     this.flush()
   }
 
   /** 删除单个全局键；返回是否确实删除了存在的键 */
   deleteGlobal(key: string): boolean {
+    this.absorb()
     if (!(key in this.data)) return false
     delete this.data[key]
     this.flush()
@@ -65,6 +104,7 @@ export class AiCache {
   }
 
   clear(fingerprint?: string): void {
+    this.absorb()
     if (!fingerprint) {
       this.data = {}
     } else {
@@ -81,6 +121,7 @@ export class AiCache {
    * 它们的语义依赖 pass1/2 的划分与核心判定，图指纹不变也会因重算而错配。
    */
   clearByPrefix(fingerprint: string, keyPrefix: string): number {
+    this.absorb()
     const full = `${fingerprint}:${keyPrefix}`
     let removed = 0
     for (const k of Object.keys(this.data)) {
