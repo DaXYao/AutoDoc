@@ -1424,12 +1424,25 @@ export interface RefreshOptions {
   forcePartition?: boolean
 }
 
+export interface LoadInsightOptions {
+  /**
+   * G1：忽略回滚指针（activeInsightSnapshotId），一律走「实时视图」计算路径。
+   * 实时路径 = 静态图谱 + ai-cache 只读回读（含 AI 划分 applyPartition），**绝不发起 AI 网络请求**。
+   * 供给层的索引/校验/建议必须与 G2 的合并基线同源，故不能吃快照短路（快照路径的 graph 未套用 AI 划分）。
+   */
+  ignoreSnapshot?: boolean
+}
+
 /** 读取洞察：静态 + 命中缓存的 AI（不触发网络） */
-export function loadInsight(service: DocService, feedback = ''): InsightBundle {
+export function loadInsight(
+  service: DocService,
+  feedback = '',
+  opts: LoadInsightOptions = {}
+): InsightBundle {
   const graph = buildGraph(service.files)
   // H1：回滚/历史视图——若设了 activeId 且快照命中，直接返回该快照的 insight；
   // graph 仍实时构建（其它消费方需要）。activeId 为空或快照不存在时，走现有缓存计算逻辑。
-  const activeId = service.storage.getActiveInsightSnapshotId()
+  const activeId = opts.ignoreSnapshot ? null : service.storage.getActiveInsightSnapshotId()
   if (activeId) {
     const snap = service.storage.getInsightSnapshot(activeId)
     if (snap) return { insight: snap.insight, graph }

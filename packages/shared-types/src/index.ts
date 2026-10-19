@@ -431,8 +431,8 @@ export interface FunctionInsight {
   outDegree: number
   coreScore: number
   isCore: boolean
-  /** 核心判定来源：ai=AI 按功能重要性判定，static=静态中心度兑底 */
-  coreSource: 'ai' | 'static'
+  /** 核心判定来源：ai=本地 KEY API 判定，static=静态中心度兑底，agent=外部 Agent 供给（G2 合并时写入） */
+  coreSource: 'ai' | 'static' | 'agent'
   /** AI 判为核心的理由（非 AI 判定为空串） */
   coreReason: string
   chainIds: string[]
@@ -544,6 +544,12 @@ export interface ProjectInsight {
    * 与自动生成的 FunctionDoc/CallEdge 分离，只存于洞察层。AI 未生成/失败时缺省（前端保持既有文案）。
    */
   externals?: Record<string, Record<string, ExternalSymbolInfo>>
+  /**
+   * G1 预留（G2 合并时写入）：Agent 供给的字段级来源标记，随 insight 载荷一起进快照
+   * （SQLite 的 insight_json / JSON 存储的整份对象都能原样回读），故历史快照也能回答「这一版是谁写的」。
+   * key = `${AgentSupplyPass}:${objectId}`，value = 生效的 agent 标识；未列出的 pass/对象 = 本地生成。
+   */
+  agentSources?: InsightAgentSources
 }
 
 /**
@@ -604,6 +610,15 @@ export interface InsightSnapshotMeta {
   label?: string
   /** 用户可编辑的备注（长文本补充）；缺省/空串则列表不显示备注行 */
   note?: string
+  /**
+   * G1 预留（G2 写入）：本快照的语义来源。缺省（旧快照）= 'local'（本地 KEY API）。
+   * 注意持久化缺口：core 的 toSnapshotMeta 只白名单复制固定字段、SQLite 的 insight_history 也没有对应列，
+   * 因此该字段目前只在「内存中的快照对象」上成立；G2 若要让它跨重启可读，需同步改 core 存储层
+   * （或改从 insight.agentSources 派生，那份载荷已能原样回读）。
+   */
+  source?: SemanticSource
+  /** G1 预留（G2 写入）：source='agent' 时生效的 agent 标识（如 qoder / codex） */
+  agent?: string
 }
 
 /** 完整快照：元信息 + 整份 ProjectInsight */
@@ -808,4 +823,272 @@ export interface AgentRulesExportResponse {
   ok: true
   path: string
   overwritten: boolean
+}
+
+/* ------------------------- Agent 语义供给通道（G1） ------------------------- */
+
+/**
+ * AI 语义层的单值来源口径：local=本地 KEY API（DeepSeek）生成；agent=外部订阅制 Agent 供给。
+ * 两条链路地位平等，最终都表现为洞察（及其历史快照）里的同一批字段，只是来源标记不同。
+ * 注意：`AiPassStatus`（ok/partial/failed/skipped）表达的是**质量状态**而非来源，故不扩该枚举；
+ * 来源统一由本类型 + ProjectInsight.agentSources + FunctionInsight.coreSource='agent' 表达。
+ */
+export type SemanticSource = 'local' | 'agent'
+
+/**
+ * G1 预留（G2 合并时写入 ProjectInsight.agentSources）：字段级来源标记。
+ * key = `${AgentSupplyPass}:${objectId}`（objectId 为 moduleId / chainId / functionId），value = 生效的 agent 标识。
+ */
+export type InsightAgentSources = Record<string, string>
+
+/**
+ * 可被外部 Agent 供给的语义 pass（一期四类语义 → 六个 pass）。
+ * 每个 pass 一类一份文件，值形状逐字段对齐 `ai-cache.json` 里同名本地 pass 的值（详见 AgentSupplyValueShapes）。
+ * flows / externals / keySteps / partition 不接受外部供给（本地专属或第一期不在范围内）。
+ */
+export type AgentSupplyPass =
+  | 'modules'
+  | 'narratives'
+  | 'categories'
+  | 'coreJudgment'
+  | 'coreRoles'
+  | 'blocks'
+
+/**
+ * ①模块名称与职责描述：moduleId → 对账锚点 + 一句话职责（成员归属仍由本地静态计算，不接受供给）。
+ * moduleId（`mod:i`）是位置化 id，重划分后可能指向另一个模块，故 name 兼作条目级对账锚点。
+ */
+export interface AgentSupplyModuleValue {
+  /**
+   * 对账锚点：必须逐字等于契约索引里该 `mod:i` 的**当前**模块名（不是新起的名字）。
+   * 与实时划分不一致 = 该 `mod:i` 已漂移到另一个模块 → 该条判错，需重新导出契约。
+   */
+  name: string
+  /** 一句话职责描述（本 pass 真正供给的语义） */
+  description: string
+}
+
+/**
+ * ②链路叙事 + 每步角色：chainId → 对账锚点 + 叙事 + 路径内各函数职责。
+ * narrative / stepRoles 皆可选但至少要有一个（与本地 `narratives:v2` 缓存信封同口径）；
+ * chainId（`chain:N`）是位置化 id，故 entryId 兼作条目级对账锚点。
+ */
+export interface AgentSupplyNarrativeValue {
+  /**
+   * 对账锚点：必须逐字等于契约索引里该 `chain:N` 的入口函数稳定 id（= 实时 chains[N].entryId）。
+   * 不一致 = 该 `chain:N` 已漂移到另一条链路 → 该条判错，需重新导出契约。
+   */
+  entryId: string
+  /** 这条链路完成了什么（一句话） */
+  narrative?: string
+  /** 路径上每个函数在本链路里的职责；key 必须是该链路 path 上的函数稳定 ID（不得用函数名标签） */
+  stepRoles?: Record<string, string>
+}
+
+/** ③三分类：functionId → 类别 + 理由（不接受 'pending'——供给就是要给出判定） */
+export interface AgentSupplyCategoryValue {
+  category: Category
+  reason: string
+}
+
+/** ③核心判定：functionId → 是否核心 + 理由（与本地 `<图指纹>:coreJudgment` 值形状一致） */
+export interface AgentSupplyCoreValue {
+  core: boolean
+  reason: string
+}
+
+/**
+ * pass → 单条目值形状（= `ai-cache.json` 里该 pass 的值形状，`values` 的键是对象 id）：
+ * - modules      → 本地 `<图指纹>:partition:latest`（PartitionEnvelope.modules[i]，moduleId `mod:i` 即下标 i；只写回 name/description，name 兼作对账锚点）
+ * - narratives   → 本地 `<图指纹>:narratives:v2`（NarrativeEnvelope；entryId 是供给侧对账字段，非缓存信封字段）
+ * - categories   → 本地 `chunk:categories:<hash>`（CategoryEnvelope）
+ * - coreJudgment → 本地 `<图指纹>:coreJudgment`（CoreJudgment）
+ * - coreRoles    → 本地 `<图指纹>:coreRoles`（Record<functionId, string>）
+ * - blocks       → 本地 `chunk:blocks:<hash>`（Record<functionId, InternalStep[]>）
+ */
+export interface AgentSupplyValueShapes {
+  modules: AgentSupplyModuleValue
+  narratives: AgentSupplyNarrativeValue
+  categories: AgentSupplyCategoryValue
+  coreJudgment: AgentSupplyCoreValue
+  /** ④函数级用途：一句话系统角色（本地展示为「系统角色」） */
+  coreRoles: string
+  /** ④内部步骤：注释块归一后的有序大纲（blockIndexes 指向该函数 codeBlocks 下标） */
+  blocks: InternalStep[]
+}
+
+/**
+ * 一个供给文件的信封（文件名 `<pass>.<agent>.json`，pass/agent 必须与文件名一致）。
+ * writtenAt 为**文件级**时间戳，对该文件里的每个条目生效：同一对象被多家 Agent 供给时按它「最新者赢」。
+ */
+export interface AgentSupplyFile<P extends AgentSupplyPass = AgentSupplyPass> {
+  pass: P
+  /** Agent 标识（如 codex / qoder / chatgpt） */
+  agent: string
+  /** ISO 时间字符串（须可被 Date.parse 解析） */
+  writtenAt: string
+  /**
+   * 划分身份指纹（文件级对账）：modules / narratives（位置化 id）**必填**且必须逐字等于
+   * 契约给出的当前值，不一致 = 契约已过期（模块划分已变）→ 整份判错；
+   * 函数类 pass（稳定 id）**禁止**携带（按契约外字段判错）。
+   */
+  basis?: string
+  /** 对象 id → 该 pass 的值（形状见 AgentSupplyValueShapes） */
+  values: Record<string, AgentSupplyValueShapes[P]>
+}
+
+/** 校验通过的单个供给条目（对象级，G2 字段级合并的最小单位） */
+export interface AgentSupplyEntry<P extends AgentSupplyPass = AgentSupplyPass> {
+  pass: P
+  /** 对象 id：moduleId / chainId / functionId（按 pass） */
+  objectId: string
+  value: AgentSupplyValueShapes[P]
+  agent: string
+  writtenAt: string
+  /** 来源文件名（供给目录内，如 `narratives.qoder.json`） */
+  file: string
+}
+
+/** 判别联合：按 entry.pass 收窄即可拿到对应值类型（G2 合并用） */
+export type AnyAgentSupplyEntry = {
+  [P in AgentSupplyPass]: AgentSupplyEntry<P>
+}[AgentSupplyPass]
+
+/**
+ * 供给校验错误（逐条产出，不静默丢弃）：file=文件名；
+ * path=文件内定位（如 `values["chain:12"].narrative`，文件级错误缺省）；objectId=涉及的对象 id（可缺省）。
+ * reason 里回显的 Agent 可控内容一律截断（服务端 cutEcho）。
+ */
+export interface AgentSupplyError {
+  file: string
+  path?: string
+  objectId?: string
+  reason: string
+}
+
+/**
+ * 形状合法但按规则不予采纳的条目（一期只有一种：三分类已被 autodoc.config.json 的
+ * classification.rules 命中——那是用户显式意图，优先级最高）。必须显式列出原因，不能静默丢。
+ */
+export interface AgentSupplyIgnored {
+  file: string
+  pass: AgentSupplyPass
+  objectId: string
+  reason: string
+}
+
+/** 同一对象被多家 Agent 供给时的胜出结果（writtenAt 最新者赢；并列时按 agent、文件名兜底保证确定性） */
+export interface AgentSupplyWinner {
+  pass: AgentSupplyPass
+  objectId: string
+  /** 实际生效的 agent（G3 据此显示 @agent 徽标） */
+  agent: string
+  writtenAt: string
+  file: string
+  /** 参与竞争的家数（>1 表示存在被覆盖的供给） */
+  contenders: number
+}
+
+/** 扫描规模统计（供界面状态条与契约文本抬头） */
+export interface AgentSupplyStats {
+  /** 供给目录下参与扫描的 .json 文件数（含校验失败的） */
+  fileCount: number
+  /** 校验通过的条目总数（含被赢家覆盖的落选条目） */
+  entryCount: number
+  /** 按 (pass, objectId) 聚合后的生效条目数 */
+  winnerCount: number
+  errorCount: number
+  ignoredCount: number
+  /** 出现过的 agent 标识（排序去重） */
+  agents: string[]
+  /** 各 pass 的生效条目数（无生效条目的 pass 不出现在 map 里） */
+  perPass: Partial<Record<AgentSupplyPass, number>>
+}
+
+/** 扫描结果：已解析条目 + 错误清单 + 忽略清单 + 按对象聚合的「谁赢了」 */
+export interface AgentSupplyScanResult {
+  /** 供给目录绝对路径：`<dirname(storage.dataPath)>/supply/<projectId>/insight` */
+  dir: string
+  /** 目录不存在/为空时为 true（前端据此显示「尚无供给」而非「扫描失败」） */
+  empty: boolean
+  entries: AnyAgentSupplyEntry[]
+  winners: AgentSupplyWinner[]
+  errors: AgentSupplyError[]
+  ignored: AgentSupplyIgnored[]
+  stats: AgentSupplyStats
+  scannedAt: string
+}
+
+/**
+ * 建议清单条目：还缺哪一类语义供给。
+ * kind 与 pass 一一对应，targetId 按 pass 分别是 moduleId / chainId / functionId。
+ */
+export type AgentSupplySuggestionKind =
+  | 'module-identity'
+  | 'chain-narrative'
+  | 'function-category'
+  | 'function-core'
+  | 'function-purpose'
+  | 'function-steps'
+
+export interface AgentSupplySuggestion {
+  kind: AgentSupplySuggestionKind
+  pass: AgentSupplyPass
+  targetId: string
+  /** 可读标签（模块名 / 函数「类.名」/ 链路入口→步数） */
+  label: string
+}
+
+/**
+ * 供给层的合并基线状态（G1 只算出并下发；G2 据此拦截合并）。
+ * 索引 / id 校验 / 建议 / basis 一律基于「实时视图的洞察」（不走快照短路），
+ * 因此回滚视图下（生效快照 ≠ 实时视图）合并必然错位，必须拒绝。
+ */
+export interface AgentSupplyBaseline {
+  /** 当前生效的洞察快照 id；null = 无生效快照（实时视图）。悬空指针（快照已不存在）按 null 处理 */
+  activeSnapshotId: string | null
+  /** 是否处于回滚视图（activeSnapshotId 命中真实快照） */
+  rolledBack: boolean
+  /** 回滚视图下「合并将被拒绝」的原因文案（实时视图为空串） */
+  mergeBlockedReason: string
+  /** 当前划分身份指纹：modules / narratives 信封 basis 的必须值（逐字抄） */
+  basis: string
+}
+
+/** GET /api/agent-supply 与 POST /api/agent-supply/scan 响应 */
+export interface AgentSupplyResponse extends AgentSupplyScanResult {
+  /** 供给目录所属项目 id（= 当前活动项目；文件要落到这个 id 的分区里） */
+  projectId: string | null
+  suggestions: AgentSupplySuggestion[]
+  /** 合并基线状态（实时视图 / 回滚视图 + 拒绝原因 + 当前划分指纹） */
+  baseline: AgentSupplyBaseline
+}
+
+/** GET /api/agent-supply-rules 响应：每次现生成的契约文本 + 规模统计 */
+export interface AgentSupplyRulesResult {
+  rulesText: string
+  generatedAt: string
+  stats: {
+    fileCount: number
+    entryCount: number
+    errorCount: number
+    ignoredCount: number
+    suggestionCount: number
+    /** 目标索引里列出的函数 id 数（含自检补齐的） */
+    indexFunctionCount: number
+    /** 目标索引里列出的链路 id 数（含自检补齐的） */
+    indexChainCount: number
+  }
+}
+
+/**
+ * POST /api/agent-supply-rules/export 响应。
+ * path = 目标仓 `.autodoc/AGENT_RULES.md`（AutoDoc 纯生成物，覆盖自身无需备份）；
+ * supplyDir = Agent 该把供给文件写到的绝对目录（在 AutoDoc 侧，绝不写进被分析项目）。
+ */
+export interface AgentSupplyExportResponse {
+  ok: true
+  path: string
+  overwritten: boolean
+  supplyDir: string
 }

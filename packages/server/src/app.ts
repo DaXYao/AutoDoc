@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AgentNotesResponse, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse } from '@autodoc/shared-types'
+import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AgentNotesResponse, AgentSupplyResponse, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse } from '@autodoc/shared-types'
 import { inspectParseCache, resolveShowRecent } from '@autodoc/core'
 import { regenerate, type DocService } from './context.js'
 import { pickFolder } from './pickFolder.js'
@@ -18,6 +18,7 @@ import {
 } from './impact.js'
 import { AskInputError, askCallStep, askFunction } from './ask.js'
 import { exportAgentRules, generateRulesText, loadAgentNotes, suggestTasks } from './agentNotes.js'
+import { collectAgentSupply, exportAgentSupplyRules, generateSupplyRulesText } from './agentSupply.js'
 import { getDeepSeekConfig } from './env.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
 
@@ -486,6 +487,82 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       // 写盘失败（.autodoc 被占为普通文件、权限等文件系统异常）：统一 { error } 形态 500
       const message = error instanceof Error ? error.message : String(error)
       return reply.code(500).send({ error: `导出失败：${message}` })
+    }
+  })
+
+  /* ------------------------- Agent 语义供给通道（G1） ------------------------- */
+
+  // 供给扫描结果 + 建议清单（纯读；脏文件走 errors/ignored 下发，不 4xx）。
+  // 对象 id 一律在实时图谱上校验，不吃可能陈旧的洞察快照。
+  app.get('/api/agent-supply', async (req, reply) => {
+    const service = manager.getActive()
+    const projectId = manager.getActiveId()
+    if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
+    try {
+      const ctx = collectAgentSupply(service, projectId)
+      const body: AgentSupplyResponse = {
+        ...ctx.scan,
+        projectId,
+        suggestions: ctx.suggestions,
+        baseline: ctx.baseline
+      }
+      return body
+    } catch (error) {
+      return reply.code(500).send({ error: `供给扫描失败：${error instanceof Error ? error.message : String(error)}` })
+    }
+  })
+
+  // 重新扫描：语义与 GET 完全相同（只读磁盘 + 实时图谱，不写任何文件），故不受 readOnly 拦截。
+  // 单独给一个 POST 是为了让 Agent/前端有「我写完了，请复查」的显式动作。
+  app.post('/api/agent-supply/scan', async (req, reply) => {
+    const service = manager.getActive()
+    const projectId = manager.getActiveId()
+    if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
+    try {
+      const ctx = collectAgentSupply(service, projectId)
+      const body: AgentSupplyResponse = {
+        ...ctx.scan,
+        projectId,
+        suggestions: ctx.suggestions,
+        baseline: ctx.baseline
+      }
+      return body
+    } catch (error) {
+      return reply.code(500).send({ error: `供给扫描失败：${error instanceof Error ? error.message : String(error)}` })
+    }
+  })
+
+  // 供给契约文本：每次现生成（索引取自实时图谱，建议清单引用的 id 一律自检补进索引）
+  app.get('/api/agent-supply-rules', async (req, reply) => {
+    const service = manager.getActive()
+    const projectId = manager.getActiveId()
+    if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
+    try {
+      const ctx = collectAgentSupply(service, projectId)
+      return generateSupplyRulesText({
+        graph: ctx.graph,
+        scan: ctx.scan,
+        suggestions: ctx.suggestions,
+        projectId,
+        dir: ctx.dir,
+        baseline: ctx.baseline
+      })
+    } catch (error) {
+      return reply.code(500).send({ error: `契约生成失败：${error instanceof Error ? error.message : String(error)}` })
+    }
+  })
+
+  // 把契约写进目标仓 `.autodoc/AGENT_RULES.md`（AutoDoc 纯生成物，覆盖自身无需备份），
+  // 并顺手建好 AutoDoc 侧供给目录。供给文件本身永不写入目标仓。
+  app.post('/api/agent-supply-rules/export', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    const projectId = manager.getActiveId()
+    if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
+    try {
+      return exportAgentSupplyRules(service, projectId)
+    } catch (error) {
+      return reply.code(500).send({ error: `导出失败：${error instanceof Error ? error.message : String(error)}` })
     }
   })
 
