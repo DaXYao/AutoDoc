@@ -2,6 +2,13 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · R1 收尾：MIT 许可证 + Node engines 对齐 · docs/config
+
+- 新增根目录 `LICENSE`（MIT，Copyright (c) 2026 DaXYao），README 末尾增加「许可证」段落。
+- 根 `package.json` 的 `engines.node` 由 `>=22.5` 改为 `>=22.13`，与 `node:sqlite` 免实验旗标要求及 README 保持一致。
+- 影响范围：仅 LICENSE / README / package.json；无代码逻辑变更，不新增依赖。`pnpm lint` 与 `pnpm test`（850 项）保持全绿。
+- **关联 commit**：本次 docs/config 提交。
+
 ## 2026-10-21 · R1：README 重写为 GitHub 主页 + 首次开源上传 · docs
 
 - **动机**：上传 GitHub 前，README 仍是需求阶段文档（把 LLM 写成「远期可选」、把跨文件调用图列为「暂不包含」、技术栈写 better-sqlite3/Node 20+/Shiki），与当前实现不符；主页也缺少产品价值与技术亮点的区分。

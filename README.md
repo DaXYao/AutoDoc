@@ -232,3 +232,7 @@ pnpm build   # 构建全部包
 - **最近三次变更**：每个函数展示最近三次 added / modified / deleted / renamed 记录，更早记录归档保留、不删除。工作区变更由指纹快照记录；Git 可用时额外回填提交历史，两者并存。
 - **语义来源与版本**：KEY API 与 Agent 供给可字段级合并；来源按对象、pass、快照三级标注——对象级用各自枚举（如模块 `ai/dir/agent`、核心判定 `ai/static/agent`、脉络树 `ai/agent/heuristic`），pass 与快照用 `api/agent/mixed`。洞察侧每次合并归档为历史版本，支持对比、命名、备注与回滚，删除仅由用户显式触发；变更侧语义在读请求时合并，不进入快照。
 - **默认展开与数据安全**：默认展开策略由 `ui.defaultExpand` 配置，用户展开状态持久化到 localStorage。SQLite 在进程内首次写入前用 `VACUUM INTO` 生成一致性备份，JSON 适配器也保留备份；批注、变更历史与快照不会被自动覆盖或清理。
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)，可自由使用、修改与分发，保留版权与许可声明即可。
