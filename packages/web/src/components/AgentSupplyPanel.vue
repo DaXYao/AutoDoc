@@ -600,7 +600,7 @@ function passLabel(pass: AgentSupplyPass): string {
         </h3>
         <p class="text-xs text-[color:var(--ad-ink-3)] mb-2">
           以下供给不符合契约，未被采纳（逐条列出，不静默丢弃）；修正后「重新扫描」。
-          pass 列区分来源：洞察侧（六个 pass）与变更侧（<code class="font-mono">变更语义</code>）。
+          pass 列区分来源：洞察侧（九个 pass）与变更侧（<code class="font-mono">变更语义</code>）。
         </p>
         <div class="max-h-[320px] overflow-auto">
           <table class="w-full text-left text-xs">

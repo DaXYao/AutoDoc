@@ -85,6 +85,16 @@ async function handleRepartition(): Promise<void> {
 
 const insight = computed(() => appState.insight)
 
+/**
+ * 是否有 Agent 供给语义生效：Agent-only（无 KEY）时 aiEnabled=false 但 aiGenerated=true，
+ * 不能再按「未配置 AI = 纯静态」提示；agentSources 由 overlay/合并快照写入。
+ */
+const hasAgentSupply = computed(() => {
+  const cur = insight.value
+  if (!cur) return false
+  return cur.partitionSource === 'agent' || Object.keys(cur.agentSources ?? {}).length > 0
+})
+
 /** 递归脉络树：有多条主线根时逐条渲染；缺失则回退扁平呈现 */
 const flows = computed(() => insight.value?.flows ?? [])
 const hasFlows = computed(() => flows.value.length > 0)
@@ -258,7 +268,7 @@ watch(
       <h2 class="text-xl font-semibold text-[color:var(--ad-ink)]">项目洞察</h2>
       <div class="flex items-center gap-2">
         <n-tag v-if="insight?.aiGenerated" size="small" type="success" :bordered="false">
-          AI 已增强
+          {{ !insight.aiEnabled && hasAgentSupply ? 'Agent 已增强' : 'AI 已增强' }}
         </n-tag>
         <n-tag v-else-if="insight?.aiEnabled" size="small" :bordered="false">
           静态分析
@@ -346,9 +356,20 @@ watch(
           </n-button>
         </div>
       </n-alert>
+      <n-alert
+        v-else-if="!insight.aiEnabled && hasAgentSupply"
+        type="success"
+        class="mb-3"
+        title="Agent 语义供给已生效"
+      >
+        <span class="text-xs">
+          当前未配置 KEY API，语义由外部 Agent 供给；模块、链路与函数面板中的 @agent 标记即其来源。
+          契约、错误与建议可在上方「Agent 供给」中查看。
+        </span>
+      </n-alert>
       <n-alert v-else-if="!insight.aiEnabled" type="warning" class="mb-3" title="未配置 AI">
         <span class="text-xs">
-          当前为纯静态图谱。在 .env 配置 DEEPSEEK_API_KEY 后可获得模块命名/职责、核心角色与链路叙事。
+          当前为纯静态图谱。可配置 DEEPSEEK_API_KEY，或让外部 Agent 按规则契约供给语义（模块划分、脉络树、三分类、调用主干等）。
         </span>
       </n-alert>
 
