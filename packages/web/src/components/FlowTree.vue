@@ -35,6 +35,17 @@ const AUTHOR_KEY = 'autodoc.author'
 
 const readOnly = computed(() => appState.meta?.readOnly ?? false)
 
+/** 节点来源徽标：AI 生成 / Agent 供给 / 启发式静态推断（三态一一对应） */
+const SOURCE_META: Record<
+  FlowNode['source'],
+  { label: string; type: 'info' | 'primary' | 'default'; title: string }
+> = {
+  ai: { label: 'AI', type: 'info', title: 'AI 生成' },
+  agent: { label: 'Agent', type: 'primary', title: 'Agent 供给' },
+  heuristic: { label: '启发式', type: 'default', title: '启发式静态推断' }
+}
+const nodeSource = computed(() => SOURCE_META[props.node.source] ?? SOURCE_META.heuristic)
+
 const isLeaf = computed(() => props.node.kind === 'leaf')
 
 /**
@@ -308,10 +319,10 @@ function truncate(text: string, max = 90): string {
             <n-tag
               size="tiny"
               :bordered="false"
-              :type="node.source === 'ai' ? 'info' : 'default'"
-              :title="node.source === 'ai' ? 'AI 生成' : '启发式静态推断'"
+              :type="nodeSource.type"
+              :title="nodeSource.title"
             >
-              {{ node.source === 'ai' ? 'AI' : '启发式' }}
+              {{ nodeSource.label }}
             </n-tag>
             <!-- 关联模块深链（可选） -->
             <button
@@ -411,8 +422,8 @@ function truncate(text: string, max = 90): string {
             >
               核心{{ fnInsight.coreSource === 'ai' ? '(AI)' : '' }}
             </n-tag>
-            <n-tag size="tiny" :bordered="false" :type="node.source === 'ai' ? 'info' : 'default'">
-              {{ node.source === 'ai' ? 'AI' : '启发式' }}
+            <n-tag size="tiny" :bordered="false" :type="nodeSource.type" :title="nodeSource.title">
+              {{ nodeSource.label }}
             </n-tag>
             <!-- 追问入口：仅可写模式显示 -->
             <button

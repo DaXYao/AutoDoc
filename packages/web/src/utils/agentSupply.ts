@@ -19,39 +19,45 @@ import type { TagType } from './format'
  * 错误/建议分组、状态条摘要。全部脱离 Vue/网络，可独立单测。
  */
 
-/** 一期七个可供给 pass + 变更侧的展示顺序（与后端 SUPPLY_PASSES 同序；partition 结构层在最前） */
+/** 九个洞察侧 pass + 变更侧的展示顺序（与后端 SUPPLY_PASSES 同序；partition 结构层在最前，flows 紧随其后） */
 export const SUPPLY_PASS_ORDER: AgentSupplyPass[] = [
   'partition',
+  'flows',
   'modules',
   'narratives',
   'categories',
   'coreJudgment',
   'coreRoles',
   'blocks',
+  'keySteps',
   'changes'
 ]
 
 /** pass → 中文语义名 */
 export const SUPPLY_PASS_LABELS: Record<AgentSupplyPass, string> = {
   partition: '整项目划分',
+  flows: '业务脉络树',
   modules: '模块职责',
   narratives: '链路叙事',
   categories: '三分类',
   coreJudgment: '核心判定',
   coreRoles: '系统角色',
   blocks: '内部步骤',
+  keySteps: '调用主干',
   changes: '变更语义'
 }
 
 /** 建议任务种类 → 中文徽标 */
 export const SUPPLY_SUGGESTION_KIND_LABELS: Record<AgentSupplySuggestionKind, string> = {
   'project-partition': '项目划分',
+  'project-flows': '业务脉络树',
   'module-identity': '模块职责',
   'chain-narrative': '链路叙事',
   'function-category': '函数三分类',
   'function-core': '核心判定',
   'function-purpose': '系统角色',
   'function-steps': '内部步骤',
+  'function-key-steps': '调用主干',
   'changes-narrative': '提交叙事',
   'changes-chain-impact': '链路影响',
   'changes-function-role': '函数角色'

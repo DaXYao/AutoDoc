@@ -42,11 +42,14 @@ import {
   applyPassSemantics,
   applySupplyOverlay,
   clearSupplyCache,
+  readFlowsSupply,
   readPartitionSupply,
   readSupplyCache,
   writeSupplyCache,
   type SupplyValueEntry
 } from '../src/supplyCache.js'
+import { applyAgentFlowsToInsight } from '../src/supplyFlows.js'
+import { applyPartitionPreservingCores } from '../src/supplyPartition.js'
 
 /**
  * G2：Agent 供给字段级合并 + 快照归档生效 + 来源口径。
@@ -175,7 +178,7 @@ function envelope(
   basis: string | null | undefined = undefined
 ): string {
   const o: Record<string, unknown> = { pass, agent, values, writtenAt }
-  const b = basis === undefined ? (pass === 'modules' || pass === 'narratives' ? BASIS : null) : basis
+  const b = basis === undefined ? (pass === 'modules' || pass === 'narratives' || pass === 'flows' ? BASIS : null) : basis
   if (b !== null) o.basis = b
   return JSON.stringify(o)
 }
@@ -185,14 +188,44 @@ function writeSupplyFile(dir: string, name: string, content: string): void {
   writeFileSync(join(dir, name), content, 'utf-8')
 }
 
-/** 六个 pass 各一条合法供给（Agent=qoder） */
+/** 整树脉络供给：根 → 两个分支 → 各自一个叶子函数（mod:i / functionId / chain:i 均来自当前划分） */
+const FLOW_VALUE = {
+  roots: [
+    {
+      label: '核心业务主线',
+      summary: '请求从入口走到工具的主线。',
+      relatedModuleIds: ['mod:0'],
+      children: [
+        {
+          label: '入口层',
+          relatedModuleIds: ['mod:0'],
+          children: [{ label: '入口方法 beta', relatedFunctionIds: [FN_B] }]
+        },
+        {
+          label: '工具层',
+          relatedModuleIds: ['mod:1'],
+          relatedChainIds: ['chain:1'],
+          children: [{ label: '工具 gamma', relatedFunctionIds: [FN_C] }]
+        }
+      ]
+    }
+  ]
+}
+
+/** 八个洞察侧 pass 各一条合法供给（Agent=qoder；partition 不在其中，由独立用例覆盖） */
 function validFiles(dir: string, agent = 'qoder'): string {
+  writeSupplyFile(dir, `flows.${agent}.json`, envelope('flows', agent, { root: FLOW_VALUE }))
   writeSupplyFile(dir, `modules.${agent}.json`, envelope('modules', agent, { 'mod:0': { name: MOD0_NAME, description: '负责把请求编排成一次完整调用。' } }))
   writeSupplyFile(dir, `narratives.${agent}.json`, envelope('narratives', agent, { 'chain:0': { entryId: CHAIN0_ENTRY, narrative: '从入口 beta 走到工具 alpha。', stepRoles: { [FN_B]: '发起调用。', [FN_A]: '完成实际工作。' } } }))
   writeSupplyFile(dir, `categories.${agent}.json`, envelope('categories', agent, { [FN_D]: { category: 'implementation', reason: '服务于内部流程。' } }))
   writeSupplyFile(dir, `coreJudgment.${agent}.json`, envelope('coreJudgment', agent, { [FN_A]: { core: true, reason: '被多处调用的公共工具。' } }))
   writeSupplyFile(dir, `coreRoles.${agent}.json`, envelope('coreRoles', agent, { [FN_B]: '类方法入口。' }))
   writeSupplyFile(dir, `blocks.${agent}.json`, envelope('blocks', agent, { [FN_D]: [{ blockIndexes: [0], title: '准备输入', kind: 'step' }, { blockIndexes: [1], title: 'TODO 补齐', kind: 'todo' }] }))
+  writeSupplyFile(dir, `keySteps.${agent}.json`, envelope('keySteps', agent, {
+    [FN_B]: { calleeNames: ['alpha'] },
+    [FN_D]: { calleeNames: ['gamma'] },
+    [FN_C]: { calleeNames: [] }
+  }))
   return dir
 }
 
@@ -204,6 +237,16 @@ const PARTITION_VALUE = {
     { name: '入口层', description: '接收并编排外部请求。', members: [FN_B, FN_A] },
     { name: '工具层', description: '与业务无关的通用工具。', members: [FN_D, FN_C] }
   ]
+}
+
+/** 应用同一份 partition 之后的 basis（flows / 语义供给必须按它写缓存） */
+function basisAfterPartition(): string {
+  const graph = fixtureGraph()
+  applyPartitionPreservingCores(graph, {
+    source: 'agent',
+    modules: PARTITION_VALUE.modules.map((m) => ({ ...m, members: [...m.members] }))
+  })
+  return flowsBasis(graph)
 }
 
 async function makeService(
@@ -360,7 +403,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
     service.storage.close()
   })
 
-  it('agentSources 与 perPass 正确填充（六个语义 pass 全部生效，未供 partition 则不出现）', async () => {
+  it('agentSources 与 perPass 正确填充（八个语义 pass 全部生效，未供 partition 则不出现）', async () => {
     const dir = freshDir()
     validFiles(dir)
     const graph = fixtureGraph()
@@ -379,6 +422,149 @@ describe('mergeAgentSupply（字段级合并）', () => {
     expect(result.perPass.every((p) => p.agents.join() === 'qoder')).toBe(true)
     expect(result.insight.agentSources).toEqual(result.agentSources)
     expect(result.insight.aiGenerated).toBe(true)
+    service.storage.close()
+  })
+
+  it('flows 整树替换 + keySteps 按行号映射：[] 是「明确无主干」，未供给函数保持 undefined', async () => {
+    const dir = freshDir()
+    writeSupplyFile(dir, 'flows.qoder.json', envelope('flows', 'qoder', { root: FLOW_VALUE }))
+    writeSupplyFile(dir, 'keySteps.qoder.json', envelope('keySteps', 'qoder', {
+      [FN_B]: { calleeNames: ['alpha'] },
+      [FN_D]: { calleeNames: ['gamma'] },
+      [FN_C]: { calleeNames: [] }
+    }))
+    const graph = fixtureGraph()
+    const scan = scanAgentSupply({ dir, graph })
+    const service = await makeService(freshDir())
+    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    // 本地先有一棵旧树与一个旧主干判定：Agent 供给必须整棵/整条覆盖
+    baseInsight.flows = [
+      {
+        id: 'local:0',
+        parentId: null,
+        label: '本地启发式树',
+        summary: '',
+        order: 0,
+        kind: 'mainline',
+        depth: 0,
+        relatedModuleIds: ['mod:0'],
+        relatedFunctionIds: [],
+        relatedChainIds: [],
+        source: 'heuristic',
+        reason: '',
+        children: []
+      }
+    ]
+    baseInsight.flowsGeneratedAt = '2026-01-01T00:00:00.000Z'
+    baseInsight.functions[FN_A].keyCallIndexes = [7]
+
+    const result = mergeAgentSupply({ insight: baseInsight, graph, winners: scan.winners, entries: scan.entries })
+    const roots = result.insight.flows!
+    expect(roots).toHaveLength(1)
+    const root = roots[0]
+    expect(root).toMatchObject({
+      id: 'flow:0',
+      parentId: null,
+      label: '核心业务主线',
+      summary: '请求从入口走到工具的主线。',
+      order: 0,
+      kind: 'mainline',
+      depth: 0,
+      source: 'agent',
+      reason: '',
+      relatedModuleIds: ['mod:0']
+    })
+    expect(root.children!.map((c) => c.id)).toEqual(['flow:0.0', 'flow:0.1'])
+    expect(root.children![1].kind).toBe('branch')
+    expect(root.children![1].relatedChainIds).toEqual(['chain:1'])
+    expect(root.children![0].children![0]).toMatchObject({
+      id: 'flow:0.0.0',
+      parentId: 'flow:0.0',
+      kind: 'leaf',
+      depth: 2,
+      relatedFunctionIds: [FN_B],
+      source: 'agent'
+    })
+    // 时间戳取供给 writtenAt；指纹取当前图
+    expect(result.insight.flowsGeneratedAt).toBe('2026-10-18T00:00:00.000Z')
+    expect(result.insight.flowsFingerprint).toBe(graph.fingerprint)
+
+    expect(result.insight.functions[FN_B].keyCallIndexes).toEqual([0])
+    expect(result.insight.functions[FN_D].keyCallIndexes).toEqual([0])
+    expect(result.insight.functions[FN_C].keyCallIndexes).toEqual([])
+    // 未被 keySteps 供给的函数保留本地结果（undefined 与 [] 严格区分）
+    expect(result.insight.functions[FN_A].keyCallIndexes).toEqual([7])
+    expect(result.agentSources['flows:root']).toBe('qoder')
+    expect(result.agentSources[`keySteps:${FN_C}`]).toBe('qoder')
+    expect(result.insight.aiStatus?.flows).toBe('ok')
+    expect(result.insight.aiStatus?.keySteps).toBe('ok')
+    expect(result.perPass.find((p) => p.pass === 'flows')).toMatchObject({ count: 1, agents: ['qoder'] })
+    expect(result.perPass.find((p) => p.pass === 'keySteps')).toMatchObject({ count: 3, agents: ['qoder'] })
+    service.storage.close()
+  })
+
+  it('keySteps 下标按调用点行号升序映射（与本地 aiKeySteps 同口径）', async () => {
+    const files = fixtureFiles()
+    // beta 的两个调用点故意逆序摆放：alpha 在前（line 4）、gamma 在后（line 12）
+    files[0].functions[1].calls = [
+      { ...edge(FN_B, FN_C, 'gamma'), line: 12 },
+      { ...edge(FN_B, FN_A, 'alpha'), line: 4 }
+    ]
+    const service = await makeService(freshDir(), files)
+    const { insight: baseInsight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const result = mergeAgentSupply({
+      insight: baseInsight,
+      graph,
+      winners: [{ pass: 'keySteps', objectId: FN_B, agent: 'qoder', writtenAt: '', file: '', contenders: 1 }],
+      entries: [{ pass: 'keySteps', objectId: FN_B, value: { calleeNames: ['gamma'] }, agent: 'qoder', writtenAt: '', file: '' }] as never
+    })
+    // 按 line 升序后 alpha 是 0、gamma 是 1：只供 gamma 必须落到 1，而不是名称数组里的 0
+    expect(result.insight.functions[FN_B].keyCallIndexes).toEqual([1])
+    service.storage.close()
+  })
+
+  it('flows 引用失效 / keySteps 名称不存在 → 整条 missing，不覆盖基线也不记来源', async () => {
+    const service = await makeService(freshDir())
+    const { insight: baseInsight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const result = mergeAgentSupply({
+      insight: baseInsight,
+      graph,
+      winners: [
+        { pass: 'flows', objectId: 'root', agent: 'qoder', writtenAt: '', file: '', contenders: 1 },
+        { pass: 'keySteps', objectId: FN_A, agent: 'qoder', writtenAt: '', file: '', contenders: 1 }
+      ],
+      entries: [
+        {
+          pass: 'flows',
+          objectId: 'root',
+          value: {
+            roots: [
+              {
+                label: '根',
+                relatedModuleIds: ['mod:0'],
+                children: [{ label: '叶', relatedFunctionIds: ['ghost'] }]
+              }
+            ]
+          },
+          agent: 'qoder',
+          writtenAt: '',
+          file: ''
+        },
+        {
+          pass: 'keySteps',
+          objectId: FN_A,
+          value: { calleeNames: ['alpha'] },
+          agent: 'qoder',
+          writtenAt: '',
+          file: ''
+        }
+      ] as never
+    })
+    expect(result.provenance).toEqual([])
+    expect(result.changed).toBe(false)
+    expect(result.agentSources).toEqual({})
+    expect(result.insight.flows).toBeUndefined()
+    expect(result.insight.functions[FN_A].keyCallIndexes).toBeUndefined()
     service.storage.close()
   })
 })
@@ -511,7 +697,7 @@ describe('aiStatus 与 aiSource（裁决②）', () => {
     service.storage.close()
   })
 
-  it('无 KEY 端到端：六个 pass 供给后 aiStatus 有值（不是「未生成」）、aiSource=agent', async () => {
+  it('无 KEY 端到端：八个语义 pass 供给后 aiStatus 有值（不是「未生成」）、aiSource=agent', async () => {
     const dir = freshDir()
     const supplyDir = supplyDirOfService(dir)
     validFiles(supplyDir)
@@ -525,7 +711,7 @@ describe('aiStatus 与 aiSource（裁决②）', () => {
     const live = loadInsight(service)
     expect(live.insight.aiEnabled).toBe(false)
     expect(live.insight.aiGenerated).toBe(true)
-    const expectAgent: AiPassKey[] = ['narratives', 'categories', 'coreJudgment', 'coreRoles', 'blocks']
+    const expectAgent: AiPassKey[] = ['flows', 'narratives', 'categories', 'coreJudgment', 'coreRoles', 'blocks', 'keySteps']
     for (const key of expectAgent) {
       expect(live.insight.aiStatus?.[key], `aiStatus.${key}`).toBeDefined()
       expect(live.insight.aiSource?.[key], `aiSource.${key}`).toBe('agent')
@@ -649,6 +835,54 @@ describe('insightContentHash（去重口径）', () => {
     expect(insightContentHash(i1)).not.toBe(insightContentHash(i4))
   })
 
+  it('flows：related 数组顺序无关、children 顺序有关；生成时间戳不参与哈希', async () => {
+    const value = {
+      roots: [
+        {
+          label: '根',
+          relatedModuleIds: ['mod:0', 'mod:1'],
+          children: [
+            { label: '入口', relatedFunctionIds: [FN_B] },
+            { label: '工具', relatedFunctionIds: [FN_C] }
+          ]
+        }
+      ]
+    }
+    const i1 = await plainInsight()
+    expect(applyAgentFlowsToInsight(i1, REF, value, '2026-10-18T00:00:00.000Z')).toBe('changed')
+    const base = insightContentHash(i1)
+
+    const reorderedRefs = structuredClone(i1)
+    reorderedRefs.flows![0].relatedModuleIds = ['mod:1', 'mod:0']
+    expect(insightContentHash(reorderedRefs)).toBe(base)
+
+    const reorderedChildren = structuredClone(i1)
+    reorderedChildren.flows![0].children = [
+      reorderedChildren.flows![0].children![1],
+      reorderedChildren.flows![0].children![0]
+    ]
+    expect(insightContentHash(reorderedChildren)).not.toBe(base)
+
+    const timestampOnly = structuredClone(i1)
+    timestampOnly.flowsGeneratedAt = '2030-01-01T00:00:00.000Z'
+    timestampOnly.flowsFingerprint = 'another-fp'
+    expect(insightContentHash(timestampOnly)).toBe(base)
+
+    const relabeled = structuredClone(i1)
+    relabeled.flows![0].children![0].label = '入口（改名）'
+    expect(insightContentHash(relabeled)).not.toBe(base)
+  })
+
+  it('keyCallIndexes：undefined（未生成）与 []（明确无主干）哈希不同', async () => {
+    const i1 = await plainInsight()
+    const i2 = structuredClone(i1)
+    i2.functions[FN_A].keyCallIndexes = []
+    expect(insightContentHash(i2)).not.toBe(insightContentHash(i1))
+    const i3 = structuredClone(i2)
+    i3.functions[FN_A].keyCallIndexes = [0]
+    expect(insightContentHash(i3)).not.toBe(insightContentHash(i2))
+  })
+
   it('基线已带 agentSources 时二次合并不丢旧键（整份替换会让 provenance 递减）', async () => {
     const dir = freshDir()
     validFiles(dir)
@@ -657,7 +891,7 @@ describe('insightContentHash（去重口径）', () => {
     const service = await makeService(freshDir())
     const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
     const first = mergeAgentSupply({ insight: baseInsight, graph, winners: scan.winners, entries: scan.entries })
-    expect(Object.keys(first.agentSources)).toHaveLength(6)
+    expect(Object.keys(first.agentSources)).toHaveLength(10)
 
     // 第二次只有一条 winner（其余 Agent 撤回），基线是上一轮结果
     const subset = scan.winners.filter((w) => w.pass === 'coreRoles')
@@ -731,15 +965,16 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
     expect([...after.keys()]).toEqual(['coreRoles'])
   })
 
-  it('缓存覆盖的 pass 集合 = SUPPLY_PASSES 去掉 changes；partition 写入但由 readPartitionSupply 单独读', () => {
+  it('缓存覆盖的 pass 集合 = SUPPLY_PASSES 去掉 changes；partition / flows 写入但单独读', () => {
     const dir = freshDir()
     const cache = new AiCache(dir)
-    const cached = SUPPLY_PASSES.filter((p) => p !== 'changes' && p !== 'partition')
+    const cached = SUPPLY_PASSES.filter((p) => p !== 'changes' && p !== 'partition' && p !== 'flows')
     const all = passDataOf(SUPPLY_PASSES.map((p) => [p, 'mod:0', { name: MOD0_NAME, description: 'd' }] as [AgentSupplyPass, string, unknown]))
     writeSupplyCache(cache, FINGERPRINT, BASIS, all, ['qoder'])
     expect([...readSupplyCache(cache, FINGERPRINT, BASIS).keys()]).toEqual([...cached])
-    // partition 不参与按 basis 的读，但缓存里确实有它（值固定在 data.root）
+    // partition / flows 不参与按 basis 的批量读，但缓存里确实有它们（值固定在 data.root）
     expect(cache.getGlobal('supply:partition')).toBeDefined()
+    expect(cache.getGlobal('supply:flows')).toBeDefined()
     // 变更侧即使有 winner 也不许落缓存：那是没人读的键（读时合并直接吃供给文件）
     expect(cache.getGlobal('supply:changes')).toBeUndefined()
     expect(clearSupplyCache(cache)).toBe(SUPPLY_PASSES.filter((p) => p !== 'changes').length)
@@ -762,6 +997,60 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
     expect(read!.agent).toBe('qoder')
     expect(read!.value.modules.map((m) => m.name)).toEqual(['入口层', '工具层'])
     expect(readPartitionSupply(cache, 'another-fingerprint')).toBeNull()
+  })
+
+  it('readFlowsSupply：图指纹 + basis 都必须匹配，形状损坏按缺失处理', () => {
+    const dir = freshDir()
+    const cache = new AiCache(dir)
+    writeSupplyCache(cache, FINGERPRINT, BASIS, passDataOf([['flows', 'root', FLOW_VALUE]]), ['qoder'])
+    const read = readFlowsSupply(cache, FINGERPRINT, BASIS)
+    expect(read).not.toBeNull()
+    expect(read!.agent).toBe('qoder')
+    expect(typeof read!.writtenAt).toBe('string')
+    expect(read!.value.roots[0].label).toBe('核心业务主线')
+    expect(readFlowsSupply(cache, 'another-fingerprint', BASIS)).toBeNull()
+    expect(readFlowsSupply(cache, FINGERPRINT, 'another-basis')).toBeNull()
+
+    writeSupplyCache(cache, FINGERPRINT, BASIS, passDataOf([['flows', 'root', { roots: [] }]]), ['qoder'])
+    expect(readFlowsSupply(cache, FINGERPRINT, BASIS)).toBeNull()
+  })
+
+  it('overlay 顺序：先 partition，再按新 basis 套 flows，最后其余 pass', async () => {
+    const dir = freshDir()
+    const cache = new AiCache(dir)
+    const newBasis = basisAfterPartition()
+    writeSupplyCache(
+      cache,
+      FINGERPRINT,
+      newBasis,
+      passDataOf([
+        ['partition', 'root', PARTITION_VALUE],
+        ['flows', 'root', FLOW_VALUE],
+        ['keySteps', FN_B, { calleeNames: ['alpha'] }],
+        ['coreRoles', FN_B, '缓存里的角色。']
+      ]),
+      ['qoder']
+    )
+    const service = await makeService(freshDir())
+    const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    expect(insight.modules.map((m) => m.name)).not.toEqual(['入口层', '工具层'])
+
+    expect(applySupplyOverlay(insight, graph, new AiCache(dir))).toBe(true)
+    // partition 先生效，flows / 其余 pass 按应用后的 basis 才读得到
+    expect(insight.modules.map((m) => m.name)).toEqual(['入口层', '工具层'])
+    expect(insight.partitionSource).toBe('agent')
+    expect(insight.flows?.[0]).toMatchObject({ id: 'flow:0', source: 'agent' })
+    expect(insight.functions[FN_B].systemRole).toBe('缓存里的角色。')
+    expect(insight.functions[FN_B].keyCallIndexes).toEqual([0])
+    expect(insight.agentSources).toMatchObject({
+      'partition:root': 'qoder',
+      'flows:root': 'qoder',
+      [`keySteps:${FN_B}`]: 'qoder',
+      [`coreRoles:${FN_B}`]: 'qoder'
+    })
+    expect(insight.aiStatus?.flows).toBe('ok')
+    expect(insight.aiSource?.flows).toBe('agent')
+    service.storage.close()
   })
 
   it('并发实例写前重读：长流程持有的旧副本不会抹掉另一个实例写入的 supply:*', () => {
@@ -823,6 +1112,79 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
     expect(bare.insight.functions[FN_B].systemRole).toBe('')
     expect(bare.insight.agentSources).toBeUndefined()
     service.storage.close()
+  })
+})
+
+/* ------------------------- H2：Agent flows 在 KEY 模式下的让位/撤回 ------------------------- */
+
+describe('H2：Agent flows 在 KEY 模式下让位与撤回恢复', () => {
+  beforeEach(() => {
+    vi.mocked(deepseekChat).mockReset()
+  })
+
+  function fakeReply(text: string): never {
+    return { content: text, finishReason: 'stop', truncated: false } as never
+  }
+
+  it('本地核心判定后置产出不让供给 basis 漂移；撤回 flows 后本地生成恢复', async () => {
+    process.env.DEEPSEEK_API_KEY = 'test-key-not-real'
+    const prompts: string[] = []
+    vi.mocked(deepseekChat).mockImplementation(async (messages) => {
+      const user = messages[messages.length - 1].content
+      prompts.push(user)
+      if (user.includes('请选出「核心函数」')) {
+        // 与静态核心结论相反：全部判为核心 → coreFunctionIds 必然变化（原本只有 FN_A / FN_C）
+        return fakeReply(JSON.stringify({ core: [0, 1, 2, 3].map((idx) => ({ idx, reason: '本地判定' })) }))
+      }
+      if (user.includes('业务主线根')) {
+        return fakeReply(
+          JSON.stringify({ roots: [{ label: '本地主线', summary: 's', order: 0, relatedModuleIds: ['mod:0'], reason: 'r' }] })
+        )
+      }
+      if (user.includes('拆成有序')) {
+        return fakeReply(
+          JSON.stringify({ children: [{ label: '本地叶子', order: 0, kind: 'leaf', relatedFunctionIds: [0], reason: '' }] })
+        )
+      }
+      return fakeReply('{}')
+    })
+    try {
+      const dir = freshDir()
+      const supplyDir = supplyDirOfService(dir)
+      writeSupplyFile(supplyDir, 'partition.qoder.json', envelope('partition', 'qoder', { root: PARTITION_VALUE }))
+      writeSupplyFile(
+        supplyDir,
+        'flows.qoder.json',
+        envelope('flows', 'qoder', { root: FLOW_VALUE }, '2026-10-18T00:00:00.000Z', basisAfterPartition())
+      )
+      writeSupplyFile(supplyDir, 'keySteps.qoder.json', envelope('keySteps', 'qoder', { [FN_B]: { calleeNames: ['alpha'] } }))
+      const service = await makeService(dir)
+      expect(executeMerge(service, 'p1').code).toBe('merged')
+
+      // KEY 模式的增量装配：Agent 划分先生效，本地核心判定在装配中途产出并改写核心表
+      const agent = await refreshInsightAI(service, {})
+      expect(prompts.some((p) => p.includes('请选出「核心函数」'))).toBe(true)
+      expect(agent.insight.functions[FN_D].isCore).toBe(true)
+      // 供给 basis 不含核心判定 → Agent 树照常生效，本地 flows 一次都没请求
+      expect(prompts.some((p) => p.includes('业务主线根'))).toBe(false)
+      expect(agent.insight.flows?.[0]).toMatchObject({ label: '核心业务主线', source: 'agent' })
+      expect(agent.insight.flowsGeneratedAt).toBe('2026-10-18T00:00:00.000Z')
+      expect(agent.insight.aiStatus?.flows).toBe('ok')
+      expect(agent.insight.aiSource?.flows).toBe('agent')
+      // 同一批函数类供给也仍然生效
+      expect(agent.insight.functions[FN_B].keyCallIndexes).toEqual([0])
+      expect(agent.insight.aiSource?.keySteps).toBe('agent')
+
+      // 撤回 flows 供给（等价于删除文件后重新合并）：本地生成立即恢复
+      cacheOf(service).deleteGlobal('supply:flows')
+      const local = await refreshInsightAI(service, {})
+      expect(local.insight.flows?.[0]).toMatchObject({ label: '本地主线', source: 'ai' })
+      expect(local.insight.aiStatus?.flows).toBe('ok')
+      expect(prompts.some((p) => p.includes('业务主线根'))).toBe(true)
+      service.storage.close()
+    } finally {
+      process.env.DEEPSEEK_API_KEY = ''
+    }
   })
 })
 
@@ -966,7 +1328,7 @@ describe('POST /api/agent-supply/merge 路由', () => {
     expect(body.merged).toBe(true)
     expect(body.deduplicated).toBe(false)
     expect(body.stats!.agents).toEqual(['qoder'])
-    expect(body.stats!.winnerCount).toBe(6)
+    expect(body.stats!.winnerCount).toBe(10)
     expect(service.storage.getActiveInsightSnapshotId()).toBeNull()
     const snap = service.storage.getInsightSnapshot(body.snapshotId!)!
     expect(snap.trigger).toBe('agent')
@@ -1117,7 +1479,7 @@ describe('POST /api/agent-supply/merge 路由', () => {
     const scan = await app.inject({ method: 'POST', url: '/api/agent-supply/scan' })
     const body = scan.json() as { winners: unknown[]; errors: { reason: string }[]; baseline: { basis: string } }
     expect(body.baseline.basis).toBe(BASIS)
-    expect(body.winners).toHaveLength(6)
+    expect(body.winners).toHaveLength(10)
     expect(body.errors).toEqual([])
     await app.close()
     service.storage.close()

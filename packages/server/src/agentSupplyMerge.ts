@@ -4,6 +4,7 @@ import type {
   AgentSupplyPass,
   AgentSupplyWinner,
   AnyAgentSupplyEntry,
+  FlowNode,
   InsightAgentSources,
   InsightSnapshot,
   InsightSnapshotStats,
@@ -49,9 +50,9 @@ export interface MergeResult {
   changed: boolean
   agentSources: InsightAgentSources
   /**
-   * 合并写缓存用的 basis：**应用 partition 之后、应用其余 pass 之前**的划分指纹。
-   * 若在其它 pass 之后取，coreJudgment 改写了 coreFunctionIds 会让 basis 漂移，
-   * 下一轮 overlay 读不到刚写入的语义供给。
+   * 合并写缓存用的 basis：**应用 partition 之后、应用其余 pass 之前**的划分身份指纹。
+   * flowsBasis 只含模块组成/名称/函数归属（不含 coreFunctionIds），与核心判定的产出方和先后无关，
+   * 因此合并后无论本地还是 Agent 的核心判定谁先落地，都不会让刚写入的供给被下一轮 overlay 判过期。
    */
   basis: string
 }
@@ -109,9 +110,11 @@ export function mergeAgentSupply(input: MergeInput): MergeResult {
       }
     }
   }
-  // basis：应用 partition 之后、其余 pass 之前（coreJudgment 会改 coreFunctionIds → 必须在这之前取）
+  // basis：应用 partition 之后取（划分身份指纹；与后续 coreJudgment 改不改核心表无关）
   const basis = flowsBasis(graph)
 
+  // winners 已按 SUPPLY_PASSES 顺序排序（partition → flows → modules → …），故 flows 胜者天然在
+  // partition 之后、其余语义 pass 之前套用；其 entry.writtenAt 作为 flowsGeneratedAt 写入洞察。
   const semanticWinners = winners.filter((w) => w.pass !== 'partition')
   const passesWithWinners = new Set(semanticWinners.map((w) => w.pass))
   const universe = computePassUniverse(insight, graph, passesWithWinners)
@@ -146,9 +149,12 @@ export function mergeAgentSupply(input: MergeInput): MergeResult {
 /* ------------------------- 内容哈希去重 ------------------------- */
 
 /**
- * 合并结果的内容哈希：覆盖供给与本地 AI 可影响的语义字段（排除 generatedAt 等时间戳与派生的 flows），
- * 用于判断「同一批供给文件重复扫描」是否产生实质变化。所有 map 一律按 key 排序后序列化，
- * 否则同一份语义会因插入顺序不同算出不同哈希（去重失效 → 每次合并多存一份快照）。
+ * 合并结果的内容哈希：覆盖供给与本地 AI 可影响的语义字段（排除 generatedAt / flowsGeneratedAt /
+ * flowsFingerprint 等时间戳），用于判断「同一批供给文件重复扫描」是否产生实质变化。
+ * 所有 map 一律按 key 排序后序列化，否则同一份语义会因插入顺序不同算出不同哈希（去重失效 → 每次合并多存一份快照）。
+ * flows 单独做递归稳定序列化：related* 数组排序、children 保持有序（顺序是语义）；
+ * 缺字段（undefined）与空数组用 null / [] 区分，避免「未生成」与「明确为空」被算成同一版本。
+ * keyCallIndexes 同理：undefined（未生成）与 []（明确无主干）必须区分。
  */
 export function insightContentHash(insight: ProjectInsight): string {
   const h = createHash('sha256')
@@ -157,6 +163,27 @@ export function insightContentHash(insight: ProjectInsight): string {
     const out: Record<string, unknown> = {}
     for (const k of Object.keys(rec ?? {}).sort()) out[k] = rec![k]
     return JSON.stringify(out)
+  }
+  const sortedOrNull = (arr: string[] | undefined): string[] | null =>
+    arr === undefined ? null : [...arr].sort()
+  const flowNodeStable = (n: FlowNode): Record<string, unknown> => {
+    const children = n.children as FlowNode[] | undefined
+    return {
+      id: n.id,
+      parentId: n.parentId,
+      label: n.label,
+      summary: n.summary,
+      order: n.order,
+      kind: n.kind,
+      depth: n.depth,
+      relatedModuleIds: sortedOrNull(n.relatedModuleIds),
+      relatedFunctionIds: sortedOrNull(n.relatedFunctionIds),
+      relatedChainIds: sortedOrNull(n.relatedChainIds),
+      source: n.source,
+      reason: n.reason,
+      contentHash: n.contentHash ?? null,
+      children: children === undefined ? null : children.map(flowNodeStable)
+    }
   }
   h.update(insight.graphFingerprint)
   h.update(insight.summary)
@@ -184,6 +211,8 @@ export function insightContentHash(insight: ProjectInsight): string {
       }))
     )
   )
+  // flows：递归稳定序列化（不含 flowsGeneratedAt / flowsFingerprint 两个派生时间戳）
+  h.update(stable(insight.flows === undefined ? null : insight.flows.map(flowNodeStable)))
   for (const k of Object.keys(insight.functions).sort()) {
     const f = insight.functions[k]
     h.update(k)
@@ -197,7 +226,9 @@ export function insightContentHash(insight: ProjectInsight): string {
         aiCategoryReason: f.aiCategoryReason,
         internalSteps: f.internalSteps,
         chainRoles: f.chainRoles,
-        moduleIds: [...f.moduleIds].sort()
+        moduleIds: [...f.moduleIds].sort(),
+        // undefined（未生成）与 []（明确无主干）必须区分
+        keyCallIndexes: f.keyCallIndexes === undefined ? null : [...f.keyCallIndexes]
       })
     )
   }
@@ -392,7 +423,7 @@ function buildPassDataMap(
       m = {}
       out.set(w.pass, m)
     }
-    m[w.objectId] = { value: e.value, agent: w.agent }
+    m[w.objectId] = { value: e.value, agent: w.agent, writtenAt: e.writtenAt }
   }
   return out
 }

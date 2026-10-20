@@ -197,7 +197,7 @@ function writeSupply(dir: string, name: string, content: string): string {
 }
 
 /**
- * 造信封。basis 缺省按 pass 自动决定：modules / narratives 带上夹具的真实指纹（合法路径），
+ * 造信封。basis 缺省按 pass 自动决定：modules / narratives / flows 带上夹具的真实指纹（合法路径），
  * 函数类 pass 不带（契约禁止）；传 null 显式省略、传字符串显式覆盖（负例用）。
  */
 function envelope(
@@ -210,7 +210,11 @@ function envelope(
   const o: Record<string, unknown> = { pass, agent, values }
   if (writtenAt !== null) o.writtenAt = writtenAt
   const b =
-    basis === undefined ? (pass === 'modules' || pass === 'narratives' ? BASIS : null) : basis
+    basis === undefined
+      ? pass === 'modules' || pass === 'narratives' || pass === 'flows'
+        ? BASIS
+        : null
+      : basis
   if (b !== null) o.basis = b
   return JSON.stringify(o)
 }
@@ -280,6 +284,48 @@ function basisAfterPartition(value = PARTITION_VALUE): string {
     modules: value.modules.map((m) => ({ name: m.name, description: m.description, members: [...m.members] }))
   })
   return flowsBasis(graph)
+}
+
+/* ------------------------- 整树脉络（flows）夹具 ------------------------- */
+
+/** 一棵形状完全合法的两层树：根→两个分支→各自一个叶子函数 */
+const FLOW_VALUE = {
+  roots: [
+    {
+      label: '核心业务主线',
+      summary: '请求从入口走到工具的主线。',
+      relatedModuleIds: ['mod:0'],
+      children: [
+        {
+          label: '入口层',
+          relatedModuleIds: ['mod:0'],
+          children: [{ label: '入口方法 beta', relatedFunctionIds: [FN_B] }]
+        },
+        {
+          label: '工具层',
+          relatedModuleIds: ['mod:1'],
+          relatedChainIds: ['chain:1'],
+          children: [{ label: '工具 gamma', relatedFunctionIds: [FN_C] }]
+        }
+      ]
+    }
+  ]
+}
+
+function flowEnvelope(
+  agent = 'qoder',
+  value: unknown = FLOW_VALUE,
+  writtenAt = '2026-10-18T00:00:00.000Z'
+): string {
+  return envelope('flows', agent, { root: value }, writtenAt)
+}
+
+function keyStepsEnvelope(
+  agent = 'qoder',
+  values: Record<string, unknown> = { [FN_B]: { calleeNames: ['alpha'] } },
+  writtenAt = '2026-10-18T00:00:00.000Z'
+): string {
+  return envelope('keySteps', agent, values, writtenAt)
 }
 
 /* ------------------------- scanAgentSupply：校验矩阵 ------------------------- */
@@ -398,28 +444,31 @@ describe('scanAgentSupply（信封校验 + 文件名纪律）', () => {
     expect(res.errors.every((e) => e.reason.includes('文件名必须是'))).toBe(true)
   })
 
-  it('第一期不支持 / 本地专属 pass：判错并说明原因', () => {
+  it('仍被拒绝的 pass：externals 给出专属原因，未知 pass 回显支持列表', () => {
     const dir = freshDir()
-    writeSupply(dir, 'flows.qoder.json', envelope('flows', 'qoder', {}))
     writeSupply(dir, 'externals.qoder.json', envelope('externals', 'qoder', {}))
-    writeSupply(dir, 'keySteps.qoder.json', envelope('keySteps', 'qoder', {}))
     writeSupply(dir, 'notes.qoder.json', envelope('notes', 'qoder', {}))
     const res = scan(dir, fixtureGraph())
     expect(res.entries).toEqual([])
     const byFile = new Map(res.errors.map((e) => [e.file, e.reason]))
-    expect(byFile.get('flows.qoder.json')).toContain('本地 AI 专属')
     expect(byFile.get('externals.qoder.json')).toContain('本地 AI 专属')
-    expect(byFile.get('keySteps.qoder.json')).toContain('不在第一期四类语义范围内')
     expect(byFile.get('notes.qoder.json')).toContain(`pass 不在支持列表 [${SUPPLY_PASSES.join(' / ')}]`)
+    // flows / keySteps 已进入支持列表（H2）
+    expect(SUPPLY_PASSES).toContain('flows')
+    expect(SUPPLY_PASSES).toContain('keySteps')
   })
 
-  it('partition 已是合法 pass：空 values 走值校验而非「不支持」', () => {
+  it('partition / flows 已是合法 pass：空 values 走值校验而非「不支持」', () => {
     const dir = freshDir()
     writeSupply(dir, 'partition.qoder.json', envelope('partition', 'qoder', {}))
+    writeSupply(dir, 'flows.qoder.json', envelope('flows', 'qoder', {}))
+    writeSupply(dir, 'keySteps.qoder.json', envelope('keySteps', 'qoder', {}))
     const res = scan(dir, fixtureGraph())
-    expect(res.errors).toHaveLength(1)
-    expect(res.errors[0].reason).toContain('values 不能是空 map')
-    expect(res.errors[0].reason).not.toContain('不在支持列表')
+    expect(res.errors).toHaveLength(3)
+    for (const e of res.errors) {
+      expect(e.reason).toContain('values 不能是空 map')
+      expect(e.reason).not.toContain('不在支持列表')
+    }
   })
 
   it('子目录与非 .json 文件：忽略且不进 fileCount', () => {
@@ -444,13 +493,20 @@ describe('scanAgentSupply（信封校验 + 文件名纪律）', () => {
     expect(res.errors[0].reason).toContain('文件过大（>1MB）')
   })
 
-  it('体积闸口按 pass 选限：partition 放到 8MB，其它 pass 仍是 1MB', () => {
+  it('体积闸口按 pass 选限：partition / flows 放到 8MB，其它 pass 仍是 1MB', () => {
     // 1.1MB 的 partition：JSON 后补空白（JSON.parse 合法），体积闸口必须放行
     const big = freshDir()
     writeSupply(big, 'partition.qoder.json', partitionEnvelope() + ' '.repeat(1100 * 1024))
     const ok = scan(big, fixtureGraph())
     expect(ok.errors).toEqual([])
     expect(ok.winners).toHaveLength(1)
+
+    // 同样 1.1MB 的 flows：整树同样放宽到 8MB
+    const bigFlows = freshDir()
+    writeSupply(bigFlows, 'flows.qoder.json', flowEnvelope() + ' '.repeat(1100 * 1024))
+    const flowsOk = scan(bigFlows, fixtureGraph())
+    expect(flowsOk.errors).toEqual([])
+    expect(flowsOk.winners).toHaveLength(1)
 
     // 同样 1.1MB 的 coreRoles：仍按 1MB 拒绝
     const small = freshDir()
@@ -459,9 +515,9 @@ describe('scanAgentSupply（信封校验 + 文件名纪律）', () => {
     expect(rejected.entries).toEqual([])
     expect(rejected.errors[0].reason).toContain('文件过大（>1MB）')
 
-    // 超过 8MB 的 partition：拒绝
+    // 超过 8MB 的 flows：拒绝
     const tooBig = freshDir()
-    writeSupply(tooBig, 'partition.qoder.json', partitionEnvelope() + ' '.repeat(8 * 1024 * 1024))
+    writeSupply(tooBig, 'flows.qoder.json', flowEnvelope() + ' '.repeat(8 * 1024 * 1024))
     const over = scan(tooBig, fixtureGraph())
     expect(over.entries).toEqual([])
     expect(over.errors[0].reason).toContain('文件过大（>8MB）')
@@ -953,7 +1009,198 @@ describe('scanAgentSupply（partition 结构层）', () => {
   })
 })
 
-/* ------------------------- 多 Agent 竞争 ------------------------- */
+/* ------------------------- flows（整树语义层） ------------------------- */
+
+describe('scanAgentSupply（flows 整树语义层）', () => {
+  it('合法整树：唯一键 root、条目/胜者/统计一致，引用数组归一为闭集字段', () => {
+    const dir = freshDir()
+    writeSupply(dir, 'flows.qoder.json', flowEnvelope())
+    const res = scan(dir, fixtureGraph())
+    expect(res.errors).toEqual([])
+    expect(res.stats.fileCount).toBe(1)
+    expect(res.stats.entryCount).toBe(1)
+    expect(res.stats.perPass).toEqual({ flows: 1 })
+    const entry = res.entries[0]
+    expect(entry.pass).toBe('flows')
+    expect(entry.objectId).toBe('root')
+    if (entry.pass === 'flows') {
+      expect(entry.value).toMatchObject(FLOW_VALUE)
+      // 未给出的引用数组归一为 []（供给值只保留闭集字段，应用时不必再猜 undefined）
+      expect(entry.value.roots[0].relatedFunctionIds).toEqual([])
+      expect(entry.value.roots[0].relatedChainIds).toEqual([])
+    }
+    expect(res.winners[0]).toMatchObject({ pass: 'flows', objectId: 'root', agent: 'qoder', contenders: 1 })
+  })
+
+  it('basis：缺失 / 不符整份拒绝并指路；函数类 keySteps 携带 basis 判错', () => {
+    const dir = freshDir()
+    writeSupply(dir, 'flows.missing.json', flowEnvelope('missing', FLOW_VALUE, '2026-10-18T00:00:00.000Z').replace(`,"basis":"${BASIS}"`, ''))
+    writeSupply(dir, 'flows.stale.json', flowEnvelope('stale', FLOW_VALUE).replace(BASIS, 'deadbeef'))
+    writeSupply(dir, 'keySteps.basis.json', envelope('keySteps', 'basis', { [FN_B]: { calleeNames: ['alpha'] } }, '2026-10-18T00:00:00.000Z', BASIS))
+    const res = scan(dir, fixtureGraph())
+    expect(res.entries).toEqual([])
+    const byFile = new Map(res.errors.map((e) => [e.file, e.reason]))
+    expect(byFile.get('flows.missing.json')).toContain('必须携带 basis')
+    expect(byFile.get('flows.missing.json')).toContain(BASIS)
+    expect(byFile.get('flows.stale.json')).toContain('契约已过期')
+    expect(byFile.get('keySteps.basis.json')).toContain('禁止携带 basis')
+    expect(res.errors.every((e) => e.path === 'basis')).toBe(true)
+  })
+
+  it('结构校验：roots 空 / 根缺模块 / 根无子节点 / 叶子函数数不为 1 / 契约外字段', () => {
+    const dir = freshDir()
+    const noModules = structuredClone(FLOW_VALUE)
+    delete (noModules.roots[0] as { relatedModuleIds?: string[] }).relatedModuleIds
+    const noChildren = { roots: [{ label: '空壳根', relatedModuleIds: ['mod:0'] }] }
+    const twoFnLeaf = {
+      roots: [
+        {
+          label: '根',
+          relatedModuleIds: ['mod:0'],
+          children: [{ label: '叶子', relatedFunctionIds: [FN_B, FN_A] }]
+        }
+      ]
+    }
+    const extraField = structuredClone(FLOW_VALUE) as unknown as { roots: Record<string, unknown>[] }
+    extraField.roots[0].id = 'flow:0'
+    writeSupply(dir, 'flows.empty.json', flowEnvelope('empty', { roots: [] }))
+    writeSupply(dir, 'flows.nomod.json', flowEnvelope('nomod', noModules))
+    writeSupply(dir, 'flows.nochild.json', flowEnvelope('nochild', noChildren))
+    writeSupply(dir, 'flows.twofn.json', flowEnvelope('twofn', twoFnLeaf))
+    writeSupply(dir, 'flows.extra.json', flowEnvelope('extra', extraField))
+    const res = scan(dir, fixtureGraph())
+    expect(res.entries).toEqual([])
+    expect(res.winners).toEqual([])
+    const reasons = res.errors.map((e) => e.reason)
+    expect(reasons.some((r) => r.includes('roots 不能为空'))).toBe(true)
+    expect(reasons.some((r) => r.includes('根节点必须至少关联 1 个模块'))).toBe(true)
+    expect(reasons.some((r) => r.includes('根节点必须有子节点'))).toBe(true)
+    expect(reasons.some((r) => r.includes('必须恰好关联 1 个函数'))).toBe(true)
+    expect(reasons.some((r) => r.includes('契约外字段'))).toBe(true)
+    expect(res.errors.every((e) => e.objectId === 'root')).toBe(true)
+    expect(res.errors.every((e) => e.path?.startsWith('values["root"]'))).toBe(true)
+  })
+
+  it('引用 id 不存在：整棵树原子拒绝，一次报全前几处（模块 / 函数 / 链路）', () => {
+    const dir = freshDir()
+    writeSupply(
+      dir,
+      'flows.ghost.json',
+      flowEnvelope('ghost', {
+        roots: [
+          {
+            label: '幽灵根',
+            relatedModuleIds: ['mod:99'],
+            children: [
+              {
+                label: '幽灵叶',
+                relatedFunctionIds: ['src/ghost.ts::-::nope@deadbeefdead'],
+                relatedChainIds: ['chain:99']
+              }
+            ]
+          }
+        ]
+      })
+    )
+    const res = scan(dir, fixtureGraph())
+    expect(res.entries).toEqual([])
+    expect(res.winners).toEqual([])
+    expect(res.errors).toHaveLength(1)
+    const reason = res.errors[0].reason
+    expect(reason).toContain('不存在模块 id')
+    expect(reason).toContain('不存在函数 id')
+    expect(reason).toContain('不存在链路 id')
+    expect(reason).toContain('请从最新契约索引逐字抄')
+    expect(res.errors[0].path).toBe('values["root"].roots[0].relatedModuleIds[0]')
+  })
+
+  it('多份 flows 竞争：writtenAt 最新者赢，条目仍全部保留', () => {
+    const dir = freshDir()
+    writeSupply(dir, 'flows.old.json', flowEnvelope('old', FLOW_VALUE, '2026-10-01T00:00:00.000Z'))
+    const newer = structuredClone(FLOW_VALUE)
+    newer.roots[0].label = '新主线'
+    writeSupply(dir, 'flows.new.json', flowEnvelope('new', newer, '2026-10-19T00:00:00.000Z'))
+    const res = scan(dir, fixtureGraph())
+    expect(res.errors).toEqual([])
+    expect(res.entries).toHaveLength(2)
+    expect(res.winners).toHaveLength(1)
+    expect(res.winners[0]).toMatchObject({ pass: 'flows', agent: 'new', contenders: 2 })
+  })
+})
+
+/* ------------------------- keySteps（调用主干） ------------------------- */
+
+describe('scanAgentSupply（keySteps 调用主干）', () => {
+  it('合法供给：按 calleeName 去重保序；空数组合法（明确无主干）', () => {
+    const dir = freshDir()
+    writeSupply(dir, 'keySteps.qoder.json', keyStepsEnvelope())
+    writeSupply(dir, 'keySteps.codex.json', keyStepsEnvelope('codex', { [FN_D]: { calleeNames: [] } }))
+    const res = scan(dir, fixtureGraph())
+    expect(res.errors).toEqual([])
+    expect(res.ignored).toEqual([])
+    expect(res.entries).toHaveLength(2)
+    expect(res.stats.perPass).toEqual({ keySteps: 2 })
+    const byAgent = new Map(res.entries.map((e) => [e.agent, e]))
+    const qoder = byAgent.get('qoder')
+    expect(qoder?.pass).toBe('keySteps')
+    if (qoder?.pass === 'keySteps') expect(qoder.value).toEqual({ calleeNames: ['alpha'] })
+    const codex = byAgent.get('codex')
+    if (codex?.pass === 'keySteps') expect(codex.value).toEqual({ calleeNames: [] })
+  })
+
+  it('形状错误：非对象 / 契约外字段 / 非数组 / 空串 / 超长', () => {
+    const dir = freshDir()
+    writeSupply(dir, 'keySteps.qoder.json', envelope('keySteps', 'qoder', {
+      [FN_B]: [],
+      [FN_A]: { calleeNames: [], extra: 1 },
+      [FN_C]: { calleeNames: 'alpha' },
+      [FN_D]: { calleeNames: ['  '] }
+    }))
+    writeSupply(dir, 'keySteps.codex.json', envelope('keySteps', 'codex', {
+      [FN_B]: { calleeNames: ['x'.repeat(401)] }
+    }))
+    const res = scan(dir, fixtureGraph())
+    expect(res.entries).toEqual([])
+    const reasonsOf = (file: string): string =>
+      res.errors
+        .filter((e) => e.file === file)
+        .map((e) => e.reason)
+        .join('\n')
+    expect(reasonsOf('keySteps.qoder.json')).toContain('值必须是对象 { calleeNames: [...] }')
+    expect(reasonsOf('keySteps.qoder.json')).toContain('calleeNames 必须是字符串数组')
+    expect(reasonsOf('keySteps.qoder.json')).toContain('calleeNames[0] 必须是非空字符串')
+    expect(reasonsOf('keySteps.qoder.json')).toContain('契约外字段')
+    expect(reasonsOf('keySteps.codex.json')).toContain('超过 400 字符上限')
+    expect(res.errors.map((e) => e.path)).toEqual([
+      // codex 文件名字典序在前：FN_B 的超长名称先被扫到
+      `values[${JSON.stringify(FN_B)}].calleeNames[0]`,
+      `values[${JSON.stringify(FN_B)}]`,
+      `values[${JSON.stringify(FN_A)}].extra`,
+      `values[${JSON.stringify(FN_C)}].calleeNames`,
+      `values[${JSON.stringify(FN_D)}].calleeNames[0]`
+    ])
+  })
+
+  it('未知 calleeName / 未知函数 id：判错并提示从 index.json 逐字抄', () => {
+    const dir = freshDir()
+    writeSupply(dir, 'keySteps.qoder.json', keyStepsEnvelope('qoder', {
+      [FN_B]: { calleeNames: ['alpha', 'ghostFn'] },
+      [FN_A]: { calleeNames: ['alpha'] }
+    }))
+    writeSupply(dir, 'keySteps.ghost.json', keyStepsEnvelope('ghost', {
+      'src/ghost.ts::-::nope@deadbeefdead': { calleeNames: [] }
+    }))
+    const res = scan(dir, fixtureGraph())
+    const byFile = new Map(res.errors.map((e) => [e.file, e.reason]))
+    expect(byFile.get('keySteps.qoder.json')).toContain('含该函数调用列表里没有的名称')
+    expect(byFile.get('keySteps.qoder.json')).toContain('index.json 的 functions[].calls[].calleeName')
+    expect(byFile.get('keySteps.ghost.json')).toContain('不在当前实时图谱的函数集中')
+    // FN_A 无调用点：任何非空名称都不存在，也整条判错；只保留 FN_B 的错误 + ghost 的 id 错误
+    expect(res.errors).toHaveLength(3)
+  })
+})
+
+
 
 describe('多 Agent 供给同一对象（writtenAt 最新者赢）', () => {
   it('两家供给同一链路：新者赢、contenders=2、落选条目仍保留在 entries', () => {
@@ -1004,32 +1251,41 @@ function emptyScan(dir: string, graph: ProjectGraph): AgentSupplyScanResult {
 }
 
 describe('suggestSupplyTasks（缺口建议：按 pass 分组 + 排序 + 每类上限 20）', () => {
-  it('七个 pass 的缺口都进建议，按 pass 顺序分组（partition 永远第一）', () => {
+  it('九个洞察侧 pass 的缺口都进建议，按 pass 顺序分组（partition 永远第一）', () => {
     const graph = fixtureGraph()
     applyCoreJudgment(graph, { [FN_A]: { core: true, reason: '' } })
     const sugs = suggestSupplyTasks(graph, emptyScan(freshDir(), graph))
     const passes = sugs.map((s) => s.pass)
     expect(passes).toEqual([
       'partition',
+      'flows',
       'modules', 'modules',
       'narratives', 'narratives',
       'categories',
       'coreJudgment',
       'coreRoles',
-      'blocks'
+      'blocks',
+      'keySteps', 'keySteps'
     ])
     expect(sugs[0]).toMatchObject({ kind: 'project-partition', targetId: 'root' })
     expect(sugs[0].label).toContain('2 个模块')
     expect(sugs[0].label).toContain('4 个函数')
     expect(sugs[0].label).toContain('来源 dir')
+    expect(sugs[1]).toMatchObject({ kind: 'project-flows', pass: 'flows', targetId: 'root' })
+    expect(sugs[1].label).toContain('2 个模块')
+    expect(sugs[1].label).toContain('2 条链路')
     expect(sugs.find((s) => s.pass === 'categories')?.targetId).toBe(FN_D)
     expect(sugs.find((s) => s.pass === 'blocks')?.targetId).toBe(FN_D)
     expect(sugs.find((s) => s.pass === 'modules')?.label).toBe('src')
     expect(sugs.find((s) => s.pass === 'narratives')?.label).toContain('2 步')
+    // keySteps 只建议「有调用点」的函数，标签带调用数；FN_B（chain:0 入口）按 id 排在 FN_D 前
+    expect(sugs.filter((s) => s.pass === 'keySteps').map((s) => s.targetId)).toEqual([FN_B, FN_D])
+    expect(sugs.find((s) => s.pass === 'keySteps')?.kind).toBe('function-key-steps')
+    expect(sugs.find((s) => s.pass === 'keySteps')?.label).toBe('ClsB.beta（1 次调用）')
     expect(sugs.every((s) => s.kind.length > 0 && s.label.length > 0)).toBe(true)
   })
 
-  it('已生效 partition 消掉整项目划分建议', () => {
+  it('已生效 partition 消掉整项目划分建议（flows 建议仍在，直到 flows 也供给）', () => {
     const dir = freshDir()
     writeSupply(dir, 'partition.qoder.json', partitionEnvelope())
     const graph = fixtureGraph()
@@ -1038,6 +1294,20 @@ describe('suggestSupplyTasks（缺口建议：按 pass 分组 + 排序 + 每类�
     const sugs = suggestSupplyTasks(graph, res)
     expect(sugs.filter((s) => s.pass === 'partition')).toEqual([])
     expect(sugs.some((s) => s.kind === 'project-partition')).toBe(false)
+    expect(sugs.some((s) => s.kind === 'project-flows')).toBe(true)
+  })
+
+  it('已生效 flows / keySteps 消掉对应建议', () => {
+    const dir = freshDir()
+    writeSupply(dir, 'flows.qoder.json', flowEnvelope())
+    writeSupply(dir, 'keySteps.qoder.json', keyStepsEnvelope())
+    const graph = fixtureGraph()
+    const res = scan(dir, graph)
+    expect(res.errors).toEqual([])
+    const sugs = suggestSupplyTasks(graph, res)
+    expect(sugs.some((s) => s.pass === 'flows')).toBe(false)
+    // FN_B 已被供给，只剩 FN_D
+    expect(sugs.filter((s) => s.pass === 'keySteps').map((s) => s.targetId)).toEqual([FN_D])
   })
 
   it('已生效供给（winners）消掉对应建议；坏条目不算覆盖', () => {
@@ -1086,11 +1356,13 @@ describe('suggestSupplyTasks（缺口建议：按 pass 分组 + 排序 + 每类�
     })
     const sugs = suggestSupplyTasks(graph, emptyScan(freshDir(), graph))
     const countOf = (pass: AgentSupplyPass): number => sugs.filter((s) => s.pass === pass).length
+    expect(countOf('flows')).toBe(1)
     expect(countOf('modules')).toBe(1)
     expect(countOf('categories')).toBe(20)
     expect(countOf('coreJudgment')).toBe(20)
     expect(countOf('coreRoles')).toBe(20)
     expect(countOf('blocks')).toBe(20)
+    expect(countOf('keySteps')).toBe(0)
     // 按 coreScore 降序：m00 在列、m24 被截掉
     expect(sugs.filter((s) => s.pass === 'categories')[0].targetId).toContain('m00')
     expect(sugs.some((s) => s.targetId.includes('m24'))).toBe(false)
@@ -1126,7 +1398,7 @@ function wideFixture(): { graph: ProjectGraph; calleeId: (i: number) => string }
 }
 
 describe('buildSupplyIndex（实时图谱 + 截断标注 + 建议自检补齐）', () => {
-  it('索引成员取自传入图谱：模块/核心函数/链路/文件齐全并带截断标注', () => {
+  it('索引成员取自传入图谱：模块/核心函数/调用主干候选/链路/文件齐全并带截断标注', () => {
     const { graph, calleeId } = wideFixture()
     expect([...graph.insights.values()].filter((i) => i.isCore)).toHaveLength(16)
     const index = buildSupplyIndex(graph, [])
@@ -1136,11 +1408,15 @@ describe('buildSupplyIndex（实时图谱 + 截断标注 + 建议自检补齐）
     expect(mod.coreFunctions).toHaveLength(15)
     expect(mod.coreTruncated).toBe(1)
     expect(mod.coreFunctions.map((f) => f.id)).not.toContain(calleeId(15))
+    // 48 个 caller 各有 3 个调用点 → keySteps 候选按调用数降序，截 15
+    expect(mod.keyStepFunctions).toHaveLength(15)
+    expect(mod.keyStepTruncated).toBe(33)
+    expect(mod.keyStepFunctions.every((f) => f.callCount === 3)).toBe(true)
     expect(mod.fileTruncated).toBe(64 - 30)
     expect(mod.files).toHaveLength(30)
     expect(mod.chains.length).toBeLessThanOrEqual(20)
     expect(mod.chainTruncated).toBeGreaterThan(0)
-    expect(index.functionCount).toBe(15)
+    expect(index.functionCount).toBe(30)
   })
 
   it('自检补齐：被建议却被 15 上限挡在外面的核心函数一定进索引', () => {
@@ -1184,14 +1460,21 @@ describe('buildSupplyIndex（实时图谱 + 截断标注 + 建议自检补齐）
     const index = buildSupplyIndex(graph, sugs)
     const indexed = new Set<string>()
     for (const m of index.modules) {
-      for (const f of [...m.coreFunctions, ...m.pendingFunctions, ...m.blockFunctions, ...m.extraFunctions]) {
+      for (const f of [...m.coreFunctions, ...m.pendingFunctions, ...m.blockFunctions, ...m.keyStepFunctions, ...m.extraFunctions]) {
         indexed.add(f.id)
       }
       for (const c of [...m.chains, ...m.extraChains]) indexed.add(c.id)
       indexed.add(m.id)
     }
-    // partition 的 targetId 是整份划分的固定唯一键 root（结构层没有「索引对象」），其余必须逐字命中
-    expect(sugs.filter((s) => s.pass !== 'partition' && !indexed.has(s.targetId))).toEqual([])
+    // partition / flows 的 targetId 都是整份结构（结构层 / 整树语义层）的固定唯一键 root，没有「索引对象」；
+    // 其余必须逐字命中
+    expect(sugs.filter((s) => s.pass !== 'partition' && s.pass !== 'flows' && !indexed.has(s.targetId))).toEqual([])
+    // keySteps 建议超过 15 个的也会被补进 extraFunctions（而不是建议里有、索引里查不到）
+    const keyStepSugs = sugs.filter((s) => s.pass === 'keySteps')
+    expect(keyStepSugs.length).toBe(20)
+    expect(
+      keyStepSugs.filter((s) => index.modules[0].extraFunctions.some((f) => f.id === s.targetId)).length
+    ).toBe(5)
   })
 
   it('待分类函数与含注释块函数各自成段（categories / blocks 的候选索引）', () => {
@@ -1227,9 +1510,18 @@ describe('完整索引 index.json（supply/<projectId>/index.json）', () => {
     expect(index.functions).toHaveLength(4)
     const fnA = index.functions.find((f) => f.id === FN_A)!
     expect(fnA).toMatchObject({ moduleId: 'mod:0', category: 'utility', callCount: 0, codeBlockCount: 0 })
+    expect(fnA.calls).toEqual([])
     expect(fnA.chainIds).toEqual(['chain:0'])
+    const fnB = index.functions.find((f) => f.id === FN_B)!
+    // keySteps 的 calleeName 必须逐字来自这里（按 line 升序）
+    expect(fnB.callCount).toBe(1)
+    expect(fnB.calls).toEqual([
+      { line: 3, calleeName: 'alpha', calleeId: FN_A, role: 'core' }
+    ])
     const fnD = index.functions.find((f) => f.id === FN_D)!
     expect(fnD.category).toBe('pending')
+    expect(fnD.callCount).toBe(1)
+    expect(fnD.calls).toEqual([{ line: 3, calleeName: 'gamma', calleeId: FN_C, role: 'core' }])
     expect(fnD.codeBlockCount).toBe(2)
     expect(fnD.chainIds).toEqual(['chain:1'])
     expect(index.chains.map((c) => ({ id: c.id, entryId: c.entryId, moduleId: c.moduleId }))).toEqual([
@@ -1271,7 +1563,7 @@ describe('完整索引 index.json（supply/<projectId>/index.json）', () => {
 
 
 describe('generateSupplyRulesText（契约文本）', () => {
-  it('含落盘目录/命名规则/七个 pass 的 schema 表/真实 id 示例/索引/建议/两轮契约/边界', () => {
+  it('含落盘目录/命名规则/九个 pass 的 schema 表/真实 id 示例/索引/建议/两轮契约/边界', () => {
     const graph = fixtureGraph()
     applyCoreJudgment(graph, { [FN_A]: { core: true, reason: '' } })
     const dir = join(freshDir(), 'insight')
@@ -1287,34 +1579,44 @@ describe('generateSupplyRulesText（契约文本）', () => {
     expect(t).toContain('**`proj-x`**')
     expect(t).toContain('narratives.qoder.json')
     expect(t).toContain('绝不写进被分析的目标项目')
-    // 七个洞察侧 pass 与本地 ai-cache 键的映射表（changes 在第 9 节）
-    expect(t).toContain('七个 pass')
-    expect(t).toContain('## 4. 七个洞察侧 pass')
+    // 九个洞察侧 pass 与本地 ai-cache 键的映射表（changes 在第 9 节）
+    expect(t).toContain('九个 pass')
+    expect(t).toContain('## 4. 九个洞察侧 pass')
     for (const pass of SUPPLY_PASSES.filter((p) => p !== 'changes')) expect(t).toContain(`| \`${pass}\` |`)
     expect(t).toContain('`chunk:blocks:<hash>`')
+    expect(t).toContain('`chunk:keySteps:<hash>`')
+    expect(t).toContain('`<图指纹>:flows:tree`')
     expect(t).toContain('`<图指纹>:narratives:v2`')
     expect(t).toContain('`<图指纹>:coreJudgment`')
     expect(t).toContain('`<图指纹>:coreRoles`')
     expect(t).toContain('`chunk:categories:<hash>`')
     expect(t).toContain('`<图指纹>:partition:latest`')
-    // partition 是结构层：单独一节、原子校验、两轮契约，而不是被拒绝的本地专属 pass
+    // partition 是结构层：单独一节、原子校验、两轮契约；flows 紧随其后整树替换
     expect(t).toContain('### 4.0 `partition` — 整项目划分（结构层，先于其它 pass 应用）')
+    expect(t).toContain('### 4.7 `keySteps` — 调用主干（关键步骤）')
+    expect(t).toContain('### 4.8 `flows` — 递归脉络树（业务主线，整树原子应用）')
     expect(t).toContain('唯一键 `root`')
     expect(t).toContain('每个函数必须**恰好出现一次**')
     expect(t).toContain('## 10. 两轮契约（先划分，后语义）')
     expect(t).toContain('第一轮：只写 `partition.<agent>.json`')
+    expect(t).toContain('第二轮：再写 `flows` + `modules`')
+    expect(t).toContain('flows 是整树语义 pass，依赖 partition 应用后的划分身份（basis），必须放在第二轮。')
     expect(t).not.toContain('- `partition`：模块划分含模块成员归属')
-    // 本地专属 pass 的拒绝说明
-    expect(t).toContain('- `flows`：递归脉络树是本地 AI 专属能力')
+    // 只拒绝 externals（flows / keySteps 已进入供给范围）
+    expect(t).not.toContain('递归脉络树是本地 AI 专属能力')
     expect(t).toContain('- `externals`：外部库补全是本地 AI 专属能力')
-    // 六个用真实 id 的完整示例（partition 的示例在 4.0 内）
-    for (const label of ['A', 'B', 'C', 'D', 'E', 'F']) expect(t).toContain(`**示例 ${label}：`)
+    // 八个用真实 id 的完整示例（partition 的示例在 4.0 内）
+    for (const label of ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']) expect(t).toContain(`**示例 ${label}：`)
     expect(t).toContain(JSON.stringify(FN_A))
+    expect(t).toContain(JSON.stringify(FN_B))
     expect(t).toContain('"chain:0"')
     expect(t).toContain('"mod:0"')
     expect(t).toContain('引用的对象 id 必须逐字来自本索引，不得编造')
     expect(t).toContain('## 7. 建议清单')
     expect(t).toContain('classification.rules')
+    // basis 口径：modules / narratives / flows 必填，函数类（含 keySteps）禁止
+    expect(t).toContain('| basis | modules / narratives / flows **必填**')
+    expect(t).toContain('含 partition、函数类')
     // 完整机器可读索引：绝对路径、在 supply/<projectId>/ 下、不在 insight/ 里
     expect(rules.indexPath).toBe(supplyIndexPathOf(dir))
     expect(rules.indexPath).toBe(join(dir, '..', 'index.json'))
@@ -1327,8 +1629,8 @@ describe('generateSupplyRulesText（契约文本）', () => {
       errorCount: 0,
       ignoredCount: 0,
       suggestionCount: sugs.length,
-      // 索引里的函数 id 去重后 = FN_A（核心）+ FN_D（待分类/含注释块）
-      indexFunctionCount: 2,
+      // 索引里的函数 id 去重后 = FN_A（核心）+ FN_B（keySteps 候选）+ FN_D（待分类/含注释块/keySteps 候选）
+      indexFunctionCount: 3,
       indexChainCount: 2
     })
   })
@@ -1613,8 +1915,10 @@ describe('契约缺陷回归', () => {
     const from = rules.rulesText.indexOf('## 6. 目标索引')
     const to = rules.rulesText.indexOf('## 7. 建议清单')
     const indexSection = rules.rulesText.slice(from, to)
-    // root 是 partition 的固定唯一键（结构层），不在对象索引里；其余建议必须逐字可见
-    const missing = sugs.filter((s) => s.pass !== 'partition' && !indexSection.includes(`\`${s.targetId}\``))
+    // root 是 partition / flows 的固定唯一键（整份结构），不在对象索引里；其余建议必须逐字可见
+    const missing = sugs.filter(
+      (s) => s.pass !== 'partition' && s.pass !== 'flows' && !indexSection.includes(`\`${s.targetId}\``)
+    )
     expect(missing).toEqual([])
   })
 })

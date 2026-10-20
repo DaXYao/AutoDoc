@@ -1,4 +1,6 @@
 import type {
+  AgentSupplyFlowsValue,
+  AgentSupplyKeyStepsValue,
   AgentSupplyPartitionModule,
   AgentSupplyPartitionValue,
   AgentSupplyPass,
@@ -16,6 +18,7 @@ import { flowsBasis } from './flow.js'
 import { rebuildModuleCores, syncModuleCores, type ProjectGraph } from './graph.js'
 import { isCategoryCandidate, markClassified } from './categoryCandidates.js'
 import { applyAgentPartitionToInsight } from './supplyPartition.js'
+import { applyAgentFlowsToInsight, validateAgentFlowShape } from './supplyFlows.js'
 import { SUPPLY_PASSES } from './agentSupply.js'
 
 /* ------------------------- 供给缓存命名空间 ------------------------- */
@@ -24,6 +27,8 @@ import { SUPPLY_PASSES } from './agentSupply.js'
 export interface SupplyValueEntry {
   value: unknown
   agent: string
+  /** 供给文件自身的 writtenAt：flows 的时间戳口径必须与归档快照一致（不能用合并时刻凑） */
+  writtenAt?: string
 }
 
 /**
@@ -91,8 +96,9 @@ export function readSupplyCache(
 ): Map<AgentSupplyPass, { data: Record<string, SupplyValueEntry>; agents: string[] }> {
   const out = new Map<AgentSupplyPass, { data: Record<string, SupplyValueEntry>; agents: string[] }>()
   for (const pass of CACHEABLE_SUPPLY_PASSES) {
-    // partition 不能按 basis 过滤（它就是 basis 的来源），由 readPartitionSupply 单独读、先行应用
-    if (pass === 'partition') continue
+    // partition / flows 不能按 basis 过滤（partition 就是 basis 的来源，flows 依赖 partition 后的 basis），
+    // 由 readPartitionSupply / readFlowsSupply 单独读、先行应用
+    if (pass === 'partition' || pass === 'flows') continue
     const entry = cache.getGlobal<SupplyCacheEntry>(supplyCacheKey(pass))
     if (!entry || typeof entry !== 'object') continue
     // 指纹与 basis 任一不符即跳过：图变了或划分变了，位置化 id 与函数集都不可信
@@ -141,6 +147,35 @@ export function readPartitionSupply(
   return { value, agent }
 }
 
+/**
+ * 读整树脉络供给缓存（fingerprint + basis 都必须匹配：flows 依赖 partition 应用后的划分身份）。
+ * 值固定在 `data.root`；形状经 validateAgentFlowShape 深校验（缓存损坏时不冒险应用）。
+ * **不校验模块/函数/链路 id 是否存在**——那是 applyAgentFlowsToInsight 的职责（同一套规则只在 build 里维护）。
+ */
+export function readFlowsSupply(
+  cache: AiCache,
+  fingerprint: string,
+  basis: string
+): { value: AgentSupplyFlowsValue; agent: string; writtenAt: string } | null {
+  const entry = cache.getGlobal<SupplyCacheEntry>(supplyCacheKey('flows'))
+  if (!entry || typeof entry !== 'object') return null
+  if (entry.fingerprint !== fingerprint || entry.basis !== basis) return null
+  const item = entry.data?.root
+  if (!item || typeof item !== 'object') return null
+  const shape = validateAgentFlowShape(item.value)
+  if (shape.kind !== 'ok') return null
+  const agent = typeof item.agent === 'string' && item.agent.length > 0 ? item.agent : 'agent'
+  // 与归档快照同一口径：优先进供给文件的 writtenAt（flowsGeneratedAt = 语义版本时间），
+  // 缺失（旧缓存/测试直写）才退回合并时刻
+  const writtenAt =
+    typeof item.writtenAt === 'string' && item.writtenAt.length > 0
+      ? item.writtenAt
+      : typeof entry.mergedAt === 'string'
+        ? entry.mergedAt
+        : ''
+  return { value: shape.value, agent, writtenAt }
+}
+
 /* ------------------------- 单条目写入洞察 ------------------------- */
 
 /**
@@ -159,12 +194,14 @@ export function applyWinnerToInsight(
 ): ApplyOutcome {
   switch (winner.pass) {
     case 'partition': return applyPartitionMerge(insight, graph, winner, entry)
+    case 'flows': return applyFlowsMerge(insight, graph, winner, entry)
     case 'modules': return applyModuleMerge(insight, winner.objectId, entry)
     case 'narratives': return applyNarrativeMerge(insight, winner.objectId, entry)
     case 'categories': return applyCategoryMerge(insight, graph, winner.objectId, entry)
     case 'coreJudgment': return applyCoreMerge(insight, graph, winner.objectId, entry)
     case 'coreRoles': return applyCoreRoleMerge(insight, winner.objectId, entry)
     case 'blocks': return applyBlocksMerge(insight, graph, winner.objectId, entry)
+    case 'keySteps': return applyKeyStepsMerge(insight, graph, winner.objectId, entry)
     default: return 'missing'
   }
 }
@@ -188,6 +225,22 @@ function applyPartitionMerge(
   if (entry.pass !== 'partition' || winner.objectId !== 'root') return 'missing'
   const val = entry.value as AgentSupplyPartitionValue
   return applyAgentPartitionToInsight(insight, graph, val)
+}
+
+/**
+ * flows → 整棵递归脉络树（整树替换，唯一键 root）。
+ * 必须先于其余语义 pass 套用：树内引用的 mod:N / functionId / chain:N 都以 partition 应用后的图谱为准。
+ * 构建失败（引用失效等）按 missing 处理：不覆盖旧树，留作本地生成的兜底展示。
+ */
+function applyFlowsMerge(
+  insight: ProjectInsight,
+  graph: ProjectGraph,
+  winner: AgentSupplyWinner,
+  entry: AnyAgentSupplyEntry
+): ApplyOutcome {
+  if (entry.pass !== 'flows' || winner.objectId !== 'root') return 'missing'
+  const val = entry.value as AgentSupplyFlowsValue
+  return applyAgentFlowsToInsight(insight, graph, val, entry.writtenAt)
 }
 
 /** modules → insight.modules[i] 的 description（mod:i 是位置 id，i=数组下标） */
@@ -332,6 +385,46 @@ function applyBlocksMerge(
   return before === JSON.stringify(kept) ? 'same' : 'changed'
 }
 
+/**
+ * keySteps → functions[fnId].keyCallIndexes（下标指向**按 line 升序**的 calls，与本地 aiKeySteps 同口径）。
+ * 供给以 calleeName 锚定：逐个映射回当前调用点下标，任一名称缺失即整条 missing（不写半截结果）。
+ * `undefined`（未生成）与 `[]`（明确无主干）严格区分：空数组也要显式写入。
+ */
+function applyKeyStepsMerge(
+  insight: ProjectInsight,
+  graph: ProjectGraph,
+  objectId: string,
+  entry: AnyAgentSupplyEntry
+): ApplyOutcome {
+  if (entry.pass !== 'keySteps') return 'missing'
+  const val = entry.value as AgentSupplyKeyStepsValue
+  if (!val || !Array.isArray(val.calleeNames)) return 'missing'
+  const f = insight.functions[objectId]
+  if (!f) return 'missing'
+  const fn = graph.nodes.get(objectId)
+  if (!fn) return 'missing'
+  const calls = [...fn.calls].sort((a, b) => a.line - b.line)
+  const indexOf = new Map<string, number>()
+  for (let i = 0; i < calls.length; i++) {
+    // 调用边已按 calleeName 去重；若仍有重名，取首个（行号最靠前）保证确定性
+    if (!indexOf.has(calls[i].calleeName)) indexOf.set(calls[i].calleeName, i)
+  }
+  const indexes = new Set<number>()
+  for (const name of val.calleeNames) {
+    if (typeof name !== 'string') return 'missing'
+    const idx = indexOf.get(name)
+    if (idx === undefined) return 'missing'
+    indexes.add(idx)
+  }
+  const next = [...indexes].sort((a, b) => a - b)
+  const before = f.keyCallIndexes === undefined ? null : [...f.keyCallIndexes]
+  if (before !== null && before.length === next.length && before.every((v, i) => v === next[i])) {
+    return 'same'
+  }
+  f.keyCallIndexes = next
+  return 'changed'
+}
+
 /* ------------------------- pass → aiStatus/aiSource 口径 ------------------------- */
 
 /**
@@ -341,11 +434,13 @@ function applyBlocksMerge(
  */
 const PASS_TO_AI_KEY: Partial<Record<AgentSupplyPass, AiPassKey>> = {
   partition: 'partition',
+  flows: 'flows',
   narratives: 'narratives',
   categories: 'categories',
   coreJudgment: 'coreJudgment',
   coreRoles: 'coreRoles',
-  blocks: 'blocks'
+  blocks: 'blocks',
+  keySteps: 'keySteps'
 }
 
 /**
@@ -365,6 +460,10 @@ export function computePassUniverse(
         // 整项目划分：一份供给 = 完整划分，覆盖度恒为 1（不存在「部分划分」）
         n = 1
         break
+      case 'flows':
+        // 整棵树：一份供给 = 完整脉络树，覆盖度恒为 1（不存在「部分树」）
+        n = 1
+        break
       case 'categories':
         for (const fn of graph.nodes.values()) if (isCategoryCandidate(fn)) n++
         break
@@ -379,6 +478,10 @@ export function computePassUniverse(
         break
       case 'blocks':
         for (const fn of graph.nodes.values()) if (fn.codeBlocks.length > 0) n++
+        break
+      case 'keySteps':
+        // 只有「有调用点」的函数才需要主干判定；空数组供给也算覆盖（明确无主干）
+        for (const fn of graph.nodes.values()) if (fn.calls.length > 0) n++
         break
       default:
         n = 0
@@ -406,11 +509,11 @@ export function applyPassSemantics(
   const aiSource: Partial<Record<AiPassKey, SemanticSource>> = { ...insight.aiSource }
   for (const [pass, count] of supplied) {
     if (count <= 0) continue
-    // partition 是整份替换：Agent 一旦供给就是完整划分，状态恒 ok、来源恒 agent（绝无 mixed——
-    // 本地旧划分已被整份替换，不存在「一半本地一半 Agent」的划分）
-    if (pass === 'partition') {
-      aiStatus.partition = 'ok'
-      aiSource.partition = 'agent'
+    // partition / flows 是整份替换：Agent 一旦供给就是完整结构，状态恒 ok、来源恒 agent
+    //（绝无 mixed——本地旧划分/旧树已被整份替换，不存在「一半本地一半 Agent」的结构）
+    if (pass === 'partition' || pass === 'flows') {
+      aiStatus[pass] = 'ok'
+      aiSource[pass] = 'agent'
       continue
     }
     const key = PASS_TO_AI_KEY[pass]
@@ -448,6 +551,8 @@ export function snapshotSourceOf(insight: ProjectInsight): { source: SemanticSou
  * 保证「实时视图」与「归档快照」的内容哈希一致，重复扫描不会多存快照。
  *
  * **partition 永远最先套用**：它是结构层，其余 pass 的 basis / 位置化 id 都以新划分为准。
+ * **flows 紧随其后**：整树引用的 mod:N / functionId / chain:N 依赖 partition 应用后的划分身份；
+ * 它整树替换洞察里的脉络树，早于其余语义 pass 套用，避免来源/覆盖度先被其它 pass 记一遍。
  * skipPartition=true 用于调用方已经在前面亲手应用过同一份划分（loadInsight / refreshInsightAI）：
  * 不再重复应用（避免结构签名比较之外的无谓改写），但仍要登记来源与 aiStatus。
  */
@@ -477,17 +582,36 @@ export function applySupplyOverlay(
     }
   }
 
-  // 2) 其余 pass：用**应用 partition 之后**的 basis 读缓存（旧划分下的语义供给自然失效）
-  const supplyData = readSupplyCache(cache, graph.fingerprint, flowsBasis(graph))
+  // 2) 整树语义层：flows 按「应用 partition 之后」的 basis 读取，并在其余语义 pass 之前整树替换。
+  //    该 basis 只含划分身份（模块/函数归属），不含 coreFunctionIds——核心判定不改变供给 id 的指向，
+  //    本地/Agent 任一侧的核心判定先后都不该让整批供给静默失效。
+  //    构建失败（引用已失效）按 missing 处理：不计来源/覆盖度，保留洞察里现有的树作为兜底展示。
+  const basis = flowsBasis(graph)
+  const flows = readFlowsSupply(cache, graph.fingerprint, basis)
+  if (flows) {
+    const outcome = applyAgentFlowsToInsight(insight, graph, flows.value, flows.writtenAt)
+    if (outcome === 'changed') changed = true
+    if (outcome !== 'missing') {
+      supplied.set('flows', 1)
+      agentSources['flows:root'] = flows.agent
+    }
+  }
+
+  // 3) 其余 pass：用**应用 partition 之后**的 basis 读缓存（旧划分下的语义供给自然失效）
+  const supplyData = readSupplyCache(cache, graph.fingerprint, basis)
   if (supplyData.size === 0) {
     if (Object.keys(agentSources).length === 0) return changed
     insight.agentSources = agentSources
     insight.aiGenerated = true
-    applyPassSemantics(insight, supplied, new Map())
+    applyPassSemantics(insight, supplied, computePassUniverse(insight, graph, supplied.keys()))
     return changed
   }
   // 覆盖度分母必须在套用前算（套用会就地改 category / isCore）
-  const universe = computePassUniverse(insight, graph, supplyData.keys())
+  const universe = computePassUniverse(
+    insight,
+    graph,
+    new Set<AgentSupplyPass>([...supplyData.keys(), ...supplied.keys()])
+  )
 
   for (const [pass, { data }] of supplyData) {
     let n = 0

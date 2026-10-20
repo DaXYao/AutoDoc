@@ -475,7 +475,8 @@ export interface FlowNode {
   /** leaf 指向 1 个核心函数 */
   relatedFunctionIds: string[]
   relatedChainIds: string[]
-  source: 'ai' | 'heuristic'
+  /** 生成来源：ai=本地 KEY AI；agent=外部 Agent 供给；heuristic=静态兜底 */
+  source: 'ai' | 'agent' | 'heuristic'
   reason: string
   /** sha256(relatedFunctionIds.sort().join())[:8]，子树增量用 */
   contentHash?: string
@@ -771,25 +772,29 @@ export type SemanticSource = 'api' | 'agent' | 'mixed'
 
 /**
  * G1 预留（G2 合并时写入 ProjectInsight.agentSources）：字段级来源标记。
- * key = `${AgentSupplyPass}:${objectId}`（objectId 为 moduleId / chainId / functionId；partition 固定为 `root`），
+ * key = `${AgentSupplyPass}:${objectId}`（objectId 为 moduleId / chainId / functionId；partition / flows 固定为 `root`），
  * value = 生效的 agent 标识。
  */
 export type InsightAgentSources = Record<string, string>
 
 /**
- * 可被外部 Agent 供给的语义 pass（一期四类语义 → 六个 pass + 结构层 partition + 变更侧 changes）。
+ * 可被外部 Agent 供给的语义 pass：九个洞察侧 pass（partition + flows + modules + narratives + categories +
+ * coreJudgment + coreRoles + blocks + keySteps）+ 变更侧 changes。
  * 每个 pass 一类一份文件，值形状逐字段对齐 `ai-cache.json` 里同名本地 pass 的值（详见 AgentSupplyValueShapes）。
- * flows / externals / keySteps 不接受外部供给（本地专属或不在一期范围内）。
- * partition 是唯一的**结构层**供给：它决定模块划分本身（basis 的来源），必须先于其它 pass 应用。
+ * externals 仍为本地专属（AI 凭训练知识补全外部库符号，不在供给范围内）。
+ * partition 是**结构层**供给：它决定模块划分本身（basis 的来源），必须先于其它 pass 应用；
+ * flows 是整树语义 pass：依赖 partition 应用后的划分身份（basis），故在 partition 之后、其它 pass 之前应用。
  */
 export type AgentSupplyPass =
   | 'partition'
+  | 'flows'
   | 'modules'
   | 'narratives'
   | 'categories'
   | 'coreJudgment'
   | 'coreRoles'
   | 'blocks'
+  | 'keySteps'
   | 'changes'
 
 /**
@@ -812,6 +817,43 @@ export interface AgentSupplyPartitionModule {
 export interface AgentSupplyPartitionValue {
   summary?: string
   modules: AgentSupplyPartitionModule[]
+}
+
+/**
+ * Agent 供给的递归脉络树节点（未归一化）：只表达业务分层与 id 引用，
+ * id / parentId / order / kind / depth / source / contentHash 由服务端归一化生成。
+ */
+export interface AgentSupplyFlowNode {
+  /** 节点标题（非空，≤200 字符） */
+  label: string
+  /** 一句话节点说明（可选，≤2000 字符） */
+  summary?: string
+  /** 分层/取舍依据（可选，≤1000 字符） */
+  reason?: string
+  /** 关联模块稳定 id（根节点必须非空；引用必须存在于当前划分） */
+  relatedModuleIds?: string[]
+  /** 关联函数稳定 id（叶子必须恰好 1 个；非叶 0..24 个；引用必须存在） */
+  relatedFunctionIds?: string[]
+  /** 关联链路 id（≤50 个；引用必须存在） */
+  relatedChainIds?: string[]
+  /** 子节点（根节点必须非空；深度 ≤8；每节点 ≤32 个） */
+  children?: AgentSupplyFlowNode[]
+}
+
+/**
+ * 递归脉络树（flows pass 的值）：`values` 只能有唯一键 `root`（整树原子应用）。
+ * 依赖 partition 应用后的划分身份（basis 必填）；树内 id 引用必须指向当前图谱。
+ */
+export interface AgentSupplyFlowsValue {
+  roots: AgentSupplyFlowNode[]
+}
+
+/**
+ * 调用主干（keySteps pass 的值）：calleeNames 是该函数 calls[].calleeName 的子集。
+ * 空数组 = 明确无主干（与「未供给」区别开）；名称必须逐字抄契约索引，服务端按行号升序映射为下标。
+ */
+export interface AgentSupplyKeyStepsValue {
+  calleeNames: string[]
 }
 
 /**
@@ -896,16 +938,20 @@ export interface AgentSupplyChangesValue {
 /**
  * pass → 单条目值形状（= `ai-cache.json` 里该 pass 的值形状，`values` 的键是对象 id）：
  * - partition    → 结构层（无同名本地缓存键）：唯一键 `root`，整项目模块划分 + 可选 summary
+ * - flows        → 结构语义（无同名本地缓存键）：唯一键 `root`，整棵递归脉络树（依赖 partition 后的 basis）
  * - modules      → 本地 `<图指纹>:partition:latest`（PartitionEnvelope.modules[i]，moduleId `mod:i` 即下标 i；只写回 name/description，name 兼作对账锚点）
  * - narratives   → 本地 `<图指纹>:narratives:v2`（NarrativeEnvelope；entryId 是供给侧对账字段，非缓存信封字段）
  * - categories   → 本地 `chunk:categories:<hash>`（CategoryEnvelope）
  * - coreJudgment → 本地 `<图指纹>:coreJudgment`（CoreJudgment）
  * - coreRoles    → 本地 `<图指纹>:coreRoles`（Record<functionId, string>）
  * - blocks       → 本地 `chunk:blocks:<hash>`（Record<functionId, InternalStep[]>）
+ * - keySteps     → 本地 `chunk:keySteps:<hash>`（Record<functionId, number[]>；供给按 calleeName 映射回下标）
  */
 export interface AgentSupplyValueShapes {
   /** 结构层：整项目划分（唯一键 root；先于其它 pass 应用） */
   partition: AgentSupplyPartitionValue
+  /** 结构语义：整棵递归脉络树（唯一键 root；basis 必填；在 partition 之后应用） */
+  flows: AgentSupplyFlowsValue
   modules: AgentSupplyModuleValue
   narratives: AgentSupplyNarrativeValue
   categories: AgentSupplyCategoryValue
@@ -914,6 +960,8 @@ export interface AgentSupplyValueShapes {
   coreRoles: string
   /** ④内部步骤：注释块归一后的有序大纲（blockIndexes 指向该函数 codeBlocks 下标） */
   blocks: InternalStep[]
+  /** ④调用主干：该函数 calls[].calleeName 的子集（空数组=无主干；无 basis） */
+  keySteps: AgentSupplyKeyStepsValue
   /** G5：变更侧三层语义（提交叙事 / 链路影响 / 函数角色） */
   changes: AgentSupplyChangesValue
 }
@@ -929,9 +977,9 @@ export interface AgentSupplyFile<P extends AgentSupplyPass = AgentSupplyPass> {
   /** ISO 时间字符串（须可被 Date.parse 解析） */
   writtenAt: string
   /**
-   * 划分身份指纹（文件级对账）：modules / narratives（位置化 id）**必填**且必须逐字等于
-   * 契约给出的当前值，不一致 = 契约已过期（模块划分已变）→ 整份判错；
-   * 函数类 pass（稳定 id）**禁止**携带（按契约外字段判错）。
+   * 划分身份指纹（文件级对账）：modules / narratives（位置化 id）与 flows（整树依赖划分）**必填**
+   * 且必须逐字等于契约给出的当前值，不一致 = 契约已过期（模块划分已变）→ 整份判错；
+   * 函数类 pass（稳定 id，含 keySteps）**禁止**携带（按契约外字段判错）。
    */
   basis?: string
   /** 对象 id → 该 pass 的值（形状见 AgentSupplyValueShapes） */
@@ -1028,12 +1076,14 @@ export interface AgentSupplyScanResult {
  */
 export type AgentSupplySuggestionKind =
   | 'project-partition'
+  | 'project-flows'
   | 'module-identity'
   | 'chain-narrative'
   | 'function-category'
   | 'function-core'
   | 'function-purpose'
   | 'function-steps'
+  | 'function-key-steps'
   | 'changes-narrative'
   | 'changes-chain-impact'
   | 'changes-function-role'

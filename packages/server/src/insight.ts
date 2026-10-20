@@ -25,6 +25,7 @@ import {
   DEFAULT_FLOW_CAPS,
   applyFlows,
   flowSourceStats,
+  flowTreeBasis,
   flowsBasis,
   generateFlows,
   heuristicFlows,
@@ -38,6 +39,7 @@ import { isCategoryCandidate, markClassified } from './categoryCandidates.js'
 import {
   applySupplyOverlay,
   clearSupplyCache,
+  readFlowsSupply,
   readPartitionSupply,
   snapshotSourceOf
 } from './supplyCache.js'
@@ -65,7 +67,7 @@ interface FlowTreeCache {
   aiOk: boolean
   /** 写入时的细化状态快照（ok/partial/failed），仅供排查；回读时一律用 flowsStatusOf 重算，保证两条路径判定一致 */
   status?: AiPassStatus
-  /** M-R1：生成时的划分身份（flowsBasis）。回读时仅 basis 完全一致才命中；无 basis 的旧缓存视同不匹配 */
+  /** M-R1：生成时的划分身份（flowTreeBasis，含模块核心表）。回读时仅 basis 完全一致才命中；无 basis 的旧缓存视同不匹配 */
   basis?: string
   /** m-R3：根级回填次数（降级信号） */
   rootBackfills?: number
@@ -1439,8 +1441,7 @@ export interface LoadInsightOptions {
   /**
    * G2：是否套用 Agent 供给缓存（缺省 true = 实时视图所见即含供给）。
    * 供给层自身（collectAgentSupply 的 basis/索引/建议、executeMerge 的合并基线）必须传 false：
-   * ① basis 只该由静态 + 本地 AI 决定，否则 Agent 的 coreJudgment 供给改写模块核心表后会反过来
-   *    改掉 basis（flowsBasis 含 coreFunctionIds）→ 同一批供给文件在合并后被自己判成「契约过期」；
+   * ① basis 只该由「静态 + 本地 AI 划分」决定，否则 Agent 的 coreJudgment 供给会反过来改掉供给口径；
    * ② 基线若已 overlay 过，aiStatus/aiSource 会在上一轮结果上再判一次（agent 被误升为 mixed），
    *    且合并结果依赖上一轮状态 → 不幂等，内容哈希去重失效。
    */
@@ -1551,7 +1552,8 @@ export function loadInsight(
   let flowsStatus: AiPassStatus | undefined
   // M-R1：applyPartition 之后计算当前 basis，与快照 basis 比对——不符则忽略（不展示矛盾树）。
   // 无 basis 的旧缓存（H1 之前写入）一律视同不匹配：生产阶段不做向后兼容，否则 Agent 重划后树会按旧划分展示/深链错位。
-  const currentBasis = flowsBasis(graph)
+  // 本地树缓存用 flowTreeBasis（含核心表）；Agent 供给用 flowsBasis（不含核心，见下方 overlay）。
+  const currentBasis = flowTreeBasis(graph)
   const basisMatch = flowsTree?.basis === currentBasis
   if (flowsTree && flowsTree.tree.length > 0 && basisMatch) {
     insight.flows = flowsTree.tree
@@ -1851,87 +1853,97 @@ export async function refreshInsightAI(
   const invalidateFlows = opts.force === true || opts.forcePartition === true
   // M-R1：cache-hit 分支也需验证 basis 一致性（划分可能在前面的 pass 被 force 重算过）；
   // 无 basis 的旧缓存视同不匹配，走重算/兜底而不是按旧划分复用。
-  const rawCachedTree = invalidateFlows ? undefined : cache.get<FlowTreeCache>(fp, 'flows:tree')
-  const pass6Basis = flowsBasis(graph)
-  const cachedTree = rawCachedTree && rawCachedTree.basis === pass6Basis
-    ? rawCachedTree
-    : undefined
-  if (cachedTree && cachedTree.tree.length > 0) {
-    insight.flows = cachedTree.tree
-    insight.flowsGeneratedAt = cachedTree.generatedAt
-    insight.flowsFingerprint = fp
-    flowsAiOk = cachedTree.aiOk
-    // Minor-1：与 loadInsight 统一走 flowsStatusOf(tree,{quiet:true})，避免旧快照（无 status 字段）
-    // 在「重新生成 vs 刷新页面」之间翻转，并把错误的 ok 固化进 aiStatus 缓存
-    flowsStatus = cachedTree.aiOk
-      ? flowsStatusOf(cachedTree.tree, { quiet: true, rootBackfills: cachedTree.rootBackfills, salvagedCount: cachedTree.salvagedCount })
-      : 'failed'
+  // 本地树缓存用 flowTreeBasis（含核心表）；供给文件用 flowsBasis（不含核心：本地核心判定
+  // 在装配里早于 flows，若算进供给 basis，KEY 路径会把刚合并的 Agent 供给整批判成过期）。
+  const pass6Basis = flowTreeBasis(graph)
+  // H2：Agent 已供给整树 → 本地完全让位：不读回 flows:tree、不生成/启发式、不清子缓存、也不写回。
+  // 保留旧树是刻意的（供给文件撤回后仍可兜底展示）。这里只记 skipped；
+  // 函数末尾的 applySupplyOverlay 会按整树语义把状态改成 ok 并登记 flows:root 来源。
+  const agentFlows = skipSupply ? null : readFlowsSupply(cache, fp, flowsBasis(graph))
+  if (agentFlows) {
+    status.flows = 'skipped'
   } else {
-    if (invalidateFlows) {
-      // flows 的派生态子缓存必须一并失效：pass1/2 重算后候选函数集/顺序会变，
-      // 旧信封会把下标映射到另一个函数（张冠李戴），使 force/forcePartition 无法修复坏树。
-      // M-R1+A（原子替换）：只清 flows:roots: 和 flows:node: 子缓存，**不提前清 flows:tree**。
-      // 旧整树保留可读（生成期间 GET 仍返回旧树而非空树）；新树算好后在下方原子替换。
-      const n1 = cache.clearByPrefix(fp, 'flows:roots:')
-      const n2 = cache.clearByPrefix(fp, 'flows:node:')
-      const n = n1 + n2
-      if (n > 0) {
-        console.warn(
-          `[autodoc] ${opts.force ? 'force' : 'forcePartition'}：已失效 flows 子缓存 ${n} 条（roots/node）`
-        )
-      }
-    }
-    let roots: FlowNode[] = []
-    const stats: FlowGenStats = { subtreeFailures: 0, emptyResponses: 0 }
-    const flowDeps: FlowDeps = { cache, fingerprint: fp, caps, stats }
-    try {
-      roots = await generateFlows(graph, insight, flowDeps)
-      flowsAiOk = roots.length > 0
-    } catch (e) {
-      console.warn(`[autodoc] AI 脉络生成失败，回退静态兜底：${e instanceof Error ? e.message : String(e)}`)
-    }
-    // 子树级失败不再静默吞掉：计数入日志，供定位「看似 ok 但大面积兜底」
-    if (stats.subtreeFailures > 0 || stats.emptyResponses > 0 || (stats.rootBackfills ?? 0) > 0) {
-      console.warn(
-        `[autodoc] AI 脉络生成：子树失败回退 ${stats.subtreeFailures} 次、空/无效返回 ${stats.emptyResponses} 次、` +
-          `空壳根回填 ${stats.rootBackfills ?? 0} 次`
-      )
-    }
-    // 任一步失败走 heuristicFlows（不抛、不崩、不影响已生成的其它段）
-    if (!flowsAiOk) {
-      try {
-        roots = heuristicFlows(graph, insight, { caps })
-      } catch {
-        roots = []
-      }
-    }
-    if (roots.length > 0) {
-      // 写回失败不得穿透 refreshInsightAI（否则会连带丢失前 5 段成果与 aiStatus）
-      try {
-        applyFlows(insight, graph, roots, { caps })
-        flowsStatus = flowsAiOk ? flowsStatusOf(insight.flows ?? roots, { rootBackfills: stats.rootBackfills, salvagedCount: stats.salvagedCount }) : 'failed'
-        const treeCache: FlowTreeCache = {
-          tree: insight.flows ?? [],
-          generatedAt: insight.flowsGeneratedAt ?? '',
-          aiOk: flowsAiOk,
-          status: flowsStatus,
-          basis: pass6Basis,
-          rootBackfills: stats.rootBackfills ?? 0,
-          salvagedCount: stats.salvagedCount ?? 0
+    const rawCachedTree = invalidateFlows ? undefined : cache.get<FlowTreeCache>(fp, 'flows:tree')
+    const cachedTree = rawCachedTree && rawCachedTree.basis === pass6Basis
+      ? rawCachedTree
+      : undefined
+    if (cachedTree && cachedTree.tree.length > 0) {
+      insight.flows = cachedTree.tree
+      insight.flowsGeneratedAt = cachedTree.generatedAt
+      insight.flowsFingerprint = fp
+      flowsAiOk = cachedTree.aiOk
+      // Minor-1：与 loadInsight 统一走 flowsStatusOf(tree,{quiet:true})，避免旧快照（无 status 字段）
+      // 在「重新生成 vs 刷新页面」之间翻转，并把错误的 ok 固化进 aiStatus 缓存
+      flowsStatus = cachedTree.aiOk
+        ? flowsStatusOf(cachedTree.tree, { quiet: true, rootBackfills: cachedTree.rootBackfills, salvagedCount: cachedTree.salvagedCount })
+        : 'failed'
+    } else {
+      if (invalidateFlows) {
+        // flows 的派生态子缓存必须一并失效：pass1/2 重算后候选函数集/顺序会变，
+        // 旧信封会把下标映射到另一个函数（张冠李戴），使 force/forcePartition 无法修复坏树。
+        // M-R1+A（原子替换）：只清 flows:roots: 和 flows:node: 子缓存，**不提前清 flows:tree**。
+        // 旧整树保留可读（生成期间 GET 仍返回旧树而非空树）；新树算好后在下方原子替换。
+        const n1 = cache.clearByPrefix(fp, 'flows:roots:')
+        const n2 = cache.clearByPrefix(fp, 'flows:node:')
+        const n = n1 + n2
+        if (n > 0) {
+          console.warn(
+            `[autodoc] ${opts.force ? 'force' : 'forcePartition'}：已失效 flows 子缓存 ${n} 条（roots/node）`
+          )
         }
-        // M-R1+A（原子替换）：新树完全算好后才写入，覆盖旧快照
-        cache.set(fp, 'flows:tree', treeCache)
+      }
+      let roots: FlowNode[] = []
+      const stats: FlowGenStats = { subtreeFailures: 0, emptyResponses: 0 }
+      const flowDeps: FlowDeps = { cache, fingerprint: fp, caps, stats }
+      try {
+        roots = await generateFlows(graph, insight, flowDeps)
+        flowsAiOk = roots.length > 0
       } catch (e) {
-        flowsWriteFailed = true
-        flowsStatus = 'failed'
+        console.warn(`[autodoc] AI 脉络生成失败，回退静态兜底：${e instanceof Error ? e.message : String(e)}`)
+      }
+      // 子树级失败不再静默吞掉：计数入日志，供定位「看似 ok 但大面积兜底」
+      if (stats.subtreeFailures > 0 || stats.emptyResponses > 0 || (stats.rootBackfills ?? 0) > 0) {
         console.warn(
-          `[autodoc] AI 脉络树写回失败（保留前 5 段成果）：${e instanceof Error ? e.message : String(e)}`
+          `[autodoc] AI 脉络生成：子树失败回退 ${stats.subtreeFailures} 次、空/无效返回 ${stats.emptyResponses} 次、` +
+            `空壳根回填 ${stats.rootBackfills ?? 0} 次`
         )
       }
+      // 任一步失败走 heuristicFlows（不抛、不崩、不影响已生成的其它段）
+      if (!flowsAiOk) {
+        try {
+          roots = heuristicFlows(graph, insight, { caps })
+        } catch {
+          roots = []
+        }
+      }
+      if (roots.length > 0) {
+        // 写回失败不得穿透 refreshInsightAI（否则会连带丢失前 5 段成果与 aiStatus）
+        try {
+          applyFlows(insight, graph, roots, { caps })
+          flowsStatus = flowsAiOk ? flowsStatusOf(insight.flows ?? roots, { rootBackfills: stats.rootBackfills, salvagedCount: stats.salvagedCount }) : 'failed'
+          const treeCache: FlowTreeCache = {
+            tree: insight.flows ?? [],
+            generatedAt: insight.flowsGeneratedAt ?? '',
+            aiOk: flowsAiOk,
+            status: flowsStatus,
+            basis: pass6Basis,
+            rootBackfills: stats.rootBackfills ?? 0,
+            salvagedCount: stats.salvagedCount ?? 0
+          }
+          // M-R1+A（原子替换）：新树完全算好后才写入，覆盖旧快照
+          cache.set(fp, 'flows:tree', treeCache)
+        } catch (e) {
+          flowsWriteFailed = true
+          flowsStatus = 'failed'
+          console.warn(
+            `[autodoc] AI 脉络树写回失败（保留前 5 段成果）：${e instanceof Error ? e.message : String(e)}`
+          )
+        }
+      }
     }
+    const flowsProduced = !!insight.flows && insight.flows.length > 0
+    status.flows = !flowsProduced ? 'skipped' : flowsWriteFailed ? 'failed' : flowsStatus
   }
-  const flowsProduced = !!insight.flows && insight.flows.length > 0
-  status.flows = !flowsProduced ? 'skipped' : flowsWriteFailed ? 'failed' : flowsStatus
 
   insight.aiGenerated = !!(
     p ||

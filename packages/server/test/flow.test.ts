@@ -10,7 +10,7 @@ import type {
   ProjectInsight
 } from '@autodoc/shared-types'
 import { createStorage, loadConfig } from '@autodoc/core'
-import { buildGraph, type ProjectGraph } from '../src/graph.js'
+import { applyCoreJudgment, buildGraph, type ProjectGraph } from '../src/graph.js'
 import { AiCache } from '../src/aiCache.js'
 import type { DocService } from '../src/context.js'
 import {
@@ -19,6 +19,7 @@ import {
   aiFlowRoots,
   applyFlows,
   flowMaxTokens,
+  flowTreeBasis,
   flowsBasis,
   generateFlows,
   heuristicFlows,
@@ -454,7 +455,7 @@ describe('缓存：contentHash 相同跳过重复 AI 调用', () => {
     expect(spy.count).toBe(firstCalls) // 无新增 AI 调用
     expect(second.length).toBe(first.length)
     // 缓存确实落盘了 flows:roots:${basis} / flows:node:*
-    expect(cache.get(graph.fingerprint, `flows:roots:${flowsBasis(graph)}`)).toBeTruthy()
+    expect(cache.get(graph.fingerprint, `flows:roots:${flowTreeBasis(graph)}`)).toBeTruthy()
   })
 
   it('缓存存已解析函数 id；候选顺序变化时不张冠李戴（basis 入键 → 重算）', async () => {
@@ -867,6 +868,22 @@ describe('refreshInsightAI：aiStatus 可观测性 + flows 写回', () => {
     expect(loaded.insight.aiStatus!.flows).toBe(refreshed.insight.aiStatus!.flows)
     expect(loaded.insight.aiStatus!.flows).not.toBe('ok')
     service.storage.close()
+  })
+})
+
+/* ------------------------- H2：供给 basis 与本地树 basis 分离 ------------------------- */
+
+describe('H2：核心判定不改变供给 basis', () => {
+  it('applyCoreJudgment 改核心表后：flowsBasis 不变（供给有效），flowTreeBasis 变化（本地树重算）', () => {
+    const graph = buildGraph(fixtureFiles())
+    const supplyBefore = flowsBasis(graph)
+    const treeBefore = flowTreeBasis(graph)
+    applyCoreJudgment(graph, {
+      fetchReplies: { core: false, reason: '本地判定非核心' },
+      copyToClipboard: { core: true, reason: '本地判定核心' }
+    })
+    expect(flowsBasis(graph)).toBe(supplyBefore)
+    expect(flowTreeBasis(graph)).not.toBe(treeBefore)
   })
 })
 

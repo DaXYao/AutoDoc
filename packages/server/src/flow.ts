@@ -384,10 +384,26 @@ function annotateReason(node: FlowNode, note: string): void {
 }
 
 /**
- * 划分/核心判定摘要（flows 缓存键的 basis）：模块组成或核心函数集变化即失效。
- * 用于消除位置化 id（mod:i / flow:x.y）跨轮次复用旧结果的风险。
+ * 划分身份指纹（Agent 供给文件的 basis）：模块组成 / 名称 / 函数归属变化即失效。
+ * 用于消除位置化 id（mod:i / chain:N）跨轮次指向别的对象的风险。
+ * **不含 coreFunctionIds**：核心判定（本地 AI 或 Agent coreJudgment）只改 isCore 与模块核心表，
+ * 不改变这些 id 的指向。把它算进供给 basis，会让「核心判定由谁先产出」决定整批供给是否生效：
+ * 合并时 basis 取在语义 pass 之前，而 KEY 路径的本地核心判定发生在装配更早的位置，
+ * 一旦本地核心缓存后到/变化，supply:* 会静默全部失效（Agent 树被本地生成覆盖）。
+ * 本地脉络树缓存仍用 [[flowTreeBasis]]（候选函数依赖核心表）。
  */
 export function flowsBasis(graph: ProjectGraph): string {
+  const parts = graph.modules.map(
+    (m) => `${m.id}|${m.name}|${[...m.functionIds].sort().join(',')}`
+  )
+  return hash8(parts.join(';'))
+}
+
+/**
+ * 本地脉络树缓存（flows:tree 与 flows:roots: 子缓存）的 basis：模块组成或核心函数集变化即失效。
+ * 与供给 basis 分开：generateFlows 的候选函数按模块核心表裁剪，核心判定变化必须重算。
+ */
+export function flowTreeBasis(graph: ProjectGraph): string {
   const parts = graph.modules.map(
     (m) =>
       `${m.id}|${m.name}|${[...m.functionIds].sort().join(',')}|${[...m.coreFunctionIds].sort().join(',')}`
@@ -516,7 +532,7 @@ async function requestRoots(
   throw new Error(lastErr)
 }
 
-/** 识别 1~N 条主线根（核心功能模块）；缓存键 flows:roots:${basis}（划分/核心判定变即失效） */
+/** 识别 1~N 条主线根（核心功能模块）；缓存键 flows:roots:${flowTreeBasis}（划分/核心判定变即失效） */
 export async function aiFlowRoots(
   graph: ProjectGraph,
   insight: ProjectInsight,
@@ -524,8 +540,9 @@ export async function aiFlowRoots(
 ): Promise<FlowNode[]> {
   const caps = resolveCaps(deps)
   const budget = budgetOf(deps)
-  // 信封里的 relatedModuleIds 是位置化 mod:i，划分重算后同一 id 可能指向另一个模块，故键必须含 basis
-  const rootsKey = `flows:roots:${flowsBasis(graph)}`
+  // 信封里的 relatedModuleIds 是位置化 mod:i，划分重算后同一 id 可能指向另一个模块，故键必须含 basis；
+  // 候选函数还依赖模块核心表，故用 flowTreeBasis（含 coreFunctionIds）
+  const rootsKey = `flows:roots:${flowTreeBasis(graph)}`
   const cached = cacheGet<RootsEnvelope>(deps, rootsKey)
   const env = cached ?? (await requestRoots(graph, insight, deps))
   if (!cached && !env.salvaged) cacheSet(deps, rootsKey, env) // m4：抢救信封不入缓存（与 children 对称）

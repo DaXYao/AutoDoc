@@ -167,9 +167,9 @@ describe('groupSuggestionsByPass', () => {
   })
 
   it('未知 pass 不进入分组（顺序表是白名单）', () => {
-    const groups = groupSuggestionsByPass([suggestion('flows' as AgentSupplyPass, 'x')])
+    const groups = groupSuggestionsByPass([suggestion('externals' as AgentSupplyPass, 'x')])
     expect(groups).toEqual([])
-    expect(SUPPLY_PASS_ORDER).not.toContain('flows' as AgentSupplyPass)
+    expect(SUPPLY_PASS_ORDER).not.toContain('externals' as AgentSupplyPass)
   })
 })
 
@@ -282,21 +282,25 @@ describe('变更侧（G6）pass / 建议种类标签', () => {
     for (const pass of SUPPLY_PASS_ORDER) expect(SUPPLY_PASS_LABELS[pass].length).toBeGreaterThan(0)
   })
 
-  it('十种建议种类都有中文标签；变更侧「函数角色」不得与洞察侧「系统角色」同文案', () => {
+  it('十二种建议种类都有中文标签；变更侧「函数角色」不得与洞察侧「系统角色」同文案', () => {
     const kinds: AgentSupplySuggestionKind[] = [
       'project-partition',
+      'project-flows',
       'module-identity',
       'chain-narrative',
       'function-category',
       'function-core',
       'function-purpose',
       'function-steps',
+      'function-key-steps',
       'changes-narrative',
       'changes-chain-impact',
       'changes-function-role'
     ]
     for (const kind of kinds) expect(SUPPLY_SUGGESTION_KIND_LABELS[kind].length).toBeGreaterThan(0)
     expect(SUPPLY_SUGGESTION_KIND_LABELS['project-partition']).toBe('项目划分')
+    expect(SUPPLY_SUGGESTION_KIND_LABELS['project-flows']).toBe('业务脉络树')
+    expect(SUPPLY_SUGGESTION_KIND_LABELS['function-key-steps']).toBe('调用主干')
     expect(SUPPLY_SUGGESTION_KIND_LABELS['changes-narrative']).toBe('提交叙事')
     expect(SUPPLY_SUGGESTION_KIND_LABELS['changes-chain-impact']).toBe('链路影响')
     expect(SUPPLY_SUGGESTION_KIND_LABELS['changes-function-role']).toBe('函数角色')
