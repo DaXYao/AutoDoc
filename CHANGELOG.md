@@ -2,6 +2,20 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-20 · H2：Agent 业务脉络树 + 调用主干供给（flows / keySteps）——整树原子替换 + 双口径 basis · server+shared-types+web
+
+- **动机**：Agent-only 实测暴露两个空洞：①业务脉络树只有静态/本地结果，Agent 无法供给；②随机打开函数面板，「所在链路」与「调用主干角色」大面积未生成。H2 把 `flows`（整树）与 `keySteps`（调用主干）纳入供给通道，补齐「结构划分 + 业务脉络 + 函数主干」三层。
+- **flows 后端**：新增整树语义 pass，唯一键 `root`、文件级 basis 必填（partition 应用后的划分身份）、8MB 专属闸口；结构上限 roots 1..20 / 总节点 ≤500 / 深度 ≤8 / 每节点子节点 ≤32；根必须关联模块且有子节点，叶子必须恰好 1 个函数；所有 `mod:N` / functionId / `chain:N` 引用一次性对账，任一失效整棵树原子拒绝（不半截生效）。服务端归一化 `id`（`flow:i` / `flow:i.j`）、`parentId`、`order`、`kind`、`depth`、`source='agent'`、`contentHash`；应用顺序固定为 partition → flows → 其余语义 pass（merge 与 live overlay 同序）。KEY 模式与 Agent-only 都生效；Agent 树存在时本地完全让位（不读 `flows:tree`、不生成/启发式、不清子缓存、不写回），撤回后本地生成立即恢复。
+- **keySteps 后端**：值形状 `{ calleeNames: string[] }`，以 `calls[].calleeName` 逐字锚定（稳定 id 无法表达调用点），服务端按行号升序映射为 `keyCallIndexes`；未知名称整条判错并提示从 `index.json` 抄；`[]` = 明确无主干、未供给 = `undefined`，两者在状态与内容哈希上都严格区分。
+- **🔴 终审前修复的双口径 basis**：供给 basis（`flowsBasis`）原先含 `coreFunctionIds`。KEY 路径的本地核心判定发生在装配中途（早于 flows），而 merge 的 basis 取在 coreJudgment 之前——核心表一变，刚写入的 `supply:flows` 就被判过期，Agent 树被本地生成静默覆盖。现拆成两个口径：`flowsBasis`（模块组成/名称/函数归属，供供给文件与 `supply:*` 使用）与 `flowTreeBasis`（额外含模块核心表，供本地 `flows:tree` / `flows:roots:` 缓存使用）；并补 KEY-enabled 集成回归（本地核心判定改核心表后 Agent 树仍生效、本地 flows 请求为 0；删 `supply:flows` 后本地生成恢复）。
+- **时间戳与一致性**：`SupplyValueEntry` 增加 `writtenAt`，live overlay 的 `flowsGeneratedAt` 取供给文件时间（与归档快照同口径），不再用合并时刻；内容哈希新增 flows 递归稳定序列化（related* 排序、children 保序、undefined 与 [] 区分）与 `keyCallIndexes`，同内容重复扫描不新增快照。
+- **契约/索引**：§4.7 keySteps、§4.8 flows（字段表/上限/原子语义）、§10 两轮契约改为「第一轮 partition → 第二轮 flows + 语义」；`index.json` 的 `functions[].calls` 按行号升序下发 `line/calleeName/calleeId/role`，内联索引新增「调用主干候选」段（按调用数降序、标注次数）；建议清单新增 `project-flows` / `function-key-steps` 两种 kind 与对应任务。
+- **前端**：`FlowTree` 节点来源徽标扩为三态（AI / Agent / 启发式），pass 顺序与中文标签补 flows / keySteps，建议 kind 标签补两项。
+- **影响范围**：shared-types（flows/keySteps 供给类型、FlowNode.source 扩 `agent`、pass 联合、建议 kind、契约注释）、server（`supplyFlows.ts` 新；agentSupply/agentSupplyMerge/supplyCache/insight/flow 改）、web（FlowTree / utils / 测试）；core 未改，不新增依赖。
+- **测试**：`pnpm lint` 全绿；`pnpm test` 全绿（core 170 / web 259 / server 421 = 850）。新增 supplyFlows 16 例（结构上限、id 归一化与引用对账、missing/same/changed）、扫描/合并 flows+keySteps 矩阵、KEY 模式让位与撤回恢复、basis 双口径单测、内容哈希与时间戳口径回归。
+- **遗留**：Agent-only 洞察页仍显示「未配置 AI / 纯静态图谱」误导横幅（H3）；flows 供给文件的 basis 口径已变，演示项目旧 flows 文件会被判过期，需重新导出契约后重写（H3 实机复验时处理）。
+- **关联 commit**：5b90e91。
+
 ## 2026-10-20 · H1：Agent 整项目划分供给（partition）——结构层先行 + 两轮契约 + 全量索引 · server+shared-types+web
 
 - **动机**：用户实测 Agent-only 模式（无 KEY）下只有按目录的静态功能划分、业务脉络树不可用；确认最大范围 = partition + flows + keySteps，采用「两轮契约」：Agent 先供整项目划分 → basis 刷新 → 旧的语义文件自然过期 → 重新导出契约 → Agent 第二轮补语义。H1 只做 partition。
