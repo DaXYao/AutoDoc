@@ -2,6 +2,15 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · R1：README 重写为 GitHub 主页 + 首次开源上传 · docs
+
+- **动机**：上传 GitHub 前，README 仍是需求阶段文档（把 LLM 写成「远期可选」、把跨文件调用图列为「暂不包含」、技术栈写 better-sqlite3/Node 20+/Shiki），与当前实现不符；主页也缺少产品价值与技术亮点的区分。
+- **内容**：重写 README（234 行）。产品价值按场景写（新人接手的模块→脉络→函数链路→角色→追问；变更影响从「改了哪些行」到「该回归哪条链路」）；技术亮点单列（双 AI 生产链路、契约化 Agent 供给与防错位、增量生成、零原生依赖分析内核、工程化）；补快速开始（单项目/hub/export/generate）、工作原理、技术栈、目录、测试与文档索引；新增「当前支持与边界」，明确仅支持 TypeScript/TSX/JavaScript/C#，Python/Java 尚未接入，追问依赖 KEY API，变更追踪 Git 可选，静态导出只读。
+- **初审修正的事实**：Node 要求改为 >=22.13（22.5–22.12 的 node:sqlite 需实验旗标）；AI 复用单位是 chunk（chunk 内任一函数变化会整块重跑），不是单函数；工作区指纹快照每次生成都写、Git 历史额外回填，两者并存（不是「优先 Git、无 Git 才快照」）；供给文件随 `storage.dataPath` 落盘，默认在目标项目 `.autodoc/`，重定向到 AutoDoc 仓才保证目标仓只出现 `.autodoc/AGENT_RULES.md`；文件夹选择框仅 Windows；来源枚举按对象/pass/快照分别表述（对象级 ai/dir/agent 等，pass 与快照 api/agent/mixed）。
+- **上传**：GitHub 公开仓库 `https://github.com/DaXYao/AutoDoc`；推送 `main` 全部 98 条提交（非浅克隆、未 squash、未重写历史），远端 HEAD 与本地 `6ab58d2` 一致。
+- **验证**：仅文档改动；最近一次 `pnpm lint` 全绿、`pnpm test` 850 项全绿；GitHub 页面已确认 README 的产品价值/技术亮点/边界三段正常渲染。
+- **关联 commit**：6ab58d2（README）、本次 docs 提交。
+
 ## 2026-10-21 · H3：Agent-only 洞察页状态呈现 + 实机复验 · web
 
 - **动机**：H2 实机暴露 Agent-only（无 KEY）时洞察页仍显示「未配置 AI / 纯静态图谱」警告、顶部仍写「AI 已增强」来源不明；功能已生效但界面在自相矛盾。
