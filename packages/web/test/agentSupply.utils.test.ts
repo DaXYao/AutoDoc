@@ -274,13 +274,17 @@ describe('变更侧（G6）pass / 建议种类标签', () => {
   it('SUPPLY_PASS_ORDER 与 LABELS 覆盖 changes，且 changes 收尾（后端把变更侧计数追加在 perPass 尾部）', () => {
     expect(SUPPLY_PASS_ORDER).toContain('changes')
     expect(SUPPLY_PASS_ORDER[SUPPLY_PASS_ORDER.length - 1]).toBe('changes')
+    // partition 是结构层，必须排在最前（与后端 SUPPLY_PASSES 同序）
+    expect(SUPPLY_PASS_ORDER[0]).toBe('partition')
+    expect(SUPPLY_PASS_LABELS.partition).toBe('整项目划分')
     expect(SUPPLY_PASS_LABELS.changes).toBe('变更语义')
     // 漏一个 pass 的标签，抽屉里就会渲染出 undefined
     for (const pass of SUPPLY_PASS_ORDER) expect(SUPPLY_PASS_LABELS[pass].length).toBeGreaterThan(0)
   })
 
-  it('九种建议种类都有中文标签；变更侧「函数角色」不得与洞察侧「系统角色」同文案', () => {
+  it('十种建议种类都有中文标签；变更侧「函数角色」不得与洞察侧「系统角色」同文案', () => {
     const kinds: AgentSupplySuggestionKind[] = [
+      'project-partition',
       'module-identity',
       'chain-narrative',
       'function-category',
@@ -292,6 +296,7 @@ describe('变更侧（G6）pass / 建议种类标签', () => {
       'changes-function-role'
     ]
     for (const kind of kinds) expect(SUPPLY_SUGGESTION_KIND_LABELS[kind].length).toBeGreaterThan(0)
+    expect(SUPPLY_SUGGESTION_KIND_LABELS['project-partition']).toBe('项目划分')
     expect(SUPPLY_SUGGESTION_KIND_LABELS['changes-narrative']).toBe('提交叙事')
     expect(SUPPLY_SUGGESTION_KIND_LABELS['changes-chain-impact']).toBe('链路影响')
     expect(SUPPLY_SUGGESTION_KIND_LABELS['changes-function-role']).toBe('函数角色')

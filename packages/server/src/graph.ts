@@ -29,7 +29,7 @@ export interface PartitionModule {
   members: string[]
 }
 export interface Partition {
-  source: 'ai' | 'dir'
+  source: 'ai' | 'dir' | 'agent'
   modules: PartitionModule[]
 }
 

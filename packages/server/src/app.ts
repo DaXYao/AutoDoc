@@ -17,7 +17,13 @@ import {
   listImpactCommits
 } from './impact.js'
 import { AskInputError, askCallStep, askFunction } from './ask.js'
-import { collectAgentSupply, exportAgentSupplyRules, generateSupplyRulesText } from './agentSupply.js'
+import {
+  buildSupplyIndexFile,
+  collectAgentSupply,
+  exportAgentSupplyRules,
+  generateSupplyRulesText,
+  writeSupplyIndexFile
+} from './agentSupply.js'
 import { executeMerge } from './agentSupplyMerge.js'
 import { collectChangesSupplyLight, resolveChangesAgentSemantics, scopeToSupplyId } from './agentSupplyChanges.js'
 import { getDeepSeekConfig } from './env.js'
@@ -509,14 +515,15 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     }
   })
 
-  // 供给契约文本：每次现生成（索引取自实时图谱，建议清单引用的 id 一律自检补进索引）
+  // 供给契约文本：每次现生成（索引取自实时图谱，建议清单引用的 id 一律自检补进索引）。
+  // 同时刷新 AutoDoc 侧的完整机器可读索引 `supply/<projectId>/index.json`（不写目标仓、不在 insight/ 内）。
   app.get('/api/agent-supply-rules', async (req, reply) => {
     const service = manager.getActive()
     const projectId = manager.getActiveId()
     if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
     try {
       const ctx = collectAgentSupply(service, projectId)
-      return generateSupplyRulesText({
+      const result = generateSupplyRulesText({
         graph: ctx.graph,
         scan: ctx.scan,
         suggestions: ctx.suggestions,
@@ -525,6 +532,15 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         baseline: ctx.baseline,
         changes: ctx.changes
       })
+      // 索引是附加产物：写盘失败（只读目录、磁盘满）不得连累契约文本；后续导出/GET 会重新生成
+      if (!readOnly) {
+        try {
+          writeSupplyIndexFile(ctx.dir, buildSupplyIndexFile(ctx.graph, projectId))
+        } catch (e) {
+          console.warn(`[autodoc] 写供给索引失败（已忽略，契约文本照常返回）：${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
+      return result
     } catch (error) {
       return reply.code(500).send({ error: `契约生成失败：${error instanceof Error ? error.message : String(error)}` })
     }

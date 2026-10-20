@@ -1,4 +1,6 @@
 import type {
+  AgentSupplyPartitionModule,
+  AgentSupplyPartitionValue,
   AgentSupplyPass,
   AgentSupplyWinner,
   AiPassKey,
@@ -13,6 +15,7 @@ import { AiCache } from './aiCache.js'
 import { flowsBasis } from './flow.js'
 import { rebuildModuleCores, syncModuleCores, type ProjectGraph } from './graph.js'
 import { isCategoryCandidate, markClassified } from './categoryCandidates.js'
+import { applyAgentPartitionToInsight } from './supplyPartition.js'
 import { SUPPLY_PASSES } from './agentSupply.js'
 
 /* ------------------------- 供给缓存命名空间 ------------------------- */
@@ -88,6 +91,8 @@ export function readSupplyCache(
 ): Map<AgentSupplyPass, { data: Record<string, SupplyValueEntry>; agents: string[] }> {
   const out = new Map<AgentSupplyPass, { data: Record<string, SupplyValueEntry>; agents: string[] }>()
   for (const pass of CACHEABLE_SUPPLY_PASSES) {
+    // partition 不能按 basis 过滤（它就是 basis 的来源），由 readPartitionSupply 单独读、先行应用
+    if (pass === 'partition') continue
     const entry = cache.getGlobal<SupplyCacheEntry>(supplyCacheKey(pass))
     if (!entry || typeof entry !== 'object') continue
     // 指纹与 basis 任一不符即跳过：图变了或划分变了，位置化 id 与函数集都不可信
@@ -96,6 +101,44 @@ export function readSupplyCache(
     out.set(pass, { data: entry.data, agents: entry.agents ?? [] })
   }
   return out
+}
+
+/**
+ * 读整项目划分缓存（只认 graph.fingerprint，不认 basis——partition 就是 basis 的来源）。
+ * 值固定在 `data.root`；缺失/形状不符一律返回 null（缓存是 AutoDoc 自己写的，损坏时不冒险应用，
+ * 也绝不让 GET 洞察因缓存损坏 500）。这里只做形状校验，覆盖完整/模块名唯一等业务校验归扫描器。
+ */
+export function readPartitionSupply(
+  cache: AiCache,
+  fingerprint: string
+): { value: AgentSupplyPartitionValue; agent: string } | null {
+  const entry = cache.getGlobal<SupplyCacheEntry>(supplyCacheKey('partition'))
+  if (!entry || typeof entry !== 'object') return null
+  if (entry.fingerprint !== fingerprint) return null
+  const item = entry.data?.root
+  if (!item || typeof item !== 'object') return null
+  const raw = item.value
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const source = raw as { summary?: unknown; modules?: unknown }
+  if (!Array.isArray(source.modules) || source.modules.length === 0) return null
+
+  const modules: AgentSupplyPartitionModule[] = []
+  for (const m of source.modules) {
+    if (!m || typeof m !== 'object' || Array.isArray(m)) return null
+    const mod = m as { name?: unknown; description?: unknown; members?: unknown }
+    if (typeof mod.name !== 'string' || mod.name.trim().length === 0) return null
+    if (!Array.isArray(mod.members) || !mod.members.every((id) => typeof id === 'string')) return null
+    modules.push({
+      name: mod.name,
+      description: typeof mod.description === 'string' ? mod.description : '',
+      members: [...mod.members]
+    })
+  }
+
+  const value: AgentSupplyPartitionValue = { modules }
+  if (typeof source.summary === 'string') value.summary = source.summary
+  const agent = typeof item.agent === 'string' && item.agent.length > 0 ? item.agent : 'agent'
+  return { value, agent }
 }
 
 /* ------------------------- 单条目写入洞察 ------------------------- */
@@ -115,6 +158,7 @@ export function applyWinnerToInsight(
   entry: AnyAgentSupplyEntry
 ): ApplyOutcome {
   switch (winner.pass) {
+    case 'partition': return applyPartitionMerge(insight, graph, winner, entry)
     case 'modules': return applyModuleMerge(insight, winner.objectId, entry)
     case 'narratives': return applyNarrativeMerge(insight, winner.objectId, entry)
     case 'categories': return applyCategoryMerge(insight, graph, winner.objectId, entry)
@@ -128,6 +172,22 @@ export function applyWinnerToInsight(
 function parseModIndex(objectId: string): number | null {
   const m = /^mod:(\d+)$/.exec(objectId)
   return m ? Number(m[1]) : null
+}
+
+/**
+ * partition → 整项目划分（结构层，唯一键 root）。
+ * 与其它 pass 不同，它会重写 modules / moduleIds / chain.moduleId / 模块核心表，
+ * 因此必须**先于**其它 pass 套用（overlay 的顺序由 applySupplyOverlay 保证）。
+ */
+function applyPartitionMerge(
+  insight: ProjectInsight,
+  graph: ProjectGraph,
+  winner: AgentSupplyWinner,
+  entry: AnyAgentSupplyEntry
+): ApplyOutcome {
+  if (entry.pass !== 'partition' || winner.objectId !== 'root') return 'missing'
+  const val = entry.value as AgentSupplyPartitionValue
+  return applyAgentPartitionToInsight(insight, graph, val)
 }
 
 /** modules → insight.modules[i] 的 description（mod:i 是位置 id，i=数组下标） */
@@ -280,6 +340,7 @@ function applyBlocksMerge(
  * 映射到 'partition' 会把「只供了模块描述」谎报成「划分已生成」。
  */
 const PASS_TO_AI_KEY: Partial<Record<AgentSupplyPass, AiPassKey>> = {
+  partition: 'partition',
   narratives: 'narratives',
   categories: 'categories',
   coreJudgment: 'coreJudgment',
@@ -300,6 +361,10 @@ export function computePassUniverse(
   for (const pass of passes) {
     let n = 0
     switch (pass) {
+      case 'partition':
+        // 整项目划分：一份供给 = 完整划分，覆盖度恒为 1（不存在「部分划分」）
+        n = 1
+        break
       case 'categories':
         for (const fn of graph.nodes.values()) if (isCategoryCandidate(fn)) n++
         break
@@ -341,6 +406,13 @@ export function applyPassSemantics(
   const aiSource: Partial<Record<AiPassKey, SemanticSource>> = { ...insight.aiSource }
   for (const [pass, count] of supplied) {
     if (count <= 0) continue
+    // partition 是整份替换：Agent 一旦供给就是完整划分，状态恒 ok、来源恒 agent（绝无 mixed——
+    // 本地旧划分已被整份替换，不存在「一半本地一半 Agent」的划分）
+    if (pass === 'partition') {
+      aiStatus.partition = 'ok'
+      aiSource.partition = 'agent'
+      continue
+    }
     const key = PASS_TO_AI_KEY[pass]
     if (!key) continue
     const local = aiSource[key] === 'agent' ? undefined : aiStatus[key]
@@ -374,20 +446,48 @@ export function snapshotSourceOf(insight: ProjectInsight): { source: SemanticSou
  * 本地 pass 先跑完，供给再覆盖冲突字段（Agent 赢）。返回是否有字段被改写。
  * 与 mergeAgentSupply 同口径（并集 agentSources、同值也记来源、覆盖度分母先算），
  * 保证「实时视图」与「归档快照」的内容哈希一致，重复扫描不会多存快照。
+ *
+ * **partition 永远最先套用**：它是结构层，其余 pass 的 basis / 位置化 id 都以新划分为准。
+ * skipPartition=true 用于调用方已经在前面亲手应用过同一份划分（loadInsight / refreshInsightAI）：
+ * 不再重复应用（避免结构签名比较之外的无谓改写），但仍要登记来源与 aiStatus。
  */
 export function applySupplyOverlay(
   insight: ProjectInsight,
   graph: ProjectGraph,
-  cache: AiCache
+  cache: AiCache,
+  opts: { skipPartition?: boolean } = {}
 ): boolean {
-  const supplyData = readSupplyCache(cache, graph.fingerprint, flowsBasis(graph))
-  if (supplyData.size === 0) return false
-  const universe = computePassUniverse(insight, graph, supplyData.keys())
-
   let changed = false
   const supplied = new Map<AgentSupplyPass, number>()
   // 并集合并：基线可能已带来源标记，整份替换会让旧键丢失（Agent 写的字段被标成本地）
   const agentSources: InsightAgentSources = { ...insight.agentSources }
+
+  // 1) 结构层：partition 只按图指纹读取（它就是 basis 的来源），且必须先于其它 pass 应用
+  const partition = readPartitionSupply(cache, graph.fingerprint)
+  if (partition) {
+    let applied = true
+    if (!opts.skipPartition) {
+      const outcome = applyAgentPartitionToInsight(insight, graph, partition.value)
+      if (outcome === 'missing') applied = false
+      else if (outcome === 'changed') changed = true
+    }
+    if (applied) {
+      supplied.set('partition', 1)
+      agentSources['partition:root'] = partition.agent
+    }
+  }
+
+  // 2) 其余 pass：用**应用 partition 之后**的 basis 读缓存（旧划分下的语义供给自然失效）
+  const supplyData = readSupplyCache(cache, graph.fingerprint, flowsBasis(graph))
+  if (supplyData.size === 0) {
+    if (Object.keys(agentSources).length === 0) return changed
+    insight.agentSources = agentSources
+    insight.aiGenerated = true
+    applyPassSemantics(insight, supplied, new Map())
+    return changed
+  }
+  // 覆盖度分母必须在套用前算（套用会就地改 category / isCore）
+  const universe = computePassUniverse(insight, graph, supplyData.keys())
 
   for (const [pass, { data }] of supplyData) {
     let n = 0

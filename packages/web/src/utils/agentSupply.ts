@@ -19,8 +19,9 @@ import type { TagType } from './format'
  * 错误/建议分组、状态条摘要。全部脱离 Vue/网络，可独立单测。
  */
 
-/** 一期六个可供给 pass + 变更侧的展示顺序（与后端 SUPPLY_PASSES 同序） */
+/** 一期七个可供给 pass + 变更侧的展示顺序（与后端 SUPPLY_PASSES 同序；partition 结构层在最前） */
 export const SUPPLY_PASS_ORDER: AgentSupplyPass[] = [
+  'partition',
   'modules',
   'narratives',
   'categories',
@@ -32,6 +33,7 @@ export const SUPPLY_PASS_ORDER: AgentSupplyPass[] = [
 
 /** pass → 中文语义名 */
 export const SUPPLY_PASS_LABELS: Record<AgentSupplyPass, string> = {
+  partition: '整项目划分',
   modules: '模块职责',
   narratives: '链路叙事',
   categories: '三分类',
@@ -43,6 +45,7 @@ export const SUPPLY_PASS_LABELS: Record<AgentSupplyPass, string> = {
 
 /** 建议任务种类 → 中文徽标 */
 export const SUPPLY_SUGGESTION_KIND_LABELS: Record<AgentSupplySuggestionKind, string> = {
+  'project-partition': '项目划分',
   'module-identity': '模块职责',
   'chain-narrative': '链路叙事',
   'function-category': '函数三分类',

@@ -15,6 +15,7 @@ import { flowsBasis } from './flow.js'
 import type { ProjectGraph } from './graph.js'
 import { computeSnapshotStats, loadInsight } from './insight.js'
 import { collectAgentSupply, SUPPLY_PASSES } from './agentSupply.js'
+import { applyAgentPartitionToInsight } from './supplyPartition.js'
 import {
   applyPassSemantics,
   applyWinnerToInsight,
@@ -47,6 +48,12 @@ export interface MergeResult {
   /** 是否至少改写了一个字段（同值不算） */
   changed: boolean
   agentSources: InsightAgentSources
+  /**
+   * 合并写缓存用的 basis：**应用 partition 之后、应用其余 pass 之前**的划分指纹。
+   * 若在其它 pass 之后取，coreJudgment 改写了 coreFunctionIds 会让 basis 漂移，
+   * 下一轮 overlay 读不到刚写入的语义供给。
+   */
+  basis: string
 }
 
 export interface MergeInput {
@@ -75,9 +82,6 @@ export function mergeAgentSupply(input: MergeInput): MergeResult {
   const entryMap = new Map<string, AnyAgentSupplyEntry>()
   for (const e of entries) entryMap.set(entryKey(e), e)
 
-  // 覆盖度分母必须在套用之前算：套用会就地改写 category / isCore
-  const passesWithWinners = new Set(winners.map((w) => w.pass))
-  const universe = computePassUniverse(insight, graph, passesWithWinners)
   const supplied = new Map<AgentSupplyPass, number>()
   const agentsOf = new Map<AgentSupplyPass, Set<string>>()
   for (const pass of SUPPLY_PASSES) {
@@ -85,7 +89,34 @@ export function mergeAgentSupply(input: MergeInput): MergeResult {
     agentsOf.set(pass, new Set())
   }
 
-  for (const w of winners) {
+  // ⓪ 结构层先行：partition 胜者先重写 graph + 克隆 insight，之后的所有 pass 都按新划分/新 basis 校验与合并。
+  // 覆盖度分母在 partition 之后、其余 pass 套用之前算（套用会就地改写 category / isCore）。
+  const partitionWinner = winners.find((w) => w.pass === 'partition')
+  if (partitionWinner) {
+    const entry = entryMap.get(entryKey(partitionWinner))
+    if (entry && entry.pass === 'partition') {
+      const outcome = applyAgentPartitionToInsight(insight, graph, entry.value)
+      if (outcome !== 'missing') {
+        if (outcome === 'changed') changed = true
+        supplied.set('partition', 1)
+        agentsOf.get('partition')!.add(partitionWinner.agent)
+        provenance.push({
+          pass: partitionWinner.pass,
+          objectId: partitionWinner.objectId,
+          agent: partitionWinner.agent
+        })
+        agentSources[`${partitionWinner.pass}:${partitionWinner.objectId}`] = partitionWinner.agent
+      }
+    }
+  }
+  // basis：应用 partition 之后、其余 pass 之前（coreJudgment 会改 coreFunctionIds → 必须在这之前取）
+  const basis = flowsBasis(graph)
+
+  const semanticWinners = winners.filter((w) => w.pass !== 'partition')
+  const passesWithWinners = new Set(semanticWinners.map((w) => w.pass))
+  const universe = computePassUniverse(insight, graph, passesWithWinners)
+
+  for (const w of semanticWinners) {
     const entry = entryMap.get(entryKey(w))
     if (!entry) continue
     const outcome: ApplyOutcome = applyWinnerToInsight(insight, graph, w, entry)
@@ -109,7 +140,7 @@ export function mergeAgentSupply(input: MergeInput): MergeResult {
     if (n > 0) perPass.push({ pass, count: n, agents: [...agentsOf.get(pass)!].sort() })
   }
 
-  return { insight, provenance, perPass, changed, agentSources }
+  return { insight, provenance, perPass, changed, agentSources, basis }
 }
 
 /* ------------------------- 内容哈希去重 ------------------------- */
@@ -129,17 +160,30 @@ export function insightContentHash(insight: ProjectInsight): string {
   }
   h.update(insight.graphFingerprint)
   h.update(insight.summary)
+  h.update(insight.partitionSource)
+  h.update(insight.partitionFeedback)
   h.update(
     stable(
       insight.modules.map((m) => ({
         id: m.id,
         name: m.name,
         description: m.description,
-        coreFunctionIds: m.coreFunctionIds
+        source: m.source,
+        functionIds: [...m.functionIds].sort(),
+        coreFunctionIds: [...m.coreFunctionIds].sort()
       }))
     )
   )
-  h.update(stable(insight.chains.map((c) => ({ id: c.id, narrative: c.narrative, stepRoles: c.stepRoles }))))
+  h.update(
+    stable(
+      insight.chains.map((c) => ({
+        id: c.id,
+        moduleId: c.moduleId,
+        narrative: c.narrative,
+        stepRoles: c.stepRoles
+      }))
+    )
+  )
   for (const k of Object.keys(insight.functions).sort()) {
     const f = insight.functions[k]
     h.update(k)
@@ -152,7 +196,8 @@ export function insightContentHash(insight: ProjectInsight): string {
         aiCategory: f.aiCategory,
         aiCategoryReason: f.aiCategoryReason,
         internalSteps: f.internalSteps,
-        chainRoles: f.chainRoles
+        chainRoles: f.chainRoles,
+        moduleIds: [...f.moduleIds].sort()
       })
     )
   }
@@ -251,21 +296,18 @@ export function executeMerge(service: DocService, projectId: string): MergeEndpo
 
   // supplyOverlay:false —— 基线取「纯本地视图」。若吃已 overlay 过的视图，
   // aiStatus/aiSource 会在上一轮结果上再判一次（agent 被误升为 mixed），且合并不可幂等。
+  // 注意：这份 graph 与 collectAgentSupply 的 graph 是两次独立构建，partition 胜者必须由本函数自己应用
+  //（mergeAgentSupply 内部第一步做），不能假设沿用扫描时的划分。
   const { insight: baseInsight, graph } = loadInsight(service, '', {
     ignoreSnapshot: true,
     supplyOverlay: false
   })
-  // basis 必须在合并之前取：applyCoreMerge 会重算 coreFunctionIds，而 flowsBasis 含它
-  const basis = flowsBasis(graph)
   const agents = [...new Set(ctx.scan.winners.map((w) => w.agent))].sort()
 
-  // 供给缓存以本次扫描为事实来源整份重写（无条目的 pass 会被删掉）：
-  // 必须早于下面两个 noop 早退——否则 Agent 把文件全撤走时 winners 为空、缓存永远不清，
-  // 实时视图会继续套用已撤回的旧供给，而用户没有任何入口能清掉它。
   const cache = new AiCache(dirname(service.storage.dataPath))
-  writeSupplyCache(cache, graph.fingerprint, basis, buildPassDataMap(ctx.scan.winners, ctx.scan.entries), agents)
-
   if (ctx.scan.winners.length === 0) {
+    // 无胜者也要整份重写（清掉已撤回的旧供给）；basis 用纯本地划分。
+    writeSupplyCache(cache, graph.fingerprint, flowsBasis(graph), new Map(), agents)
     return {
       code: 'noop',
       merged: false,
@@ -280,6 +322,18 @@ export function executeMerge(service: DocService, projectId: string): MergeEndpo
     winners: ctx.scan.winners,
     entries: ctx.scan.entries
   })
+
+  // 供给缓存以本次扫描为事实来源整份重写（无条目的 pass 会被删掉），必须早于 noop 早退：
+  // 否则 Agent 把文件全撤走时缓存永远不清，实时视图会继续套用已撤回的旧供给。
+  // basis 取合并结果的 basis（partition 之后、其余 pass 之前），partition 条目也落在这个 basis 下；
+  // 下一轮 loadInsight 先按图指纹读 partition（basis 不参与），再按新 basis 读其余 pass。
+  writeSupplyCache(
+    cache,
+    graph.fingerprint,
+    mergeResult.basis,
+    buildPassDataMap(ctx.scan.winners, ctx.scan.entries),
+    agents
+  )
 
   const stats = {
     winnerCount: ctx.scan.winners.length,

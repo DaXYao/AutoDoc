@@ -42,6 +42,7 @@ import {
   applyPassSemantics,
   applySupplyOverlay,
   clearSupplyCache,
+  readPartitionSupply,
   readSupplyCache,
   writeSupplyCache,
   type SupplyValueEntry
@@ -193,6 +194,16 @@ function validFiles(dir: string, agent = 'qoder'): string {
   writeSupplyFile(dir, `coreRoles.${agent}.json`, envelope('coreRoles', agent, { [FN_B]: '类方法入口。' }))
   writeSupplyFile(dir, `blocks.${agent}.json`, envelope('blocks', agent, { [FN_D]: [{ blockIndexes: [0], title: '准备输入', kind: 'step' }, { blockIndexes: [1], title: 'TODO 补齐', kind: 'todo' }] }))
   return dir
+}
+
+/* ------------------------- partition 夹具 ------------------------- */
+
+const PARTITION_VALUE = {
+  summary: '入口层承接请求，工具层提供通用能力。',
+  modules: [
+    { name: '入口层', description: '接收并编排外部请求。', members: [FN_B, FN_A] },
+    { name: '工具层', description: '与业务无关的通用工具。', members: [FN_D, FN_C] }
+  ]
 }
 
 async function makeService(
@@ -349,7 +360,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
     service.storage.close()
   })
 
-  it('agentSources 与 perPass 正确填充（六个 pass 全部生效）', async () => {
+  it('agentSources 与 perPass 正确填充（六个语义 pass 全部生效，未供 partition 则不出现）', async () => {
     const dir = freshDir()
     validFiles(dir)
     const graph = fixtureGraph()
@@ -362,7 +373,9 @@ describe('mergeAgentSupply（字段级合并）', () => {
     expect(result.agentSources[`coreRoles:${FN_B}`]).toBe('qoder')
     expect(result.agentSources[`coreJudgment:${FN_A}`]).toBe('qoder')
     expect(result.agentSources[`modules:mod:0`]).toBe('qoder')
-    expect(result.perPass.map((p) => p.pass).sort()).toEqual(SUPPLY_PASSES.filter((p) => p !== 'changes').sort())
+    expect(result.perPass.map((p) => p.pass).sort()).toEqual(
+      SUPPLY_PASSES.filter((p) => p !== 'changes' && p !== 'partition').sort()
+    )
     expect(result.perPass.every((p) => p.agents.join() === 'qoder')).toBe(true)
     expect(result.insight.agentSources).toEqual(result.agentSources)
     expect(result.insight.aiGenerated).toBe(true)
@@ -718,17 +731,37 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
     expect([...after.keys()]).toEqual(['coreRoles'])
   })
 
-  it('缓存覆盖的 pass 集合 = SUPPLY_PASSES 去掉 changes（变更侧读时生效，不进缓存）', () => {
+  it('缓存覆盖的 pass 集合 = SUPPLY_PASSES 去掉 changes；partition 写入但由 readPartitionSupply 单独读', () => {
     const dir = freshDir()
     const cache = new AiCache(dir)
-    const cached = SUPPLY_PASSES.filter((p) => p !== 'changes')
+    const cached = SUPPLY_PASSES.filter((p) => p !== 'changes' && p !== 'partition')
     const all = passDataOf(SUPPLY_PASSES.map((p) => [p, 'mod:0', { name: MOD0_NAME, description: 'd' }] as [AgentSupplyPass, string, unknown]))
     writeSupplyCache(cache, FINGERPRINT, BASIS, all, ['qoder'])
     expect([...readSupplyCache(cache, FINGERPRINT, BASIS).keys()]).toEqual([...cached])
+    // partition 不参与按 basis 的读，但缓存里确实有它（值固定在 data.root）
+    expect(cache.getGlobal('supply:partition')).toBeDefined()
     // 变更侧即使有 winner 也不许落缓存：那是没人读的键（读时合并直接吃供给文件）
     expect(cache.getGlobal('supply:changes')).toBeUndefined()
-    expect(clearSupplyCache(cache)).toBe(cached.length)
+    expect(clearSupplyCache(cache)).toBe(SUPPLY_PASSES.filter((p) => p !== 'changes').length)
     expect(readSupplyCache(cache, FINGERPRINT, BASIS).size).toBe(0)
+    expect(cache.getGlobal('supply:partition')).toBeUndefined()
+  })
+
+  it('readPartitionSupply：只认图指纹与 data.root；basis 不参与（它就是 basis 的来源）', () => {
+    const dir = freshDir()
+    const cache = new AiCache(dir)
+    writeSupplyCache(
+      cache,
+      FINGERPRINT,
+      '任意旧 basis（partition 不该被它过滤）',
+      passDataOf([['partition', 'root', PARTITION_VALUE]]),
+      ['qoder']
+    )
+    const read = readPartitionSupply(cache, FINGERPRINT)
+    expect(read).not.toBeNull()
+    expect(read!.agent).toBe('qoder')
+    expect(read!.value.modules.map((m) => m.name)).toEqual(['入口层', '工具层'])
+    expect(readPartitionSupply(cache, 'another-fingerprint')).toBeNull()
   })
 
   it('并发实例写前重读：长流程持有的旧副本不会抹掉另一个实例写入的 supply:*', () => {

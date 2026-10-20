@@ -379,8 +379,8 @@ export interface InsightModule {
   name: string
   /** AI 职责描述 */
   description: string
-  /** 划分来源：ai=AI 划分，dir=目录聚类兑底 */
-  source: 'ai' | 'dir'
+  /** 划分来源：ai=本地 KEY API 划分，dir=目录聚类兑底，agent=外部 Agent 供给的整项目划分 */
+  source: 'ai' | 'dir' | 'agent'
   /** 模块成员函数 id */
   functionIds: string[]
   fileIds: string[]
@@ -519,7 +519,7 @@ export interface ProjectInsight {
   /** AI 摘要是否已生成（缓存命中或本次生成） */
   aiGenerated: boolean
   /** 模块划分来源 */
-  partitionSource: 'ai' | 'dir'
+  partitionSource: 'ai' | 'dir' | 'agent'
   /** 本次划分所依据的用户建议（空串=无） */
   partitionFeedback: string
   /** 项目级 AI 概述（无 AI 时为空串） */
@@ -771,16 +771,19 @@ export type SemanticSource = 'api' | 'agent' | 'mixed'
 
 /**
  * G1 预留（G2 合并时写入 ProjectInsight.agentSources）：字段级来源标记。
- * key = `${AgentSupplyPass}:${objectId}`（objectId 为 moduleId / chainId / functionId），value = 生效的 agent 标识。
+ * key = `${AgentSupplyPass}:${objectId}`（objectId 为 moduleId / chainId / functionId；partition 固定为 `root`），
+ * value = 生效的 agent 标识。
  */
 export type InsightAgentSources = Record<string, string>
 
 /**
- * 可被外部 Agent 供给的语义 pass（一期四类语义 → 六个 pass）。
+ * 可被外部 Agent 供给的语义 pass（一期四类语义 → 六个 pass + 结构层 partition + 变更侧 changes）。
  * 每个 pass 一类一份文件，值形状逐字段对齐 `ai-cache.json` 里同名本地 pass 的值（详见 AgentSupplyValueShapes）。
- * flows / externals / keySteps / partition 不接受外部供给（本地专属或第一期不在范围内）。
+ * flows / externals / keySteps 不接受外部供给（本地专属或不在一期范围内）。
+ * partition 是唯一的**结构层**供给：它决定模块划分本身（basis 的来源），必须先于其它 pass 应用。
  */
 export type AgentSupplyPass =
+  | 'partition'
   | 'modules'
   | 'narratives'
   | 'categories'
@@ -790,7 +793,30 @@ export type AgentSupplyPass =
   | 'changes'
 
 /**
- * ①模块名称与职责描述：moduleId → 对账锚点 + 一句话职责（成员归属仍由本地静态计算，不接受供给）。
+ * 整项目划分里的单个模块（Agent 供给的结构层）。
+ * members 用函数稳定 id（逐字抄 index.json），且整个 partition 必须恰好覆盖当前图谱里的全部函数。
+ */
+export interface AgentSupplyPartitionModule {
+  /** 模块名（全项目唯一，≤60 字符） */
+  name: string
+  /** 模块职责（非空，≤1000 字符） */
+  description: string
+  /** 成员函数稳定 id（非空数组；同一函数只能出现一次） */
+  members: string[]
+}
+
+/**
+ * 整项目划分（partition pass 的值）：`values` 只能有唯一键 `root`。
+ * summary 可选（≤2000 字符）：项目级概述；不提供且结构发生变化时，旧摘要会被清空。
+ */
+export interface AgentSupplyPartitionValue {
+  summary?: string
+  modules: AgentSupplyPartitionModule[]
+}
+
+/**
+ * ①模块名称与职责描述：moduleId → 对账锚点 + 一句话职责。
+ * 成员归属由 `partition`（结构层）供给决定；本 pass 只供 description，不改变成员。
  * moduleId（`mod:i`）是位置化 id，重划分后可能指向另一个模块，故 name 兼作条目级对账锚点。
  */
 export interface AgentSupplyModuleValue {
@@ -869,6 +895,7 @@ export interface AgentSupplyChangesValue {
 
 /**
  * pass → 单条目值形状（= `ai-cache.json` 里该 pass 的值形状，`values` 的键是对象 id）：
+ * - partition    → 结构层（无同名本地缓存键）：唯一键 `root`，整项目模块划分 + 可选 summary
  * - modules      → 本地 `<图指纹>:partition:latest`（PartitionEnvelope.modules[i]，moduleId `mod:i` 即下标 i；只写回 name/description，name 兼作对账锚点）
  * - narratives   → 本地 `<图指纹>:narratives:v2`（NarrativeEnvelope；entryId 是供给侧对账字段，非缓存信封字段）
  * - categories   → 本地 `chunk:categories:<hash>`（CategoryEnvelope）
@@ -877,6 +904,8 @@ export interface AgentSupplyChangesValue {
  * - blocks       → 本地 `chunk:blocks:<hash>`（Record<functionId, InternalStep[]>）
  */
 export interface AgentSupplyValueShapes {
+  /** 结构层：整项目划分（唯一键 root；先于其它 pass 应用） */
+  partition: AgentSupplyPartitionValue
   modules: AgentSupplyModuleValue
   narratives: AgentSupplyNarrativeValue
   categories: AgentSupplyCategoryValue
@@ -912,7 +941,7 @@ export interface AgentSupplyFile<P extends AgentSupplyPass = AgentSupplyPass> {
 /** 校验通过的单个供给条目（对象级，G2 字段级合并的最小单位） */
 export interface AgentSupplyEntry<P extends AgentSupplyPass = AgentSupplyPass> {
   pass: P
-  /** 对象 id：moduleId / chainId / functionId（按 pass） */
+  /** 对象 id：partition 固定为 `root`；其余按 pass 为 moduleId / chainId / functionId */
   objectId: string
   value: AgentSupplyValueShapes[P]
   agent: string
@@ -995,9 +1024,10 @@ export interface AgentSupplyScanResult {
 
 /**
  * 建议清单条目：还缺哪一类语义供给。
- * kind 与 pass 一一对应，targetId 按 pass 分别是 moduleId / chainId / functionId。
+ * kind 与 pass 一一对应，targetId 按 pass 分别是 moduleId / chainId / functionId（project-partition 固定为 root）。
  */
 export type AgentSupplySuggestionKind =
+  | 'project-partition'
   | 'module-identity'
   | 'chain-narrative'
   | 'function-category'
@@ -1045,6 +1075,8 @@ export interface AgentSupplyResponse extends AgentSupplyScanResult {
 export interface AgentSupplyRulesResult {
   rulesText: string
   generatedAt: string
+  /** 完整机器可读索引的绝对路径（`supply/<projectId>/index.json`，随规则生成/导出一起刷新） */
+  indexPath: string
   stats: {
     fileCount: number
     entryCount: number

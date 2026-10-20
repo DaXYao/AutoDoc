@@ -35,7 +35,13 @@ import {
 import { applyCoreJudgment, applyPartition, buildGraph, syncModuleCores, type CoreJudgment, type Partition, type ProjectGraph } from './graph.js'
 import { collectWorkspacePackageNames } from './workspacePackages.js'
 import { isCategoryCandidate, markClassified } from './categoryCandidates.js'
-import { applySupplyOverlay, clearSupplyCache, snapshotSourceOf } from './supplyCache.js'
+import {
+  applySupplyOverlay,
+  clearSupplyCache,
+  readPartitionSupply,
+  snapshotSourceOf
+} from './supplyCache.js'
+import { applyAgentPartitionToInsight } from './supplyPartition.js'
 
 /** AI 划分信封（缓存单元）：members 为函数在索引表中的下标 */
 interface PartitionEnvelope {
@@ -59,7 +65,7 @@ interface FlowTreeCache {
   aiOk: boolean
   /** 写入时的细化状态快照（ok/partial/failed），仅供排查；回读时一律用 flowsStatusOf 重算，保证两条路径判定一致 */
   status?: AiPassStatus
-  /** M-R1：生成时的划分身份（flowsBasis），回读时与当前 graph 比对，不符则忽略 */
+  /** M-R1：生成时的划分身份（flowsBasis）。回读时仅 basis 完全一致才命中；无 basis 的旧缓存视同不匹配 */
   basis?: string
   /** m-R3：根级回填次数（降级信号） */
   rootBackfills?: number
@@ -1459,19 +1465,39 @@ export function loadInsight(
   const insight = buildInsight(graph, aiEnabled, feedback)
   const cache = new AiCache(dirname(service.storage.dataPath))
   const overlay = opts.supplyOverlay !== false
-  // 无 KEY 时 Agent 供给同样是合法来源，增量路径也要套用（两条链路地位平等，不许显示「未生成」）
+  // 无 KEY 时 Agent 供给同样是合法来源，增量路径也要套用（两条链路地位平等，不许显示「未生成」）。
+  // partition 是结构层：先单独应用（只读缓存、无网络），再让 overlay 只叠语义 pass（skipPartition 防重复应用）。
   if (!aiEnabled) {
-    if (overlay) applySupplyOverlay(insight, graph, cache)
+    let agentPartitionApplied = false
+    if (overlay) {
+      const ap = readPartitionSupply(cache, graph.fingerprint)
+      if (ap) {
+        agentPartitionApplied = applyAgentPartitionToInsight(insight, graph, ap.value) !== 'missing'
+      }
+    }
+    if (overlay) applySupplyOverlay(insight, graph, cache, { skipPartition: agentPartitionApplied })
     return { insight, graph }
   }
   const fp = graph.fingerprint
   let touched = false
+  // ⓪ 结构层：Agent partition 优先于本地 partition:latest（整份替换，Agent 赢）。
+  // 必须先于本地划分/核心判定/分类/叙事等所有 pass 应用：它们的位置化 id 与模块核心表都以新划分为准。
+  let agentPartitionApplied = false
+  if (overlay) {
+    const ap = readPartitionSupply(cache, graph.fingerprint)
+    if (ap) {
+      agentPartitionApplied = applyAgentPartitionToInsight(insight, graph, ap.value) !== 'missing'
+      if (agentPartitionApplied) touched = true
+    }
+  }
   // M1：feedback='' 时优先用 partition:latest（与 refresh 的 previous 语义对齐），
-  // 使"采纳建议后"的默认页面加载能读到最新划分，避免树因 basis 不符被永久忽略
-  const p = (feedback === ''
-    ? cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? cache.get<PartitionEnvelope>(fp, `partition:${hash8(feedback)}`)
-    : cache.get<PartitionEnvelope>(fp, `partition:${hash8(feedback)}`)
-  )
+  // 使"采纳建议后"的默认页面加载能读到最新划分，避免树因 basis 不符被永久忽略。
+  // Agent partition 已生效时跳过本地划分（两份划分不能叠加）。
+  const p = agentPartitionApplied
+    ? undefined
+    : feedback === ''
+      ? cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? cache.get<PartitionEnvelope>(fp, `partition:${hash8(feedback)}`)
+      : cache.get<PartitionEnvelope>(fp, `partition:${hash8(feedback)}`)
   if (p) {
     applyPartition(graph, toPartition(graph, p))
     rebuildInsightFromGraph(insight, graph, p.summary)
@@ -1523,9 +1549,10 @@ export function loadInsight(
    * 不直读快照里的 status 字段，避免旧快照（无 status）在「重新生成 vs 刷新页面」之间翻转
    */
   let flowsStatus: AiPassStatus | undefined
-  // M-R1：applyPartition 之后计算当前 basis，与快照 basis 比对——不符则忽略（不展示矛盾树）
+  // M-R1：applyPartition 之后计算当前 basis，与快照 basis 比对——不符则忽略（不展示矛盾树）。
+  // 无 basis 的旧缓存（H1 之前写入）一律视同不匹配：生产阶段不做向后兼容，否则 Agent 重划后树会按旧划分展示/深链错位。
   const currentBasis = flowsBasis(graph)
-  const basisMatch = !flowsTree?.basis || flowsTree.basis === currentBasis
+  const basisMatch = flowsTree?.basis === currentBasis
   if (flowsTree && flowsTree.tree.length > 0 && basisMatch) {
     insight.flows = flowsTree.tree
     insight.flowsGeneratedAt = flowsTree.generatedAt
@@ -1551,8 +1578,9 @@ export function loadInsight(
       blocks: blocksStatusOf(blocksRead.out, blocksRead.misses, true)
     }
   }
-  // G2：增量路径套用供给缓存（本地 pass 之后再叠一层 Agent 供给，冲突以 Agent 为准）
-  if (overlay) applySupplyOverlay(insight, graph, cache)
+  // G2：增量路径套用供给缓存（本地 pass 之后再叠一层 Agent 供给，冲突以 Agent 为准）。
+  // partition 已在最前面应用，overlay 只叠其余 pass 并按新 basis 读取；skipPartition 防重复改写。
+  if (overlay) applySupplyOverlay(insight, graph, cache, { skipPartition: agentPartitionApplied })
   insight.aiGenerated = touched || insight.aiGenerated
   return { insight, graph }
 }
@@ -1591,9 +1619,17 @@ export async function refreshInsightAI(
   // 旧 modules/chain:N 供给会被贴到新划分下的另一个对象上（张冠李戴）。
   const skipSupply = opts.force === true || opts.forcePartition === true
   if (skipSupply) clearSupplyCache(cache)
-  // 无 KEY 也要套用供给：Agent 供给是合法来源，两条链路地位平等（早退之前就得叠上）
+  // 无 KEY 也要套用供给：Agent 供给是合法来源，两条链路地位平等（早退之前就得叠上）。
+  // 与 loadInsight 同序：先应用 partition 结构层，再叠语义 pass（skipPartition 防重复应用）。
   if (!aiEnabled) {
-    if (!skipSupply) applySupplyOverlay(insight, graph, cache)
+    let agentPartitionApplied = false
+    if (!skipSupply) {
+      const ap = readPartitionSupply(cache, graph.fingerprint)
+      if (ap) {
+        agentPartitionApplied = applyAgentPartitionToInsight(insight, graph, ap.value) !== 'missing'
+      }
+      applySupplyOverlay(insight, graph, cache, { skipPartition: agentPartitionApplied })
+    }
     return { insight, graph }
   }
   const fp = graph.fingerprint
@@ -1609,31 +1645,50 @@ export async function refreshInsightAI(
     blocks: { reused: 0, rerun: 0 }
   }
 
-  // 1) 划分（AI 主导；可携带用户建议迭代）
-  let p = opts.force || opts.forcePartition ? undefined : cache.get<PartitionEnvelope>(fp, fbKey)
-  if (p) {
-    status.partition = 'ok'
-  } else {
-    const previous = cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? null
-    try {
-      p = (await aiPartition(graph, feedback, previous)) ?? undefined
-      status.partition = p ? 'ok' : 'failed'
-    } catch (e) {
-      status.partition = 'failed'
-      console.warn(`[autodoc] AI 划分失败，回退目录划分：${e instanceof Error ? e.message : String(e)}`)
-    }
-    if (p) {
-      cache.set(fp, fbKey, p)
-      cache.set(fp, 'partition:latest', p)
+  // 1) 划分（结构层，最先应用）
+  // Agent partition 缓存优先于本地 AI 划分：整份替换、不再调用 aiPartition、也不写本地 partition 缓存。
+  // force / forcePartition 已在入口清空 supply:*，因此这里读不到 Agent 划分，走原有本地流程。
+  let agentPartitionApplied = false
+  if (!skipSupply) {
+    const ap = readPartitionSupply(cache, fp)
+    if (ap) {
+      agentPartitionApplied = applyAgentPartitionToInsight(insight, graph, ap.value) !== 'missing'
+      // Agent 划分不是本地 AI 的产物：状态只能由 overlay 在内存里记（aiSource='agent'）。
+      // 写进 aiStatus 缓存会在供给撤回后留下「划分已生成」的假状态；这里只按本地划分缓存的实际存在性记录本地口径。
+      if (agentPartitionApplied) {
+        const localCached =
+          cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? cache.get<PartitionEnvelope>(fp, fbKey)
+        if (localCached) status.partition = 'ok'
+      }
     }
   }
-  if (p) {
-    applyPartition(graph, toPartition(graph, p))
-    rebuildInsightFromGraph(insight, graph, p.summary)
-    insight.partitionFeedback = feedback
-  } else {
-    // 划分失败回退目录：不记录 feedback，避免误导「已采纳」
-    insight.partitionFeedback = ''
+  let p: PartitionEnvelope | undefined
+  if (!agentPartitionApplied) {
+    p = opts.force || opts.forcePartition ? undefined : cache.get<PartitionEnvelope>(fp, fbKey)
+    if (p) {
+      status.partition = 'ok'
+    } else {
+      const previous = cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? null
+      try {
+        p = (await aiPartition(graph, feedback, previous)) ?? undefined
+        status.partition = p ? 'ok' : 'failed'
+      } catch (e) {
+        status.partition = 'failed'
+        console.warn(`[autodoc] AI 划分失败，回退目录划分：${e instanceof Error ? e.message : String(e)}`)
+      }
+      if (p) {
+        cache.set(fp, fbKey, p)
+        cache.set(fp, 'partition:latest', p)
+      }
+    }
+    if (p) {
+      applyPartition(graph, toPartition(graph, p))
+      rebuildInsightFromGraph(insight, graph, p.summary)
+      insight.partitionFeedback = feedback
+    } else {
+      // 划分失败回退目录：不记录 feedback，避免误导「已采纳」
+      insight.partitionFeedback = ''
+    }
   }
 
   // 2) AI 核心判定（按功能重要性，覆盖静态中心度；函数多时内部分批合并）
@@ -1794,10 +1849,11 @@ export async function refreshInsightAI(
   // Major-1：forcePartition（「提交划分建议」主流程）会让 pass1 重算划分 → 模块变成新的 mod:i，
   // 若仍复用陈旧 flows:tree，树会按旧划分归组、mod:i 深链跳错模块 ⇒ 与 force 同样绕过整树缓存。
   const invalidateFlows = opts.force === true || opts.forcePartition === true
-  // M-R1：cache-hit 分支也需验证 basis 一致性（划分可能在前面的 pass 被 force 重算过）
+  // M-R1：cache-hit 分支也需验证 basis 一致性（划分可能在前面的 pass 被 force 重算过）；
+  // 无 basis 的旧缓存视同不匹配，走重算/兜底而不是按旧划分复用。
   const rawCachedTree = invalidateFlows ? undefined : cache.get<FlowTreeCache>(fp, 'flows:tree')
   const pass6Basis = flowsBasis(graph)
-  const cachedTree = rawCachedTree && (!rawCachedTree.basis || rawCachedTree.basis === pass6Basis)
+  const cachedTree = rawCachedTree && rawCachedTree.basis === pass6Basis
     ? rawCachedTree
     : undefined
   if (cachedTree && cachedTree.tree.length > 0) {
@@ -1879,6 +1935,7 @@ export async function refreshInsightAI(
 
   insight.aiGenerated = !!(
     p ||
+    agentPartitionApplied ||
     Object.keys(cj ?? {}).length ||
     Object.keys(cats).length ||
     Object.keys(roles ?? {}).length ||
@@ -1895,7 +1952,8 @@ export async function refreshInsightAI(
   // 这里再显式对齐一次，确保读到的是并发 merge 刚写入的最新 supply:*。
   if (!skipSupply) {
     cache.reload()
-    applySupplyOverlay(insight, graph, cache)
+    // partition 已在本函数最前面应用；overlay 只登记来源与状态（aiStatus.partition='ok'、aiSource='agent'），不重复改写结构。
+    applySupplyOverlay(insight, graph, cache, { skipPartition: agentPartitionApplied })
   }
   // I2：chunk 增量统计入日志与返回值；I3：同时记入 service，供 /api/insight 家族响应附带下发
   console.log(

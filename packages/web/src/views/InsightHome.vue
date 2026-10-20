@@ -380,28 +380,30 @@ watch(
         </p>
       </section>
 
-      <!-- 模块划分反馈（AI 主导划分 + 用户建议迭代） -->
-      <section v-if="insight.aiEnabled" class="ad-card mb-5 px-4 py-3">
+      <!-- 模块划分反馈（AI 主导划分 + 用户建议迭代）；Agent 划分在无 KEY 时也要能看见来源 -->
+      <section v-if="insight.aiEnabled || insight.partitionSource === 'agent'" class="ad-card mb-5 px-4 py-3">
         <div class="flex items-center gap-2 mb-2">
           <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">功能模块划分</h3>
-          <n-tag size="tiny" :type="insight.partitionSource === 'ai' ? 'success' : 'default'" :bordered="false">
-            {{ insight.partitionSource === 'ai' ? 'AI 划分' : '目录划分' }}
+          <n-tag size="tiny" :type="insight.partitionSource === 'ai' ? 'success' : insight.partitionSource === 'agent' ? 'info' : 'default'" :bordered="false">
+            {{ insight.partitionSource === 'ai' ? 'AI 划分' : insight.partitionSource === 'agent' ? 'Agent 划分' : '目录划分' }}
           </n-tag>
           <span v-if="insight.partitionFeedback" class="text-xs text-[color:var(--ad-ink-3)]">
             已采纳建议：{{ insight.partitionFeedback.slice(0, 40) }}
           </span>
         </div>
-        <n-input
-          v-model:value="feedback"
-          type="textarea"
-          :autosize="{ minRows: 2, maxRows: 4 }"
-          placeholder="对当前划分不满意？写下你的建议（如：把存储和备份合并为一个模块；解析器应拆成 C# 与 TS 两个模块），AI 会据此重新划分。"
-        />
-        <div class="mt-2 flex justify-end">
-          <n-button size="small" type="primary" :loading="partitionBusy" @click="handleRepartition">
-            按建议重新划分
-          </n-button>
-        </div>
+        <template v-if="insight.aiEnabled">
+          <n-input
+            v-model:value="feedback"
+            type="textarea"
+            :autosize="{ minRows: 2, maxRows: 4 }"
+            placeholder="对当前划分不满意？写下你的建议（如：把存储和备份合并为一个模块；解析器应拆成 C# 与 TS 两个模块），AI 会据此重新划分。"
+          />
+          <div class="mt-2 flex justify-end">
+            <n-button size="small" type="primary" :loading="partitionBusy" @click="handleRepartition">
+              按建议重新划分
+            </n-button>
+          </div>
+        </template>
       </section>
 
       <!-- ============ 业务脉络：树/图双视图（树=递归渐进披露；图=V1 GraphView） ============ -->

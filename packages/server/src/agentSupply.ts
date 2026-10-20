@@ -12,6 +12,8 @@ import type {
   AgentSupplyIgnored,
   AgentSupplyModuleValue,
   AgentSupplyNarrativeValue,
+  AgentSupplyPartitionModule,
+  AgentSupplyPartitionValue,
   AgentSupplyPass,
   AgentSupplyRulesResult,
   AgentSupplyScanResult,
@@ -23,6 +25,7 @@ import type {
   AnyAgentSupplyEntry,
   Category,
   ClassificationConfig,
+  FunctionCategory,
   FunctionDoc,
   InsightChain,
   InsightModule,
@@ -32,6 +35,7 @@ import type { DocService } from './context.js'
 import { flowsBasis } from './flow.js'
 import type { ProjectGraph } from './graph.js'
 import { loadInsight } from './insight.js'
+import { applyPartitionPreservingCores } from './supplyPartition.js'
 import { collectChangesSupply, buildChangesRulesSection, type ChangesSupplyContext } from './agentSupplyChanges.js'
 
 /**
@@ -43,9 +47,10 @@ import { collectChangesSupply, buildChangesRulesSection, type ChangesSupplyConte
  * 本模块只读取、严格校验、按对象聚合出「谁赢了」，并生成契约文本（schema + 索引 + 建议）；
  * **不写回缓存、不做合并**（那是 G2）。目标仓只会出现规则契约文件本身。
  *
- * 一期四类语义 → 六个供给 pass → 本地 ai-cache 键 → 值形状（供给文件 `values` 的值逐字段照搬第 4 列）：
+ * 一期四类语义 → 六个语义 pass + 结构层 partition → 本地 ai-cache 键 → 值形状（供给文件 `values` 的值逐字段照搬第 4 列）：
  * | 语义                     | pass         | 对象 id     | 本地 ai-cache 键                | 值形状                                              |
  * | ------------------------ | ------------ | ----------- | ------------------------------- | --------------------------------------------------- |
+ * | ⓪整项目划分              | partition    | root（唯一）| （结构层，不写同名缓存）        | `{ summary?, modules: [{ name, description, members: [functionId] }] }`（须完整覆盖、模块名唯一） |
  * | ①模块职责描述            | modules      | moduleId    | `<图指纹>:partition:latest`     | `{ name, description }`（name=对账锚点，逐字抄索引里的当前模块名；description 才是供给语义。members 由本地掌握） |
  * | ②链路叙事 + 每步角色     | narratives   | chainId     | `<图指纹>:narratives:v2`        | `{ entryId, narrative?, stepRoles?: { <functionId>: string } }`（entryId=对账锚点，非缓存信封字段） |
  * | ③三分类 + 理由           | categories   | functionId  | `chunk:categories:<hash>`       | `{ category: business|implementation|utility, reason }` |
@@ -57,12 +62,14 @@ import { collectChangesSupply, buildChangesRulesSection, type ChangesSupplyConte
  * - 文件级：modules / narratives 信封必须携带 `basis` = 当前划分身份指纹（flowsBasis 同款口径），不匹配整份判「契约已过期」；
  * - 条目级：modules.name / narratives.entryId 是逐字抄自契约索引的锚点，与实时划分比对，漂移只判该条。
  * - 函数类 pass 用稳定 id，不带 basis / 锚点字段。
+ * - partition 是 basis 的来源：禁止携带 basis，且必须先于其它 pass 应用（两阶段扫描）。
  *
- * 不接受外部供给：flows / externals（本地 AI 专属）、keySteps / partition（一期范围外；模块成员归属属静态层）。
+ * 不接受外部供给：flows / externals（本地 AI 专属）、keySteps（一期范围外）。
  */
 
-/** 一期支持的供给 pass（顺序即契约文本与建议清单的呈现顺序） */
+/** 一期支持的供给 pass（顺序即契约文本与建议清单的呈现顺序；partition 是结构层，必须最先应用） */
 export const SUPPLY_PASSES: AgentSupplyPass[] = [
+  'partition',
   'modules',
   'narratives',
   'categories',
@@ -75,10 +82,10 @@ export const SUPPLY_PASSES: AgentSupplyPass[] = [
 interface PassMeta {
   /** 语义类别中文名 */
   label: string
-  /** 一期四类语义的编号 */
+  /** 一期四类语义的编号（⓪ = 结构层，先于 ①~④ 应用） */
   group: string
-  /** 对象 id 种类 */
-  idKind: 'moduleId' | 'chainId' | 'functionId'
+  /** 对象 id 种类（project = partition 的唯一键 root） */
+  idKind: 'project' | 'moduleId' | 'chainId' | 'functionId'
   /** 本地 ai-cache 键（G2 的写回目标） */
   cacheKey: string
   /** 值形状一行说明 */
@@ -88,6 +95,14 @@ interface PassMeta {
 }
 
 const PASS_META: Record<AgentSupplyPass, PassMeta> = {
+  partition: {
+    label: '整项目划分',
+    group: '⓪',
+    idKind: 'project',
+    cacheKey: '（结构层，先于其它 pass 应用）',
+    shape: '{ summary?, modules: [{ name, description, members: [functionId] }] }（唯一键 root；须完整覆盖）',
+    suggestion: 'project-partition'
+  },
   modules: {
     label: '模块名称与职责描述',
     group: '①',
@@ -151,7 +166,6 @@ const REJECTED_PASS_REASONS: Record<string, string> = {
   flows: '递归脉络树是本地 AI 专属能力，供给通道不接受',
   externals: '外部库补全是本地 AI 专属能力，供给通道不接受',
   keySteps: '主干识别不在第一期四类语义范围内，由本地 AI 生成',
-  partition: '模块划分含模块成员归属，属本地静态层；只想供给模块名称与职责请改用 modules pass',
   changes: 'changes 属于变更侧供给，请写进 changes/ 子目录（文件名 changes.<agent>.json），见契约第 9 节'
 }
 
@@ -166,12 +180,25 @@ const FILE_NAME_RE = /^([A-Za-z][A-Za-z0-9]{0,31})\.([A-Za-z0-9._-]{1,64})\.json
 /**
  * 读前体积闸口：整份 pass 的 map 体量远大于人读笔记（实测本仓 narratives≈53KB、coreJudgment≈9KB/项目，
  * 大仓的 blocks 可到数百 KB），故取 1MB；超限不进内存直接判错。
+ * partition 是整项目划分（members 逐条列全部函数稳定 id），大仓可到数 MB，单独放宽到 8MB。
  */
 const SUPPLY_FILE_MAX_BYTES = 1024 * 1024
-/** 单条目 JSON 体积上限：防单条失控产出撑爆合并与界面 */
+const SUPPLY_PARTITION_FILE_MAX_BYTES = 8 * 1024 * 1024
+/** 单条目 JSON 体积上限：防单条失控产出撑爆合并与界面（partition 整项目一条，同样放宽到 8MB） */
 const SUPPLY_ENTRY_MAX_BYTES = 32 * 1024
+const SUPPLY_PARTITION_ENTRY_MAX_BYTES = 8 * 1024 * 1024
 /** 单文件 values 条目数上限 */
 const SUPPLY_VALUES_MAX_ENTRIES = 5000
+/** partition 的模块数上限（防止把每个函数都拆成一个模块） */
+const MAX_PARTITION_MODULES = 200
+
+function fileMaxBytesOf(pass: AgentSupplyPass): number {
+  return pass === 'partition' ? SUPPLY_PARTITION_FILE_MAX_BYTES : SUPPLY_FILE_MAX_BYTES
+}
+
+function entryMaxBytesOf(pass: AgentSupplyPass): number {
+  return pass === 'partition' ? SUPPLY_PARTITION_ENTRY_MAX_BYTES : SUPPLY_ENTRY_MAX_BYTES
+}
 
 /** errors 的 reason / path 里回显 Agent 可控内容的统一截断长度 */
 const REASON_ECHO_MAX = 120
@@ -180,6 +207,7 @@ const REASON_ECHO_MAX = 120
 const LEN = {
   moduleName: 60,
   moduleDescription: 1000,
+  partitionSummary: 2000,
   /** narratives 对账锚点：函数稳定 id（相对路径 + 类名 + 方法名 + 签名哈希），路径可长 */
   entryId: 400,
   narrative: 2000,
@@ -545,14 +573,108 @@ function validateStepsValue(raw: unknown, fn: FunctionDoc): Outcome<InternalStep
   return { kind: 'ok', value: steps }
 }
 
+/**
+ * 整项目划分校验（原子：任何覆盖缺口/重复/未知 id/重名都整份拒绝，不做逐条降级）。
+ * 集合类问题（缺哪些函数、哪些 id 重复）一次报全（各取前几条），避免 Agent 反复试错。
+ */
+function validatePartitionValue(raw: unknown, ctx: ValidateCtx): Outcome<AgentSupplyPartitionValue> {
+  if (!isPlainObject(raw)) return fail(`值必须是对象（收到 ${echoValue(raw)}）`)
+  const extra = checkNoExtraKeys(raw, ['summary', 'modules'])
+  if (extra) return extra
+  const summary = optionalText(raw, 'summary', LEN.partitionSummary)
+  if (summary.kind !== 'ok') return summary
+  const rawModules = raw.modules
+  if (!Array.isArray(rawModules)) return fail(`modules 必须是数组（收到 ${echoValue(rawModules)}）`, 'modules')
+  if (rawModules.length === 0) return fail('modules 不能为空（整项目划分至少一个模块）', 'modules')
+  if (rawModules.length > MAX_PARTITION_MODULES) {
+    return fail(`modules 超过 ${MAX_PARTITION_MODULES} 个模块上限（收到 ${rawModules.length} 个）`, 'modules')
+  }
+
+  const modules: AgentSupplyPartitionModule[] = []
+  const nameAt = new Map<string, number>()
+  const duplicateNames: string[] = []
+  const seen = new Set<string>()
+  const duplicateMembers: string[] = []
+  const unknownMembers: string[] = []
+
+  for (let i = 0; i < rawModules.length; i++) {
+    const item = rawModules[i]
+    const at = `modules[${i}]`
+    if (!isPlainObject(item)) return fail(`${at} 必须是对象（收到 ${echoValue(item)}）`, at)
+    const itemExtra = checkNoExtraKeys(item, ['name', 'description', 'members'])
+    if (itemExtra) return fail(`${at}${itemExtra.reason}`, itemExtra.field ? `${at}.${itemExtra.field}` : at)
+    const name = requireText(item, 'name', LEN.moduleName)
+    if (name.kind !== 'ok') return fail(`${at}${name.reason}`, `${at}.${name.field ?? 'name'}`)
+    const description = requireText(item, 'description', LEN.moduleDescription)
+    if (description.kind !== 'ok') {
+      return fail(`${at}${description.reason}`, `${at}.${description.field ?? 'description'}`)
+    }
+    const prevAt = nameAt.get(name.value)
+    if (prevAt !== undefined) duplicateNames.push(`${name.value}（modules[${prevAt}] 与 modules[${i}]）`)
+    else nameAt.set(name.value, i)
+
+    const membersRaw = item.members
+    if (!Array.isArray(membersRaw)) return fail(`${at}.members 必须是数组`, `${at}.members`)
+    if (membersRaw.length === 0) return fail(`${at}.members 不能为空（每个模块至少一个函数）`, `${at}.members`)
+    const members: string[] = []
+    for (let j = 0; j < membersRaw.length; j++) {
+      const id = membersRaw[j]
+      if (typeof id !== 'string' || id.trim().length === 0) {
+        return fail(`${at}.members[${j}] 必须是非空字符串函数 id`, `${at}.members[${j}]`)
+      }
+      if (!ctx.graph.nodes.has(id)) {
+        unknownMembers.push(id)
+        continue
+      }
+      if (seen.has(id)) {
+        duplicateMembers.push(id)
+        continue
+      }
+      seen.add(id)
+      members.push(id)
+    }
+    modules.push({ name: name.value, description: description.value, members })
+  }
+
+  const missing = [...ctx.graph.nodes.keys()].filter((id) => !seen.has(id))
+  if (missing.length > 0 || duplicateMembers.length > 0 || unknownMembers.length > 0 || duplicateNames.length > 0) {
+    const firstFew = (list: string[]): string => {
+      const uniq = [...new Set(list)]
+      const head = uniq.slice(0, 5).map((s) => `\`${cutEcho(s)}\``).join('、')
+      return uniq.length > 5 ? `${head} 等 ${uniq.length} 个` : head
+    }
+    const parts: string[] = []
+    if (missing.length > 0) parts.push(`未覆盖 ${missing.length} 个函数：${firstFew(missing)}`)
+    if (unknownMembers.length > 0) {
+      parts.push(`未知函数 id ${unknownMembers.length} 个（不在当前实时图谱）：${firstFew(unknownMembers)}`)
+    }
+    if (duplicateMembers.length > 0) {
+      parts.push(`重复成员 ${duplicateMembers.length} 个（同一函数只能属于一个模块）：${firstFew(duplicateMembers)}`)
+    }
+    if (duplicateNames.length > 0) parts.push(`模块名重复（必须全项目唯一）：${firstFew(duplicateNames)}`)
+    return fail(
+      `整项目划分必须恰好覆盖当前图谱的全部 ${ctx.graph.nodes.size} 个函数、且模块名唯一——${parts.join('；')}。` +
+        '请从 index.json 逐字抄函数稳定 id，不要凭记忆补 id。',
+      'modules'
+    )
+  }
+
+  const value: AgentSupplyPartitionValue = { modules }
+  if (summary.value !== undefined) value.summary = summary.value
+  return { kind: 'ok', value }
+}
+
 /** 对象 id 未命中的统一原因（按 pass 的 id 种类措辞；一律以实时图谱为准） */
 function missingIdReason(pass: AgentSupplyPass, objectId: string): string {
+  const kind = PASS_META[pass].idKind
   const where =
-    PASS_META[pass].idKind === 'functionId'
+    kind === 'functionId'
       ? '当前实时图谱的函数集'
-      : PASS_META[pass].idKind === 'moduleId'
+      : kind === 'moduleId'
         ? '当前实时图谱的模块集'
-        : '当前实时图谱的链路集'
+        : kind === 'chainId'
+          ? '当前实时图谱的链路集'
+          : '整项目划分（唯一键 root）'
   return `对象 id 不在${where}中：${cutEcho(objectId)}`
 }
 
@@ -598,8 +720,8 @@ function validateEntry(
   } catch {
     return errorAt('条目值无法序列化为 JSON')
   }
-  if (bytes > SUPPLY_ENTRY_MAX_BYTES) {
-    return errorAt(`单条目超过 ${SUPPLY_ENTRY_MAX_BYTES / 1024}KB 上限`)
+  if (bytes > entryMaxBytesOf(pass)) {
+    return errorAt(`单条目超过 ${entryMaxBytesOf(pass) / 1024 / 1024 >= 1 ? `${entryMaxBytesOf(pass) / 1024 / 1024}MB` : `${entryMaxBytesOf(pass) / 1024}KB`} 上限`)
   }
   // 各分支自己解析对象 id：pass 收窄后「id 种类 ↔ 值形状」一一对应，无需类型断言
   switch (pass) {
@@ -645,6 +767,10 @@ function validateEntry(
     case 'changes': {
       // changes pass 不在 insight 目录校验（已在文件扫描层拒绝），此处不可达
       return errorAt('changes pass 不属于洞察侧校验范围')
+    }
+    case 'partition': {
+      // partition 是整份文件一个值（唯一键 root），由 parseSupplyFile 在文件级原子校验，此处不可达
+      return errorAt('partition pass 应在文件级整体校验')
     }
   }
 }
@@ -719,7 +845,12 @@ function parseSupplyFile(
       return { entries, errors, ignored }
     }
   } else if (data.basis !== undefined) {
-    reject(`${filePass} 用稳定函数 id，禁止携带 basis（只有 modules / narratives 需要）`, 'basis')
+    reject(
+      filePass === 'partition'
+        ? 'partition 是划分本身的来源，禁止携带 basis（basis 由本次划分重新计算；只有 modules / narratives 需要旧 basis）'
+        : `${filePass} 用稳定函数 id，禁止携带 basis（只有 modules / narratives 需要）`,
+      'basis'
+    )
     return { entries, errors, ignored }
   }
   if (!isPlainObject(data.values)) {
@@ -736,6 +867,23 @@ function parseSupplyFile(
     return { entries, errors, ignored }
   }
   const writtenAt = data.writtenAt
+  // partition 是整份划分（结构层）：values 唯一键 root，值做原子校验（任何覆盖缺口/重复整份拒绝），
+  // 不进入逐条循环——逐条降级会让半份划分生效，模块成员归属失真比整份拒绝危险得多。
+  if (filePass === 'partition') {
+    if (ids.length !== 1 || ids[0] !== 'root') {
+      reject(`partition 的 values 只能有唯一键 root（收到 ${echoValue(ids.join(','))}）`, 'values')
+      return { entries, errors, ignored }
+    }
+    const res = validatePartitionValue(data.values.root, ctx)
+    if (res.kind === 'ok') {
+      entries.push(entryOf('partition', 'root', res.value, fileAgent, writtenAt, file))
+    } else if (res.kind === 'ignored') {
+      ignored.push({ file, pass: 'partition', objectId: 'root', reason: res.reason })
+    } else {
+      errors.push({ file, path: pathOf('root', res.field), objectId: 'root', reason: res.reason })
+    }
+    return { entries, errors, ignored }
+  }
   for (const objectId of ids) {
     const res = validateEntry(ctx, filePass, fileAgent, writtenAt, file, objectId, data.values[objectId])
     if (res.kind === 'entry') {
@@ -752,7 +900,11 @@ function parseSupplyFile(
 export interface AgentSupplyScanOptions {
   /** 供给目录（不存在→空结果，不抛） */
   dir: string
-  /** **实时**图谱（loadInsight 返回的 bundle.graph）：对象 id 一律在它上面校验，不吃可能陈旧的洞察快照 */
+  /**
+   * **实时**图谱（loadInsight 返回的 bundle.graph）：对象 id 一律在它上面校验，不吃可能陈旧的洞察快照。
+   * ⚠️ 扫描会把 partition 胜者应用到这份图上（两阶段校验的唯一副作用）：必须是请求内私有副本，
+   * 调用方拿到的 graph 即「应用划分后」的视图（索引/建议/basis 都基于它）。
+   */
   graph: ProjectGraph
   /** 目标项目分类配置：判定「配置规则已命中」的函数（这些函数不接受 categories 覆盖） */
   classification?: ClassificationConfig
@@ -786,14 +938,13 @@ export function scanAgentSupply(opts: AgentSupplyScanOptions): AgentSupplyScanRe
     errors.push({ file: opts.dir, reason: `供给目录读取失败：${cutEcho(errorMessage(e))}` })
     return finish(0)
   }
-  const ctx: ValidateCtx = {
-    graph: opts.graph,
-    modules: new Map(opts.graph.modules.map((m) => [m.id, m])),
-    chains: new Map(opts.graph.chains.map((c) => [c.id, c])),
-    basis: flowsBasis(opts.graph),
-    configHit: makeConfigHitFn(opts.graph, opts.classification)
-  }
   let fileCount = 0
+  interface SupplyFileRef {
+    file: string
+    pass: AgentSupplyPass
+    agent: string
+  }
+  const files: SupplyFileRef[] = []
   // 排序保证输出与错误清单跨平台确定（readdir 顺序不保证）
   for (const dirent of [...dirents].sort((a, b) => a.name.localeCompare(b.name))) {
     // 子目录与非 .json 文件直接忽略，不算错误
@@ -822,20 +973,71 @@ export function scanAgentSupply(opts: AgentSupplyScanOptions): AgentSupplyScanRe
       })
       continue
     }
-    const full = join(opts.dir, file)
-    let text: string
+    files.push({ file, pass: filePass, agent: fileAgent })
+  }
+
+  const readFile = (ref: SupplyFileRef): string | null => {
+    const full = join(opts.dir, ref.file)
     try {
       // 先查体积再读入：超限文件不进内存
-      if (statSync(full).size > SUPPLY_FILE_MAX_BYTES) {
-        errors.push({ file, reason: `文件过大（>${SUPPLY_FILE_MAX_BYTES / 1024}KB）` })
-        continue
+      const max = fileMaxBytesOf(ref.pass)
+      if (statSync(full).size > max) {
+        const limit = max >= 1024 * 1024 ? `${max / 1024 / 1024}MB` : `${max / 1024}KB`
+        errors.push({ file: ref.file, reason: `文件过大（>${limit}）` })
+        return null
       }
-      text = readFileSync(full, 'utf-8')
+      return readFileSync(full, 'utf-8')
     } catch (e) {
-      errors.push({ file, reason: `读取失败：${cutEcho(errorMessage(e))}` })
-      continue
+      errors.push({ file: ref.file, reason: `读取失败：${cutEcho(errorMessage(e))}` })
+      return null
     }
-    const parsed = parseSupplyFile(ctx, file, filePass, fileAgent, text)
+  }
+
+  const ctxOf = (): ValidateCtx => ({
+    graph: opts.graph,
+    modules: new Map(opts.graph.modules.map((m) => [m.id, m])),
+    chains: new Map(opts.graph.chains.map((c) => [c.id, c])),
+    basis: flowsBasis(opts.graph),
+    configHit: makeConfigHitFn(opts.graph, opts.classification)
+  })
+
+  // 第一阶段：只解析 partition（结构层）。它的校验不依赖 modules/chains/basis（且禁止 basis），
+  // 但必须在其它 pass 之前生效——mod:i / chain:N / 模块核心表都是划分的函数。
+  const initialCtx = ctxOf()
+  for (const ref of files) {
+    if (ref.pass !== 'partition') continue
+    const text = readFile(ref)
+    if (text === null) continue
+    const parsed = parseSupplyFile(initialCtx, ref.file, ref.pass, ref.agent, text)
+    entries.push(...parsed.entries)
+    errors.push(...parsed.errors)
+    ignored.push(...parsed.ignored)
+  }
+
+  // 第二阶段：选出 partition 胜者并应用到图谱（本函数唯一的副作用；graph 是请求内私有副本）。
+  // 多份 partition 竞争同样按 writtenAt 最新者赢；无效文件不产生胜者，图谱保持原划分。
+  const partitionEntries = entries.filter((e) => e.pass === 'partition')
+  const partitionWinner = pickWinners(partitionEntries)[0]
+  if (partitionWinner) {
+    const winningEntry = partitionEntries.find(
+      (e) => e.agent === partitionWinner.agent && e.file === partitionWinner.file && e.writtenAt === partitionWinner.writtenAt
+    )
+    if (winningEntry) {
+      const value = winningEntry.value as AgentSupplyPartitionValue
+      applyPartitionPreservingCores(opts.graph, {
+        source: 'agent',
+        modules: value.modules.map((m) => ({ name: m.name, description: m.description, members: [...m.members] }))
+      })
+    }
+  }
+
+  // 第三阶段：用**应用后**的划分重建校验上下文，再解析其余 pass（位置化 id / basis 都以新划分为准）。
+  const ctx = ctxOf()
+  for (const ref of files) {
+    if (ref.pass === 'partition') continue
+    const text = readFile(ref)
+    if (text === null) continue
+    const parsed = parseSupplyFile(ctx, ref.file, ref.pass, ref.agent, text)
     entries.push(...parsed.entries)
     errors.push(...parsed.errors)
     ignored.push(...parsed.ignored)
@@ -924,6 +1126,18 @@ export function suggestSupplyTasks(
   const byScoreDesc = (a: AgentSupplySuggestion, b: AgentSupplySuggestion): number =>
     score(b.targetId) - score(a.targetId) || a.targetId.localeCompare(b.targetId)
   const out: AgentSupplySuggestion[] = []
+
+  // 结构层建议永远排第一：没有 Agent 划分时，给出当前划分规模与来源供 Agent 重划。
+  if (!has('partition', 'root')) {
+    out.push({
+      kind: PASS_META.partition.suggestion,
+      pass: 'partition',
+      targetId: 'root',
+      label:
+        `当前 ${graph.modules.length} 个模块 / ${graph.nodes.size} 个函数（来源 ${graph.partition.source}）——` +
+        '可供给整项目重新划分'
+    })
+  }
 
   const functionCountOf = new Map(graph.modules.map((m) => [m.id, m.functionCount]))
   out.push(
@@ -1136,6 +1350,113 @@ export function buildSupplyIndex(
   return { modules, functionCount: indexedFunctions.size, chainCount, fileCount }
 }
 
+/* ------------------------- 完整机器可读索引（index.json） ------------------------- */
+
+/**
+ * 完整索引（不截断）：契约正文里的索引为控制体积只列前 N 个并标注截断，
+ * 这里给出整仓全部模块 / 函数 / 链路的机器可读清单，Agent 可直接按它做整项目划分（partition 必须逐字抄 members）。
+ * 落盘位置固定为 `supply/<projectId>/index.json`（供给目录的父目录，绝不写进目标仓、也不在 insight/ 里）。
+ */
+export interface SupplyIndexFileModule {
+  id: string
+  name: string
+  description: string
+  source: 'ai' | 'dir' | 'agent'
+  functionIds: string[]
+  coreFunctionIds: string[]
+  fileIds: string[]
+}
+
+export interface SupplyIndexFileFunction {
+  id: string
+  label: string
+  file: string
+  moduleId: string
+  isCore: boolean
+  coreScore: number
+  category: FunctionCategory
+  callCount: number
+  codeBlockCount: number
+  chainIds: string[]
+}
+
+export interface SupplyIndexFileChain {
+  id: string
+  entryId: string
+  entryLabel: string
+  moduleId: string
+  path: string[]
+  pathLabels: string[]
+}
+
+export interface SupplyIndexFile {
+  projectId: string
+  generatedAt: string
+  /** 当前划分指纹（modules / narratives 的信封 basis；本索引即按此划分生成） */
+  basis: string
+  graphFingerprint: string
+  partitionSource: 'ai' | 'dir' | 'agent'
+  modules: SupplyIndexFileModule[]
+  functions: SupplyIndexFileFunction[]
+  chains: SupplyIndexFileChain[]
+}
+
+/** 完整索引的绝对路径：`dirname(supplyDir)/index.json` = `supply/<projectId>/index.json` */
+export function supplyIndexPathOf(dir: string): string {
+  return join(dirname(dir), 'index.json')
+}
+
+/** 从**应用 partition 之后**的实时图谱生成完整索引（collectAgentSupply 的 graph 即此视图） */
+export function buildSupplyIndexFile(graph: ProjectGraph, projectId: string): SupplyIndexFile {
+  return {
+    projectId,
+    generatedAt: new Date().toISOString(),
+    basis: flowsBasis(graph),
+    graphFingerprint: graph.fingerprint,
+    partitionSource: graph.partition.source,
+    modules: graph.modules.map((m) => ({
+      id: m.id,
+      name: m.name,
+      description: m.description,
+      source: m.source,
+      functionIds: [...m.functionIds],
+      coreFunctionIds: [...m.coreFunctionIds],
+      fileIds: [...m.fileIds]
+    })),
+    functions: [...graph.nodes.keys()].map((id) => {
+      const fn = graph.nodes.get(id)!
+      return {
+        id,
+        label: fnLabel(id, graph),
+        file: graph.fileOf.get(id) ?? '',
+        moduleId: graph.moduleIdsOf.get(id)?.[0] ?? '',
+        isCore: graph.insights.get(id)?.isCore === true,
+        coreScore: graph.insights.get(id)?.coreScore ?? 0,
+        category: fn.category,
+        callCount: fn.calls.length,
+        codeBlockCount: fn.codeBlocks.length,
+        chainIds: [...(graph.chainIdsOf.get(id) ?? [])]
+      }
+    }),
+    chains: graph.chains.map((c) => ({
+      id: c.id,
+      entryId: c.entryId,
+      entryLabel: fnLabel(c.entryId, graph),
+      moduleId: c.moduleId,
+      path: [...c.path],
+      pathLabels: c.path.map((id) => fnLabel(id, graph))
+    }))
+  }
+}
+
+/** 写完整索引（GET 规则 与 POST 导出都调用；AutoDoc 自身生成物，可直接覆盖） */
+export function writeSupplyIndexFile(dir: string, index: SupplyIndexFile): string {
+  const path = supplyIndexPathOf(dir)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, `${JSON.stringify(index, null, 2)}\n`, 'utf-8')
+  return path
+}
+
 /* ------------------------- 契约文本 ------------------------- */
 
 function jsonBlock(value: unknown): string[] {
@@ -1205,6 +1526,7 @@ function buildRulesText(
   index: SupplyIndex,
   projectId: string,
   dir: string,
+  indexPath: string,
   generatedAt: string,
   baseline: AgentSupplyBaseline
 ): string {
@@ -1234,10 +1556,11 @@ function buildRulesText(
 
   L.push('## 1. 供给范围（能写什么、不能写什么）')
   L.push('')
-  L.push('- 洞察侧：一期四类语义 / 六个 pass（见第 4 节），落盘在 `insight/` 子目录。')
+  L.push('- 洞察侧：一期四类语义 / 七个 pass（partition + 六个语义 pass，见第 4 节），落盘在 `insight/` 子目录。')
   L.push('- 变更侧：`changes` pass（提交叙事/链路影响/函数角色），落盘在 `changes/` 子目录（见第 9 节）。')
   L.push(
-    '- **静态层由本地计算，不可覆盖**：tree-sitter 图谱、调用边、函数稳定 ID、变更集、注释块提取、**模块成员归属**。'
+    '- **静态层由本地计算，不可覆盖**：tree-sitter 图谱、调用边、函数稳定 ID、变更集、注释块提取。' +
+      '**模块成员归属由 partition 供给决定**（这是唯一的结构层 pass）。'
   )
   for (const [pass, reason] of Object.entries(REJECTED_PASS_REASONS)) {
     L.push(`- \`${pass}\`：${reason}。`)
@@ -1263,11 +1586,12 @@ function buildRulesText(
     '- 文件名：**`<pass>.<agent>.json`**，一个 pass 一类一份；多 Agent 并存靠文件名区分' +
       '（如 `narratives.qoder.json`、`narratives.codex.json`）。'
   )
-  L.push('  - `<pass>` 取第 4 节六个之一；`<agent>` 是你的标识，只用字母数字与 `.` `_` `-`（≤64 字符）。')
+  L.push('  - `<pass>` 取第 4 节七个之一；`<agent>` 是你的标识，只用字母数字与 `.` `_` `-`（≤64 字符）。')
   L.push('  - 文件内的 `pass` / `agent` 字段必须与文件名**逐字一致**，否则整份判错。')
   L.push(
-    `- 编码 UTF-8；单文件 ≤ ${SUPPLY_FILE_MAX_BYTES / 1024}KB；单条目 ≤ ${SUPPLY_ENTRY_MAX_BYTES / 1024}KB；` +
-      `values 条目数 ≤ ${SUPPLY_VALUES_MAX_ENTRIES}；子目录与非 \`.json\` 文件一律忽略。`
+    `- 编码 UTF-8；\`partition\` 单文件与单条目 ≤ ${SUPPLY_PARTITION_FILE_MAX_BYTES / 1024 / 1024}MB，` +
+      `其余 pass 单文件 ≤ ${SUPPLY_FILE_MAX_BYTES / 1024}KB、单条目 ≤ ${SUPPLY_ENTRY_MAX_BYTES / 1024}KB；` +
+      `values 条目数 ≤ ${SUPPLY_VALUES_MAX_ENTRIES}（partition 固定只有 1 条）；子目录与非 \`.json\` 文件一律忽略。`
   )
   L.push(
     '- **绝不写进被分析的目标项目**：目标仓里只允许出现本规则文件 `.autodoc/AGENT_RULES.md`（AutoDoc 生成物，对你只读）。'
@@ -1281,8 +1605,9 @@ function buildRulesText(
       pass: '<与文件名一致>',
       agent: '<与文件名一致>',
       writtenAt: '2026-01-01T00:00:00.000Z',
-      basis: '<仅 modules / narratives 必填：逐字抄下面给出的当前值；函数类 pass 禁止携带>',
-      values: { '<对象id>': '<该 pass 的值，形状见第 4 节>' }
+      basis:
+        '<仅 modules / narratives 必填：逐字抄下面给出的当前值；partition 与函数类 pass 禁止携带>',
+      values: { '<对象id>': '<该 pass 的值，形状见第 4 节；partition 唯一键为 root>' }
     })
   )
   L.push('')
@@ -1292,13 +1617,17 @@ function buildRulesText(
   L.push('| agent | 是 | 非空字符串，须与文件名第二段一致 |')
   L.push('| writtenAt | 是 | ISO 时间字符串（须可被 Date.parse 解析）；**文件级时间戳，对该文件每个条目生效** |')
   L.push(
-    '| basis | modules / narratives **必填**，其余 pass **禁止** | 划分身份指纹，逐字抄下面的当前值；不符 = 契约已过期（模块划分已变），整份判错 |'
+    '| basis | modules / narratives **必填**，其余 pass（含 partition）**禁止** | 划分身份指纹，逐字抄下面的当前值；不符 = 契约已过期（模块划分已变），整份判错 |'
   )
-  L.push('| values | 是 | 非空 map：键 = 对象 id（moduleId / chainId / functionId），值 = 该 pass 的内容 |')
+  L.push('| values | 是 | 非空 map：键 = 对象 id（partition 只能是 `root`；其余为 moduleId / chainId / functionId），值 = 该 pass 的内容 |')
   L.push('')
   L.push(
     `- **当前 basis（逐字复制，不要改大小写或补空格）**：\`${baseline.basis}\`` +
       '。它是「模块划分 + 核心函数集」的指纹：只要重新划分或重新生成过，它就会变，届时必须重新导出本契约。'
+  )
+  L.push(
+    '- **partition 是 basis 的来源**：它不带旧 basis，应用后会重新计算 basis；因此合并 partition 之后，' +
+      '先前基于旧划分的 modules / narratives 文件会整份判「契约已过期」（这是预期行为，见第 10 节两轮契约）。'
   )
   L.push(
     '- **位置化 id 的双重对账**：`mod:N` / `chain:N` 是「当前划分下的位置编号」，重划分后可能指向别的对象。' +
@@ -1314,7 +1643,12 @@ function buildRulesText(
   L.push('- 校验结果与错误/忽略清单：`GET /api/agent-supply`；写完调 `POST /api/agent-supply/scan` 重新扫描复查。')
   L.push('')
 
-  L.push('## 4. 六个洞察侧 pass 的值形状（与本地 ai-cache 逐字段对齐；变更侧 changes pass 见第 9 节）')
+  L.push('## 4. 七个洞察侧 pass 的值形状（与本地 ai-cache 逐字段对齐；变更侧 changes pass 见第 9 节）')
+  L.push('')
+  L.push(
+    '> 应用顺序是固定的：**partition（结构层）先应用 → 其余 pass 再按新划分校验/合并**。' +
+      'partition 改变了 `mod:N` / `chain:N` 的位置含义，所以它自己不带 basis，而其它位置化 pass 以新 basis 为准。'
+  )
   L.push('')
   L.push('| pass | 语义 | 对象 id | 值形状 | 本地 ai-cache 键 |')
   L.push('| --- | --- | --- | --- | --- |')
@@ -1326,6 +1660,65 @@ function buildRulesText(
     )
   }
   L.push('')
+  L.push('### 4.0 `partition` — 整项目划分（结构层，先于其它 pass 应用）')
+  L.push('')
+  L.push(
+    '- `values` 只能有**唯一键 `root`**（不要写 moduleId / functionId 作键）；`basis` **禁止携带**（划分就是 basis 的来源）。'
+  )
+  L.push(`- 模块数 1..${MAX_PARTITION_MODULES}；每个模块的 \`name\` 全项目唯一、≤ ${LEN.moduleName} 字符；\`description\` 非空、≤ ${LEN.moduleDescription} 字符。`)
+  L.push(
+    '- `members` 是**函数稳定 id 数组**（逐字抄第 6 节内联索引或完整 `index.json` 的 `functions[].id`），' +
+      '不是函数名标签；每个函数必须**恰好出现一次**、且当前图谱里的**全部函数都要覆盖**（缺一个、重一个、编一个都整份拒绝）。'
+  )
+  L.push(
+    `- \`summary\` 可选（非空 ≤ ${LEN.partitionSummary} 字符）：项目级概述。不提供且结构发生变化时，旧摘要会被清空。`
+  )
+  L.push('- 原子校验：整份划分要么全量生效，要么整份拒绝（不会出现「半个划分」）。')
+  L.push('')
+  L.push('| 字段 | 必填 | 约束 |')
+  L.push('| --- | --- | --- |')
+  L.push('| values | 是 | 唯一键 `root` |')
+  L.push('| root.modules | 是 | 数组 1..200；模块名全项目唯一；成员恰好覆盖全部函数 |')
+  L.push(`| modules[].name | 是 | 非空 ≤ ${LEN.moduleName} 字符，全项目唯一 |`)
+  L.push(`| modules[].description | 是 | 非空 ≤ ${LEN.moduleDescription} 字符 |`)
+  L.push('| modules[].members | 是 | 非空数组，元素为函数稳定 id（逐字抄索引），同一函数只能出现一次 |')
+  L.push(`| root.summary | 否 | 非空 ≤ ${LEN.partitionSummary} 字符 |`)
+  L.push('')
+  {
+    const sampleModules = graph.modules.slice(0, 2).map((m) => ({
+      name: truncateText(m.name || '模块名', LEN.moduleName),
+      description: '一句话说明这个模块负责什么。',
+      members: m.functionIds.slice(0, 2)
+    }))
+    if (sampleModules.length === 0) {
+      sampleModules.push({
+        name: '核心业务',
+        description: '一句话说明这个模块负责什么。',
+        members: ['<从 index.json 的 functions[].id 逐字抄>']
+      })
+    }
+    L.push('**示例（只示意形状：members 仅列了前几个，实际必须覆盖全部函数）**')
+    L.push('')
+    L.push(
+      ...jsonBlock({
+        pass: 'partition',
+        agent: 'qoder',
+        writtenAt: '2026-01-01T00:00:00.000Z',
+        values: {
+          root: {
+            summary: '可选：这个项目整体在做什么。',
+            modules: sampleModules
+          }
+        }
+      })
+    )
+  }
+  L.push('')
+  L.push(
+    `> 当前图谱共 **${graph.nodes.size} 个函数**、${graph.modules.length} 个模块：整份 partition 的 members 合计必须恰好等于这 ${graph.nodes.size} 个函数。` +
+      '函数 id 请从完整索引 `functions[].id` 批量复制，不要凭记忆手写。'
+  )
+  L.push('')
   L.push('### 4.1 `modules` — 模块名称与职责描述')
   L.push('')
   L.push('| 字段 | 必填 | 约束 |')
@@ -1333,7 +1726,7 @@ function buildRulesText(
   L.push(`| name | 是 | **对账锚点**：必须逐字等于第 6 节索引里该 moduleId 的**当前**模块名（不是你自己新起的名字）；≤ ${LEN.moduleName} 字符 |`)
   L.push(`| description | 是 | 非空字符串 ≤ ${LEN.moduleDescription} 字符，一句话职责（这才是本 pass 真正供给的语义） |`)
   L.push('')
-  L.push('> 只写回名称与职责；模块**成员归属**由本地静态计算，不接受供给。')
+  L.push('> 只写回名称与职责；模块**成员归属**由 `partition`（4.0）决定，本 pass 不改变成员。')
   L.push('')
   L.push('### 4.2 `narratives` — 链路叙事 + 每步角色')
   L.push('')
@@ -1491,6 +1884,18 @@ function buildRulesText(
   L.push('## 6. 目标索引（取自**实时图谱**，不是历史快照）')
   L.push('')
   L.push(
+    `> **完整机器可读索引（不截断）**：\`${indexPath}\`（绝对路径）。` +
+      '它在 `supply/<projectId>/` 下、**不在** `insight/` 里，随本契约的生成/导出一起刷新；' +
+      '包含全部模块（id/name/description/source/functionIds/coreFunctionIds/fileIds）、全部函数（id/label/file/moduleId/核心/分类/调用数/注释块/链路）与全部链路。' +
+      '做 partition 时请直接按它批量抄 `functions[].id` 作为 members。'
+  )
+  L.push('')
+  L.push(
+    '> 下面这份是**内联索引**：为控制契约体积，每模块最多列固定数量的对象并显式标注「其余 N 个未列出」；' +
+      '截断掉的内容一律以完整 `index.json` 为准。'
+  )
+  L.push('')
+  L.push(
     `按模块分组。每模块最多列 ${INDEX_CORE_FUNCTIONS_PER_MODULE} 个核心函数、${INDEX_PENDING_PER_MODULE} 个待分类函数、` +
       `${INDEX_BLOCK_FUNCTIONS_PER_MODULE} 个含注释块函数、${INDEX_CHAINS_PER_MODULE} 条链路、${INDEX_FILES_PER_MODULE} 个文件；` +
       '被建议清单引用却因截断落在外面的 id 会补进该模块的「补齐」段。'
@@ -1589,6 +1994,11 @@ function buildRulesText(
   L.push('- 不写 `ai-cache.json`、不写 AutoDoc 的数据库与快照；合并与归档由 AutoDoc 完成。')
   L.push('- 只做静态阅读与理解；AutoDoc 也不会替你执行被分析项目的代码。')
   L.push(
+    '- **partition 自检（必做）**：modules 数 1..200；模块名全项目唯一；每个函数恰好属于一个模块、' +
+      '合计恰好覆盖当前全部函数；members 只写 `index.json` 里的函数稳定 id（不是函数名标签、不编造）。' +
+      '整份划分是原子的，错一个 id 就会整份被拒。'
+  )
+  L.push(
     `- 本次扫描：${scan.stats.fileCount} 个文件、${scan.stats.winnerCount} 个生效条目、` +
       `${scan.stats.errorCount} 条错误、${scan.stats.ignoredCount} 条忽略。`
   )
@@ -1613,8 +2023,19 @@ export interface SupplyRulesInput {
 export function generateSupplyRulesText(input: SupplyRulesInput): AgentSupplyRulesResult {
   const { graph, scan, suggestions, projectId, dir, baseline, changes } = input
   const index = buildSupplyIndex(graph, suggestions)
+  const indexPath = supplyIndexPathOf(dir)
   const generatedAt = new Date().toISOString()
-  let rulesText = buildRulesText(graph, scan, suggestions, index, projectId, dir, generatedAt, baseline)
+  let rulesText = buildRulesText(
+    graph,
+    scan,
+    suggestions,
+    index,
+    projectId,
+    dir,
+    indexPath,
+    generatedAt,
+    baseline
+  )
   if (changes) {
     const changesSection = buildChangesRulesSection(
       changes.scopes,
@@ -1625,9 +2046,11 @@ export function generateSupplyRulesText(input: SupplyRulesInput): AgentSupplyRul
     )
     rulesText = rulesText + '\n' + changesSection.join('\n')
   }
+  rulesText = rulesText + '\n' + twoRoundSection().join('\n')
   return {
     rulesText,
     generatedAt,
+    indexPath,
     stats: {
       fileCount: scan.stats.fileCount,
       entryCount: scan.stats.entryCount,
@@ -1638,6 +2061,26 @@ export function generateSupplyRulesText(input: SupplyRulesInput): AgentSupplyRul
       indexChainCount: index.chainCount
     }
   }
+}
+
+/** 结构层（partition）带来的两轮契约：先划分并合并，再按新 basis 写语义 pass */
+function twoRoundSection(): string[] {
+  return [
+    '## 10. 两轮契约（先划分，后语义）',
+    '',
+    '整项目划分是**结构层**：一旦合并，basis、`mod:N` / `chain:N` 的位置含义、模块核心表都会变。推荐严格分两轮：',
+    '',
+    '1. **第一轮：只写 `partition.<agent>.json`**（唯一键 root，完整覆盖全部函数）→ 调 `POST /api/agent-supply/merge` 合并 →' +
+      ' 重新生成/导出本契约，拿到新的 basis、模块 id 与索引（`index.json`）。',
+    '2. **第二轮：再写 modules / narratives / 其它语义 pass**，一律使用第一轮之后的新 basis 与新 id。',
+    '',
+    '- 如果你在合并 partition 之前就写了 modules / narratives，它们基于**旧划分**：partition 一合并，这些文件会整份判「契约已过期」。' +
+      '这是预期行为——重新导出契约后按新索引重写即可。',
+    '- **不改变划分时可以跳过第一轮**：直接按当前 basis 写语义 pass（partition 是可选的，不写就不会重划）。',
+    '- 同一批文件里同时有 partition 与其它 pass 时，AutoDoc 会先应用划分、再按新划分校验其余 pass；' +
+      '但 modules / narratives 的信封 basis 仍是旧值，因此同批提交位置化语义会被拒——这就是推荐两轮的原因。',
+    ''
+  ]
 }
 
 /* ------------------------- 服务级入口 ------------------------- */
@@ -1677,11 +2120,13 @@ function supplyBaselineOf(service: DocService, graph: ProjectGraph): AgentSupply
 export function collectAgentSupply(service: DocService, projectId: string): AgentSupplyContext {
   // ignoreSnapshot：供给层一律走实时视图（graph 已套用缓存里的 AI 划分，且只读缓存、绝不发起 AI 请求）。
   // 不吃快照短路——那条路径的 graph 是目录划分版本，mod:i 语义与界面所见不一致，且快照可能陈旧到漏掉新文件的函数。
-  // supplyOverlay:false：basis / 索引 / 建议只由「静态 + 本地 AI」决定，不能吃 Agent 自己的供给
-  // （否则 coreJudgment 供给改掉模块核心表 → flowsBasis 变 → 同一批文件在合并后被自己判成契约过期）。
+  // supplyOverlay:false：其余 pass 的基准只由「静态 + 本地 AI 划分」决定，不能吃 Agent 自己的语义供给；
+  // partition 是例外——它由 scanAgentSupply 在本请求私有的 graph 上先应用（见下），故返回的 graph 已是
+  // 「本地划分 + Agent partition」的最终结构视图，index / 建议 / baseline 全部基于它。
   const { graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
   const dir = supplyDirOf(service.storage.dataPath, projectId)
   const classification = service.normalized.config.classification
+  // 两阶段扫描：partition 先校验并应用到 graph，其余 pass 再按新划分校验（graph 只在本请求内可见）。
   const insightScan = scanAgentSupply({ dir, graph, classification })
 
   // G5：变更侧供给（同时扫描 changes/ 子目录）
@@ -1749,6 +2194,8 @@ export function exportAgentSupplyRules(
   })
   mkdirSync(ctx.dir, { recursive: true })
   mkdirSync(ctx.changes.dir, { recursive: true })
+  // 完整机器可读索引（`supply/<projectId>/index.json`，AutoDoc 自身生成物；绝不写进目标仓）
+  writeSupplyIndexFile(ctx.dir, buildSupplyIndexFile(ctx.graph, projectId))
   const targetDir = join(service.rootDir, '.autodoc')
   mkdirSync(targetDir, { recursive: true })
   const path = join(targetDir, 'AGENT_RULES.md')
