@@ -2,6 +2,18 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-20 · H1：Agent 整项目划分供给（partition）——结构层先行 + 两轮契约 + 全量索引 · server+shared-types+web
+
+- **动机**：用户实测 Agent-only 模式（无 KEY）下只有按目录的静态功能划分、业务脉络树不可用；确认最大范围 = partition + flows + keySteps，采用「两轮契约」：Agent 先供整项目划分 → basis 刷新 → 旧的语义文件自然过期 → 重新导出契约 → Agent 第二轮补语义。H1 只做 partition。
+- **后端**：新增结构层 pass `partition`（唯一键 root；全量覆盖 graph.nodes、模块名唯一、成员/描述非空、8MB、≤200 模块、禁止 basis）。扫描两阶段：先把划分应用到**请求私有图**（`applyPartitionPreservingCores` 保留核心判定），再以新的 `flowsBasis` 校验其余 pass——旧划分下的位置化 id 供给自然失效。`graph.fingerprint` 不含划分，故 partition 缓存只按指纹读、其它 pass 仍按 basis 过滤。`applyAgentPartitionToInsight` 同步 modules/moduleIds/chain.moduleId/模块核心表/coreScore，结构变化清空旧脉络树（aiStatus.flows='skipped'），同值幂等。loadInsight / refreshInsightAI（有 KEY 与无 KEY）都先套 partition；refresh 命中 Agent 划分时跳过本地 aiPartition。merge 路径先 partition 再算 basis；内容哈希纳入 partitionSource、模块来源/成员、moduleIds/chain.moduleId，保证同内容不多存快照、成员变更必产新快照。
+- **终审修复**：①Agent 划分的 `status.partition='ok'` 不再写进本地 aiStatus 缓存（撤回供给后不留假状态，状态由 overlay 在内存记 aiSource='agent'）；②insight.functions.coreScore 随新划分同步（否则全项目核心排序与模块核心表矛盾）；③结构签名对成员排序，与 flowsBasis/内容哈希一致（仅重排不清树）；④flows 快照必须 basis 精确匹配，无 basis 旧树视同 stale（生产阶段不做兼容）；⑤`readPartitionSupply` 逐项校验缓存形状，损坏缓存返回 null 不让 GET 500；⑥GET 契约的 index.json 写盘失败不再连累响应（readOnly 跳过）。
+- **契约/索引**：§4.0 partition schema 与约束、§10 两轮契约；§3 说明 partition 是 basis 来源且划分后旧文件过期；新增 `supply/<projectId>/index.json` 全量机器可读索引（不写目标仓、不在 insight/ 内），扫不到 partition 时建议清单置顶「整项目重新划分」。
+- **前端**：pass 顺序/标签加 partition；分区标签三态（AI/Agent/目录）；无 KEY 的 Agent-only 模式也显示「功能模块划分」区块，反馈输入仅在 AI 可用时出现。
+- **影响范围**：shared-types（partition 类型/来源值/建议 kind/索引路径）、server（supplyPartition.ts 新；agentSupply/agentSupplyMerge/supplyCache/insight/graph/app 改）、web（utils/InsightHome）；core 未改，不新增依赖。
+- **测试**：`pnpm lint` 全绿；`pnpm test` 全绿（core 170 / web 259 / server 387 = 816）。新增 supplyPartition 10 例（核心保留与 coreScore/moduleIds 同步、结构/描述变更对树的差异、幂等、merge basis 与缓存读回、内容哈希成员变化、无 KEY overlay 旧 basis 被拒/新 basis 生效、无 basis 树作废、损坏缓存防御、summary 超长判错）。
+- **遗留**：force/forcePartition 清空供给缓存后前端无提示（H3）；「文件全删后 live 仍显示旧供给」的 no-winner merge 入口仍不可达（H1 前既有，H3 决定）；H2 做 flows + keySteps 供给，H3 做前端完整适配与实机复验。
+- **关联 commit**：02b09bb。
+
 ## 2026-10-20 · G5~G6：变更侧 Agent 供给（第二期）——提交叙事/链路解释/函数角色 + 影响页呈现 · server+shared-types+web
 
 - **G5 后端**（8ef7182）：外部 Agent 供给变更侧三层语义，落 `.autodoc/supply/<projectId>/changes/changes.<agent>.json`，值形状 `{ narrative:{what,why,risks[]}, affectedChains:{chainId:{entryId,impact}}, changeRoles:{functionId:一句话} }`（至少一层）。scopeId = `commit:<hash>` 或 `workspace:<batchDate>`；**读时合并**挂在 `GET /api/impact/changeset` 的可选字段 `agentSemantics`——变更语义不属于洞察版本，故不归档快照、不走回滚指针、无派生缓存，撤回文件后下次请求自然消失。按裁决把 `'changes'` 并入 `AgentSupplyPass` **共用第一期骨架**（信封解析/`cutEcho`/体积闸口/`pickWinners`/错误清单/统计），删掉平行字段与约 250 行重复实现；`AgentSupplyError` 加 `pass` 区分来源，`stats.perPass` 覆盖 changes。位置化 id 双重对账照搬（`affectedChains` 要求文件级 `basis` + 条目级 `entryId` 锚点，纯稳定 id 的供给豁免 basis；一条 chain 漂移只丢该条，不废整个 scope 的三层）。`workspace` scope 同时接受 `workspace:latest`（服务端解析当前批次、永不漂移，契约推荐写法）与精确 batchDate（60s 窗口内变体归一到规范值），窗口外判错并在原因里给出规范 scopeId——修掉初审实测的两种静默失效（真实库 519 个不同 date；窗口内变体「校验通过但索引里找不到」、2.5 个月前旧批次 0 错通过却永远匹配不到）。契约新增第 9 节（信封/值形状/生效方式/提交批次索引含 `entryId` 锚点/建议清单/示例），建议 ⊆ 索引改为**渲染后**硬不变式断言（原 `selfCheckChangesSuggestions` 恒为 no-op）；commit subject/author 等外部文本一律截断去换行；读路径无候选文件即早退、不建索引建议、复用已取的 snapshotRecords。变更记录与批注全程只读，本轮无新增写接口。
