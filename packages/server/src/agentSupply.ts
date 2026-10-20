@@ -27,6 +27,7 @@ import type {
   CallRole,
   Category,
   ClassificationConfig,
+  ExternalSymbolInfo,
   FunctionCategory,
   FunctionDoc,
   InsightChain,
@@ -50,8 +51,8 @@ import { collectChangesSupply, buildChangesRulesSection, type ChangesSupplyConte
  * 本模块只读取、严格校验、按对象聚合出「谁赢了」，并生成契约文本（schema + 索引 + 建议）；
  * **不写回缓存、不做合并**（那是 G2）。目标仓只会出现规则契约文件本身。
  *
- * 九个洞察侧语义 pass（partition + flows + modules + narratives + categories + coreJudgment + coreRoles +
- * blocks + keySteps）+ 变更侧 changes → 本地 ai-cache 键 → 值形状（供给文件 `values` 的值逐字段照搬第 4 列）：
+ * 十个洞察侧语义 pass（partition + flows + modules + narratives + categories + coreJudgment + coreRoles +
+ * blocks + keySteps + externals）+ 变更侧 changes → 本地 ai-cache 键 → 值形状（供给文件 `values` 的值逐字段照搬第 4 列）：
  * | 语义                     | pass         | 对象 id     | 本地 ai-cache 键                | 值形状                                              |
  * | ------------------------ | ------------ | ----------- | ------------------------------- | --------------------------------------------------- |
  * | ⓪整项目划分              | partition    | root（唯一）| （结构层，不写同名缓存）        | `{ summary?, modules: [{ name, description, members: [functionId] }] }`（须完整覆盖、模块名唯一） |
@@ -63,18 +64,20 @@ import { collectChangesSupply, buildChangesRulesSection, type ChangesSupplyConte
  * | ④函数级用途（系统角色）  | coreRoles    | functionId  | `<图指纹>:coreRoles`            | `string`（一句话；map 的键即函数 id）                |
  * | ④内部步骤                | blocks       | functionId  | `chunk:blocks:<hash>`           | `InternalStep[]`（blockIndexes 指向该函数 codeBlocks 下标） |
  * | ④调用主干（关键步骤）    | keySteps     | functionId  | `chunk:keySteps:<hash>`         | `{ calleeNames: string[] }`（该函数 calls[].calleeName 的子集；空数组=无主干） |
+ * | ④外部库补全              | externals    | `${module}::${symbol}` | `<图指纹>:externals` | `{ purpose, signature? }`（module=裸模块说明符/内置模块，按最后一个 `::` 拆分） |
  *
  * 位置化 id 的双重对账（mod:i / chain:N 重划分后会漂移指向别的对象）：
  * - 文件级：modules / narratives / flows 信封必须携带 `basis` = 当前划分身份指纹（flowsBasis 口径：模块组成/名称/函数归属，不含核心判定），不匹配整份判「契约已过期」；
  * - 条目级：modules.name / narratives.entryId 是逐字抄自契约索引的锚点，与实时划分比对，漂移只判该条。
- * - 函数类 pass（含 keySteps）用稳定 id，不带 basis / 锚点字段。
+ * - 函数类 pass（含 keySteps）用稳定 id，不带 basis / 锚点字段；externals 用模块说明符 + 符号名，也不带 basis。
  * - partition 是 basis 的来源：禁止携带 basis，且必须先于其它 pass 应用（两阶段扫描）；
  * - flows 是整树语义 pass：依赖 partition 应用后的 basis，故在 partition 之后、其余语义 pass 之前应用。
  *
- * 不接受外部供给：externals（本地 AI 凭训练知识补全外部库符号，属本地专属）。
+ * externals 只补符号用途/签名（写入 insight.externals），不改 CallEdge、calleeCategory 与调用图；
+ * 本地 AI 的 externals pass 保持原样，Agent 供给按符号字段级合并。
  */
 
-/** 洞察侧九个语义 pass + 变更侧 changes（顺序即契约文本与建议清单的呈现顺序；partition 是结构层，必须最先应用） */
+/** 洞察侧十个语义 pass + 变更侧 changes（顺序即契约文本与建议清单的呈现顺序；partition 是结构层，必须最先应用） */
 export const SUPPLY_PASSES: AgentSupplyPass[] = [
   'partition',
   'flows',
@@ -85,6 +88,7 @@ export const SUPPLY_PASSES: AgentSupplyPass[] = [
   'coreRoles',
   'blocks',
   'keySteps',
+  'externals',
   'changes'
 ]
 
@@ -94,7 +98,7 @@ interface PassMeta {
   /** 语义编号（⓪ = 结构层，先于 ①~④ 应用） */
   group: string
   /** 对象 id 种类（project = partition / flows 的唯一键 root） */
-  idKind: 'project' | 'moduleId' | 'chainId' | 'functionId'
+  idKind: 'project' | 'moduleId' | 'chainId' | 'functionId' | 'externalSymbol'
   /** 本地 ai-cache 键（G2 的写回目标） */
   cacheKey: string
   /** 值形状一行说明 */
@@ -176,6 +180,14 @@ const PASS_META: Record<AgentSupplyPass, PassMeta> = {
     shape: '{ calleeNames: string[] }（该函数 calls[].calleeName 的子集；空数组=无主干）',
     suggestion: 'function-key-steps'
   },
+  externals: {
+    label: '外部库补全',
+    group: '④',
+    idKind: 'externalSymbol',
+    cacheKey: '<图指纹>:externals',
+    shape: '{ purpose, signature? }（objectId = `${module}::${symbol}`，按最后一个 `::` 拆分）',
+    suggestion: 'external-symbol'
+  },
   changes: {
     label: '变更侧语义（提交叙事/链路影响/函数角色）',
     group: '⑤',
@@ -188,7 +200,6 @@ const PASS_META: Record<AgentSupplyPass, PassMeta> = {
 
 /** 明确拒绝的 pass 与原因（比「不认识」更有用：告诉 Agent 为什么、该改用什么） */
 const REJECTED_PASS_REASONS: Record<string, string> = {
-  externals: '外部库补全是本地 AI 专属能力，供给通道不接受',
   changes: 'changes 属于变更侧供给，请写进 changes/ 子目录（文件名 changes.<agent>.json），见契约第 9 节'
 }
 
@@ -246,6 +257,9 @@ const LEN = {
   stepDetail: 1000,
   /** keySteps 的 calleeName 锚点（契约要求逐字抄 calls[].calleeName） */
   calleeName: 400,
+  /** externals 的符号用途/常见签名（与 ExternalSymbolInfo 对齐；一句话中文） */
+  externalPurpose: 500,
+  externalSignature: 500,
   /** flows 节点字段上限（与 supplyFlows 的形状校验保持一致） */
   flowLabel: 200,
   flowSummary: 2000,
@@ -314,6 +328,55 @@ function isSupplyPass(v: string): v is AgentSupplyPass {
   return (SUPPLY_PASSES as string[]).includes(v)
 }
 
+/** 图谱里的一个外部库符号（objectId = `${module}::${symbol}`）及其调用点锚点 */
+export interface GraphExternalSymbol {
+  /** `${externalModule}::${symbol}`（externals pass 的 objectId） */
+  id: string
+  /** 裸模块说明符 / 内置模块（如 vue、node:fs） */
+  module: string
+  /** 调用点 calleeName（逐字） */
+  symbol: string
+  /** 调用点锚点（functionId + 行号；按 functionId、line 升序，重复调用点去重） */
+  callers: { functionId: string; line: number }[]
+}
+
+/**
+ * 从实时图谱收集外部库符号：calleeId 缺失（外部/未解析）且 externalModule 非空。
+ * 与本地 AI externals 的候选口径不同：这里不做 workspace 自有包过滤——索引给出图谱里的全部外部符号，
+ * Agent 可按自己的判断补全；排序按 module、symbol，保证契约与 index.json 跨次生成确定。
+ */
+export function collectGraphExternalSymbols(graph: ProjectGraph): GraphExternalSymbol[] {
+  const byKey = new Map<
+    string,
+    { module: string; symbol: string; callers: Map<string, { functionId: string; line: number }> }
+  >()
+  for (const [functionId, fn] of graph.nodes) {
+    for (const call of fn.calls) {
+      if (call.calleeId) continue
+      const mod = call.externalModule
+      if (typeof mod !== 'string' || mod.trim().length === 0) continue
+      const symbol = call.calleeName
+      if (symbol.trim().length === 0) continue
+      const key = `${mod}\u0000${symbol}`
+      let item = byKey.get(key)
+      if (!item) {
+        item = { module: mod, symbol, callers: new Map() }
+        byKey.set(key, item)
+      }
+      item.callers.set(`${functionId}\u0000${call.line}`, { functionId, line: call.line })
+    }
+  }
+  const out: GraphExternalSymbol[] = []
+  for (const item of byKey.values()) {
+    const callers = [...item.callers.values()].sort(
+      (a, b) => a.functionId.localeCompare(b.functionId) || a.line - b.line
+    )
+    out.push({ id: `${item.module}::${item.symbol}`, module: item.module, symbol: item.symbol, callers })
+  }
+  out.sort((a, b) => a.module.localeCompare(b.module) || a.symbol.localeCompare(b.symbol))
+  return out
+}
+
 /** 函数可读标签：类.名（无类则裸名） */
 function fnLabel(id: string, graph: ProjectGraph): string {
   const fn = graph.nodes.get(id)
@@ -340,6 +403,8 @@ interface ValidateCtx {
   chains: Map<string, InsightChain>
   /** 当前划分身份指纹（flowsBasis 口径，不含核心判定）：modules / narratives / flows 信封的文件级 basis 对账 */
   basis: string
+  /** 外部库符号 id（`module::symbol`）→ 调用点锚点：externals 的对象 id 校验 */
+  externalSymbols: Map<string, GraphExternalSymbol>
   /** 「配置规则是否命中」判定（内部按函数缓存：规则匹配含 glob/正则，同一函数只算一次） */
   configHit: (fnId: string) => boolean
 }
@@ -655,6 +720,24 @@ function validateKeyStepsValue(raw: unknown, fn: FunctionDoc): Outcome<AgentSupp
 }
 
 /**
+ * 外部库符号补全校验：只接受 `{ purpose, signature? }`（与 ExternalSymbolInfo 对齐），
+ * purpose 必填非空；signature 可选，给了就必须是非空字符串。不给 symbol/模块字段——
+ * 它们已经在 objectId 里（`${module}::${symbol}`），重复写会与 objectId 冲突。
+ */
+function validateExternalValue(raw: unknown): Outcome<ExternalSymbolInfo> {
+  if (!isPlainObject(raw)) return fail(`值必须是对象 { purpose, signature? }（收到 ${echoValue(raw)}）`)
+  const extra = checkNoExtraKeys(raw, ['purpose', 'signature'])
+  if (extra) return extra
+  const purpose = requireText(raw, 'purpose', LEN.externalPurpose)
+  if (purpose.kind !== 'ok') return purpose
+  const signature = optionalText(raw, 'signature', LEN.externalSignature)
+  if (signature.kind !== 'ok') return signature
+  const value: ExternalSymbolInfo = { purpose: purpose.value }
+  if (signature.value !== undefined) value.signature = signature.value
+  return { kind: 'ok', value }
+}
+
+/**
  * 整项目划分校验（原子：任何覆盖缺口/重复/未知 id/重名都整份拒绝，不做逐条降级）。
  * 集合类问题（缺哪些函数、哪些 id 重复）一次报全（各取前几条），避免 Agent 反复试错。
  */
@@ -755,7 +838,9 @@ function missingIdReason(pass: AgentSupplyPass, objectId: string): string {
         ? '当前实时图谱的模块集'
         : kind === 'chainId'
           ? '当前实时图谱的链路集'
-          : '整项目划分（唯一键 root）'
+          : kind === 'externalSymbol'
+            ? '当前实时图谱的外部库符号集（objectId 须为 `${externalModule}::${symbol}`，按最后一个 `::` 拆分）'
+            : '整项目划分（唯一键 root）'
   return `对象 id 不在${where}中：${cutEcho(objectId)}`
 }
 
@@ -849,6 +934,12 @@ function validateEntry(
       const fn = ctx.graph.nodes.get(objectId)
       if (!fn) return errorAt(missingIdReason(pass, objectId))
       return finalize(validateKeyStepsValue(raw, fn), (value) =>
+        entryOf(pass, objectId, value, agent, writtenAt, file)
+      )
+    }
+    case 'externals': {
+      if (!ctx.externalSymbols.has(objectId)) return errorAt(missingIdReason(pass, objectId))
+      return finalize(validateExternalValue(raw), (value) =>
         entryOf(pass, objectId, value, agent, writtenAt, file)
       )
     }
@@ -1106,6 +1197,7 @@ export function scanAgentSupply(opts: AgentSupplyScanOptions): AgentSupplyScanRe
     modules: new Map(opts.graph.modules.map((m) => [m.id, m])),
     chains: new Map(opts.graph.chains.map((c) => [c.id, c])),
     basis: flowsBasis(opts.graph),
+    externalSymbols: new Map(collectGraphExternalSymbols(opts.graph).map((s) => [s.id, s])),
     configHit: makeConfigHitFn(opts.graph, opts.classification)
   })
 
@@ -1354,6 +1446,28 @@ export function suggestSupplyTasks(
       )
       .slice(0, SUGGESTIONS_PER_KIND)
   )
+  // externals 收尾（同为 ④）：按符号被调用次数降序；已供给的符号不再建议。
+  const externalSymbols = collectGraphExternalSymbols(graph)
+  const externalCallCount = new Map(externalSymbols.map((s) => [s.id, s.callers.length]))
+  const externalSuggestions: AgentSupplySuggestion[] = []
+  for (const symbol of externalSymbols) {
+    if (has('externals', symbol.id)) continue
+    externalSuggestions.push({
+      kind: PASS_META.externals.suggestion,
+      pass: 'externals',
+      targetId: symbol.id,
+      label: `${symbol.module}.${symbol.symbol}（${symbol.callers.length} 处调用）`
+    })
+  }
+  out.push(
+    ...externalSuggestions
+      .sort(
+        (a, b) =>
+          (externalCallCount.get(b.targetId) ?? 0) - (externalCallCount.get(a.targetId) ?? 0) ||
+          a.targetId.localeCompare(b.targetId)
+      )
+      .slice(0, SUGGESTIONS_PER_KIND)
+  )
   return out
 }
 
@@ -1373,6 +1487,9 @@ export interface SupplyIndexChain {
   path: string[]
   label: string
 }
+
+/** 契约内联索引/index.json 的外部库符号条目（objectId / module / symbol + 调用点锚点） */
+export type SupplyIndexExternalSymbol = GraphExternalSymbol
 
 export interface SupplyIndexModule {
   id: string
@@ -1404,6 +1521,8 @@ export interface SupplyIndexModule {
 
 export interface SupplyIndex {
   modules: SupplyIndexModule[]
+  /** 外部库符号（externals 候选）：objectId = `${module}::${symbol}` */
+  externalSymbols: SupplyIndexExternalSymbol[]
   /** 索引里列出的函数 id 数（跨段去重） */
   functionCount: number
   chainCount: number
@@ -1418,6 +1537,7 @@ export function buildSupplyIndex(
   graph: ProjectGraph,
   suggestions: AgentSupplySuggestion[]
 ): SupplyIndex {
+  const externalSymbols = collectGraphExternalSymbols(graph)
   const forcedFunctions = new Set(
     suggestions.filter((s) => PASS_META[s.pass].idKind === 'functionId').map((s) => s.targetId)
   )
@@ -1512,7 +1632,7 @@ export function buildSupplyIndex(
       extraChains
     })
   }
-  return { modules, functionCount: indexedFunctions.size, chainCount, fileCount }
+  return { modules, externalSymbols, functionCount: indexedFunctions.size, chainCount, fileCount }
 }
 
 /* ------------------------- 完整机器可读索引（index.json） ------------------------- */
@@ -1566,6 +1686,11 @@ export interface SupplyIndexFile {
   modules: SupplyIndexFileModule[]
   functions: SupplyIndexFileFunction[]
   chains: SupplyIndexFileChain[]
+  /**
+   * 全部外部库符号（不截断）：id = `${module}::${symbol}`，callers 为调用点锚点。
+   * 做 externals pass 时 values 的键必须逐字抄这里的 id。
+   */
+  externalSymbols: SupplyIndexExternalSymbol[]
 }
 
 /** 完整索引的绝对路径：`dirname(supplyDir)/index.json` = `supply/<projectId>/index.json` */
@@ -1615,6 +1740,12 @@ export function buildSupplyIndexFile(graph: ProjectGraph, projectId: string): Su
       moduleId: c.moduleId,
       path: [...c.path],
       pathLabels: c.path.map((id) => fnLabel(id, graph))
+    })),
+    externalSymbols: collectGraphExternalSymbols(graph).map((s) => ({
+      id: s.id,
+      module: s.module,
+      symbol: s.symbol,
+      callers: s.callers.map((c) => ({ functionId: c.functionId, line: c.line }))
     }))
   }
 }
@@ -1653,6 +1784,10 @@ interface ExampleIds {
   calleeNames: string[]
   /** flows 示例叶子用的函数稳定 id（取自首个模块） */
   flowLeafFunctionId: string | null
+  /** externals 示例用的真实外部符号 id（`module::symbol`）；无外部调用时为 null */
+  externalSymbolId: string | null
+  externalSymbolModule: string | null
+  externalSymbolName: string | null
 }
 
 /** 示例里的对象 id 一律取索引中的真实 id（可直接校验通过）；确实没有时给占位并重申「不得编造」纪律 */
@@ -1670,6 +1805,7 @@ function exampleIds(index: SupplyIndex, graph: ProjectGraph): ExampleIds {
         .slice(0, 2)
         .map((c) => c.calleeName)
     : []
+  const externalSymbol = collectGraphExternalSymbols(graph)[0]
   return {
     moduleId: firstModule?.id ?? '<从下方索引原样复制一个 moduleId>',
     moduleName: firstModule?.name ?? '某模块',
@@ -1682,7 +1818,10 @@ function exampleIds(index: SupplyIndex, graph: ProjectGraph): ExampleIds {
     blockCount: blockId ? (graph.nodes.get(blockId)?.codeBlocks.length ?? 0) : 0,
     callFunctionId,
     calleeNames,
-    flowLeafFunctionId: graph.modules[0]?.functionIds[0] ?? null
+    flowLeafFunctionId: graph.modules[0]?.functionIds[0] ?? null,
+    externalSymbolId: externalSymbol?.id ?? null,
+    externalSymbolModule: externalSymbol?.module ?? null,
+    externalSymbolName: externalSymbol?.symbol ?? null
   }
 }
 
@@ -1743,7 +1882,7 @@ function buildRulesText(
 
   L.push('## 1. 供给范围（能写什么、不能写什么）')
   L.push('')
-  L.push('- 洞察侧：九个 pass（partition + flows + 七个语义 pass，见第 4 节），落盘在 `insight/` 子目录。')
+  L.push('- 洞察侧：十个 pass（partition + flows + 八个语义 pass，见第 4 节），落盘在 `insight/` 子目录。')
   L.push('- 变更侧：`changes` pass（提交叙事/链路影响/函数角色），落盘在 `changes/` 子目录（见第 9 节）。')
   L.push(
     '- **静态层由本地计算，不可覆盖**：tree-sitter 图谱、调用边、函数稳定 ID、变更集、注释块提取。' +
@@ -1773,7 +1912,7 @@ function buildRulesText(
     '- 文件名：**`<pass>.<agent>.json`**，一个 pass 一类一份；多 Agent 并存靠文件名区分' +
       '（如 `narratives.qoder.json`、`narratives.codex.json`）。'
   )
-  L.push('  - `<pass>` 取第 4 节九个之一；`<agent>` 是你的标识，只用字母数字与 `.` `_` `-`（≤64 字符）。')
+  L.push('  - `<pass>` 取第 4 节十个之一；`<agent>` 是你的标识，只用字母数字与 `.` `_` `-`（≤64 字符）。')
   L.push('  - 文件内的 `pass` / `agent` 字段必须与文件名**逐字一致**，否则整份判错。')
   L.push(
     `- 编码 UTF-8；\`partition\` / \`flows\` 单文件与单条目 ≤ ${SUPPLY_PARTITION_FILE_MAX_BYTES / 1024 / 1024}MB，` +
@@ -1804,9 +1943,9 @@ function buildRulesText(
   L.push('| agent | 是 | 非空字符串，须与文件名第二段一致 |')
   L.push('| writtenAt | 是 | ISO 时间字符串（须可被 Date.parse 解析）；**文件级时间戳，对该文件每个条目生效** |')
   L.push(
-    '| basis | modules / narratives / flows **必填**，其余 pass（含 partition、函数类）**禁止** | 划分身份指纹，逐字抄下面的当前值；不符 = 契约已过期（模块划分已变），整份判错 |'
+    '| basis | modules / narratives / flows **必填**，其余 pass（含 partition、函数类、externals）**禁止** | 划分身份指纹，逐字抄下面的当前值；不符 = 契约已过期（模块划分已变），整份判错 |'
   )
-  L.push('| values | 是 | 非空 map：键 = 对象 id（partition / flows 只能是 `root`；其余为 moduleId / chainId / functionId），值 = 该 pass 的内容 |')
+  L.push('| values | 是 | 非空 map：键 = 对象 id（partition / flows 只能是 `root`；其余为 moduleId / chainId / functionId / externals 的 `module::symbol`），值 = 该 pass 的内容 |')
   L.push('')
   L.push(
     `- **当前 basis（逐字复制，不要改大小写或补空格）**：\`${baseline.basis}\`` +
@@ -1820,7 +1959,8 @@ function buildRulesText(
   L.push(
     '- **位置化 id 的双重对账**：`mod:N` / `chain:N` 是「当前划分下的位置编号」，重划分后可能指向别的对象。' +
       '除文件级 `basis` 外，`modules` 条目必须带 `name`、`narratives` 条目必须带 `entryId` 作为**条目级锚点**' +
-      '（逐字抄第 6 节索引），不符只判该条错、同文件其余条目照用。函数类 pass 用稳定 id，不需要锚点。'
+      '（逐字抄第 6 节索引），不符只判该条错、同文件其余条目照用。函数类 pass 用稳定 id，不需要锚点；' +
+      '`externals` 用 `${module}::${symbol}`，同样不需要锚点。'
   )
   L.push('')
   L.push('- **逐条校验**：一条坏不影响同文件其余条目；坏条目进错误清单（含文件内定位与原因），好条目照用。')
@@ -1831,7 +1971,7 @@ function buildRulesText(
   L.push('- 校验结果与错误/忽略清单：`GET /api/agent-supply`；写完调 `POST /api/agent-supply/scan` 重新扫描复查。')
   L.push('')
 
-  L.push('## 4. 九个洞察侧 pass 的值形状（与本地 ai-cache 逐字段对齐；变更侧 changes pass 见第 9 节）')
+  L.push('## 4. 十个洞察侧 pass 的值形状（与本地 ai-cache 逐字段对齐；变更侧 changes pass 见第 9 节）')
   L.push('')
   L.push(
     '> 应用顺序是固定的：**partition（结构层）先应用 → flows（整树语义，按新 basis 校验并整树替换）→ 其余 pass 再按新划分校验/合并**。' +
@@ -2020,6 +2160,35 @@ function buildRulesText(
   L.push('| relatedChainIds | 否 | 0..50 个链路 id；必须存在于当前图谱 |')
   L.push('| children | 根必填 | 0..32 个同构节点；根至少 1 个；总节点 ≤ 500、深度 ≤ 8 |')
   L.push('')
+  L.push('### 4.9 `externals` — 外部库补全（按符号字段级合并）')
+  L.push('')
+  L.push(
+    '- **对象 id = `${externalModule}::${symbol}`**（如 `node:fs::readFile`、`vue::ref`）：' +
+      '`externalModule` 是调用边的模块说明符（含 `node:` 内置模块），`symbol` 是 `calleeName`。' +
+      '解析时按**最后一个** `::` 拆分，所以 `node:fs` 这类带冒号的模块不会拆错。'
+  )
+  L.push(
+    '- 只能供给第 6 节「外部库符号」索引或 `index.json` 的 `externalSymbols[].id` 里列出的符号；' +
+      '编造 symbol / 模块不存在 → 该条判错。'
+  )
+  L.push(
+    '- **只做语义补全**：写入 `insight.externals[module][symbol]`，按符号字段级合并（同模块其它符号不受影响）；' +
+      '不改 `CallEdge`、`calleeCategory`、`calleeId` 与调用图，也不改本地 AI 的 externals 生成逻辑。'
+  )
+  L.push('')
+  L.push('| 字段 | 必填 | 约束 |')
+  L.push('| --- | --- | --- |')
+  L.push(`| purpose | 是 | 非空字符串 ≤ ${LEN.externalPurpose} 字符，一句话中文用途 |`)
+  L.push(`| signature | 否 | 若给须为非空字符串 ≤ ${LEN.externalSignature} 字符（常见签名；不确定就省略） |`)
+  L.push('')
+  L.push(
+    `- 限制：单文件 ≤ ${SUPPLY_FILE_MAX_BYTES / 1024}KB、单条目 ≤ ${SUPPLY_ENTRY_MAX_BYTES / 1024}KB、` +
+      `values 条目数 ≤ ${SUPPLY_VALUES_MAX_ENTRIES}；不携带 \`basis\`（外部符号用模块说明符 + 符号名，非位置化 id）。`
+  )
+  L.push(
+    '- 同一个符号被多家 Agent 供给时仍按 `writtenAt` 最新者赢；冲突只影响该符号，不会整模块覆盖。'
+  )
+  L.push('')
 
   L.push('## 5. 完整示例（用本仓真实 id，照抄改内容即可）')
   L.push('')
@@ -2192,19 +2361,48 @@ function buildRulesText(
       '所有 id 都要逐字来自第 6 节索引或 `index.json`。'
   )
   L.push('')
+  L.push(`**示例 I：\`externals.${exampleAgent}.json\`**`)
+  L.push('')
+  L.push(
+    ...jsonBlock({
+      pass: 'externals',
+      agent: exampleAgent,
+      writtenAt: exampleTime,
+      values: {
+        [ex.externalSymbolId ?? '<从第 6 节「外部库符号」或 index.json 的 externalSymbols[].id 逐字抄一个>']: {
+          purpose: '这个外部符号提供什么能力（一句话中文用途）。',
+          signature: '可选：常见签名；不确定就删掉这个字段。'
+        }
+      }
+    })
+  )
+  L.push('')
+  if (ex.externalSymbolId) {
+    L.push(
+      `> 示例 I 的键来自当前图谱的真实外部调用：\`${ex.externalSymbolModule}.${ex.externalSymbolName}\` ` +
+        `（objectId \`${ex.externalSymbolId}\`，按最后一个 \`::\` 拆分模块与符号）。`
+    )
+    L.push('')
+  }
 
   L.push('## 6. 目标索引（取自**实时图谱**，不是历史快照）')
   L.push('')
   L.push(
     `> **完整机器可读索引（不截断）**：\`${indexPath}\`（绝对路径）。` +
       '它在 `supply/<projectId>/` 下、**不在** `insight/` 里，随本契约的生成/导出一起刷新；' +
-      '包含全部模块（id/name/description/source/functionIds/coreFunctionIds/fileIds）、全部函数（id/label/file/moduleId/核心/分类/调用数/调用点/注释块/链路）与全部链路。' +
+      '包含全部模块（id/name/description/source/functionIds/coreFunctionIds/fileIds）、全部函数（id/label/file/moduleId/核心/分类/调用数/调用点/注释块/链路）、全部链路，' +
+      '以及全部外部库符号（`externalSymbols[]`：id/module/symbol/callers[functionId,line]）。' +
       '做 partition 时请直接按它批量抄 `functions[].id` 作为 members。'
   )
   L.push('')
   L.push(
     '> `functions[].calls` 按调用点行号升序排列，每项含 `line` / `calleeName` / `calleeId` / `role`。' +
       '做 keySteps 时 `calleeNames` 必须逐字抄其中的 `calleeName`（**不要写函数名标签或编造**）。'
+  )
+  L.push('')
+  L.push(
+    '> `externalSymbols[]` 是 externals pass 的对象清单：`id` 为 `${module}::${symbol}`，' +
+      '`callers` 给出调用它的 `functionId` 与 `line` 锚点。做 externals 时 `values` 的键必须逐字抄 `externalSymbols[].id`。'
   )
   L.push('')
   L.push(
@@ -2293,6 +2491,25 @@ function buildRulesText(
     }
     L.push('')
   }
+  if (index.externalSymbols.length === 0) {
+    L.push('### 外部库符号（externals 候选）')
+    L.push('')
+    L.push('- （当前图谱没有可补全的外部库符号）')
+    L.push('')
+  } else {
+    L.push(`### 外部库符号（externals 候选，共 ${index.externalSymbols.length} 个）`)
+    L.push('')
+    L.push('> 对象 id = `${module}::${symbol}`；做 externals 时 `values` 的键逐字抄下面的 id。')
+    L.push('')
+    for (const symbol of index.externalSymbols) {
+      const first = symbol.callers[0]
+      const anchor = first
+        ? `如 \`${first.functionId}\` 第 ${first.line} 行${symbol.callers.length > 1 ? ` 等 ${symbol.callers.length} 处` : ''}`
+        : '（无调用点锚点）'
+      L.push(`- \`${symbol.id}\`（${symbol.module}.${symbol.symbol}；${anchor}）`)
+    }
+    L.push('')
+  }
   L.push('> **引用的对象 id 必须逐字来自本索引，不得编造。**')
   L.push('')
 
@@ -2331,6 +2548,11 @@ function buildRulesText(
   L.push(
     '- **keySteps 自检（必做）**：`calleeNames` 只写该函数 `calls[].calleeName` 里的名称（不是函数名标签、不编造）；' +
       '空数组表示明确无主干；keySteps 用稳定函数 id，**不要带 basis**。'
+  )
+  L.push(
+    '- **externals 自检（必做）**：`values` 的键必须是 `${module}::${symbol}`（逐字抄 `externalSymbols[].id`，' +
+      '按**最后一个** `::` 拆分，`node:fs::readFile` 合法）；只补 `purpose` / 可选 `signature`，不写 symbol/模块字段、' +
+      '不改调用分类或调用边；**不要带 basis**。'
   )
   L.push(
     `- 本次扫描：${scan.stats.fileCount} 个文件、${scan.stats.winnerCount} 个生效条目、` +

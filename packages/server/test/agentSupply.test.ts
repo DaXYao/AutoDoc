@@ -157,6 +157,48 @@ function fixtureGraph(): ProjectGraph {
   return buildGraph(fixtureFiles())
 }
 
+/** 外部调用边：calleeId 缺失 + externalModule 非空（externals 的候选口径） */
+function externalEdge(callerId: string, externalModule: string, calleeName: string, line = 3): CallEdge {
+  return {
+    callerId,
+    calleeName,
+    stepId: `${callerId}>${calleeName}`,
+    calleeId: null,
+    calleeCategory: 'external',
+    role: 'core',
+    line,
+    calleePurpose: null,
+    externalModule
+  }
+}
+
+/**
+ * externals 专用图谱：FN_A 调 node:fs 两个符号 + vue；FN_B 也调 vue（调用点更多，建议排序靠前）。
+ * 与主夹具分开，避免外部符号影响既有建议/索引断言的固定顺序。
+ */
+function externalsGraph(): ProjectGraph {
+  return buildGraph([
+    {
+      fileId: 'src/ext.ts',
+      path: 'src/ext.ts',
+      language: 'typescript',
+      functions: [
+        mkFn(FN_A, 'alpha', {
+          calls: [
+            externalEdge(FN_A, 'node:fs', 'readFile', 4),
+            externalEdge(FN_A, 'vue', 'ref', 8),
+            externalEdge(FN_A, 'node:fs', 'writeFile', 12)
+          ]
+        }),
+        mkFn(FN_B, 'beta', {
+          className: 'ClsB',
+          calls: [externalEdge(FN_B, 'vue', 'ref', 5)]
+        })
+      ]
+    }
+  ])
+}
+
 /** 命中 alpha 的分类规则（用户显式意图）：categories 供给对它一律判「忽略」 */
 const RULES_HITTING_ALPHA: ClassificationConfig = {
   rules: [{ category: 'business', match: { namePatterns: ['^alpha$'] } }]
@@ -444,18 +486,20 @@ describe('scanAgentSupply（信封校验 + 文件名纪律）', () => {
     expect(res.errors.every((e) => e.reason.includes('文件名必须是'))).toBe(true)
   })
 
-  it('仍被拒绝的 pass：externals 给出专属原因，未知 pass 回显支持列表', () => {
+  it('未知 pass 回显支持列表；externals 已进入支持列表（空 values 走值校验）', () => {
     const dir = freshDir()
     writeSupply(dir, 'externals.qoder.json', envelope('externals', 'qoder', {}))
     writeSupply(dir, 'notes.qoder.json', envelope('notes', 'qoder', {}))
     const res = scan(dir, fixtureGraph())
     expect(res.entries).toEqual([])
     const byFile = new Map(res.errors.map((e) => [e.file, e.reason]))
-    expect(byFile.get('externals.qoder.json')).toContain('本地 AI 专属')
+    expect(byFile.get('externals.qoder.json')).toContain('values 不能是空 map')
+    expect(byFile.get('externals.qoder.json')).not.toContain('本地 AI 专属')
     expect(byFile.get('notes.qoder.json')).toContain(`pass 不在支持列表 [${SUPPLY_PASSES.join(' / ')}]`)
-    // flows / keySteps 已进入支持列表（H2）
+    // flows / keySteps / externals 均已进入支持列表
     expect(SUPPLY_PASSES).toContain('flows')
     expect(SUPPLY_PASSES).toContain('keySteps')
+    expect(SUPPLY_PASSES).toContain('externals')
   })
 
   it('partition / flows 已是合法 pass：空 values 走值校验而非「不支持」', () => {
@@ -1200,6 +1244,82 @@ describe('scanAgentSupply（keySteps 调用主干）', () => {
   })
 })
 
+/* ------------------------- externals（外部库补全） ------------------------- */
+
+describe('scanAgentSupply（externals 外部库补全）', () => {
+  it('合法供给：objectId 按最后一个 `::` 拆分（兼容 node:fs），purpose/signature 原样采纳', () => {
+    const dir = freshDir()
+    writeSupply(dir, 'externals.qoder.json', envelope('externals', 'qoder', {
+      'node:fs::readFile': { purpose: '读取文件内容。', signature: 'readFile(path, options?)' },
+      'vue::ref': { purpose: '创建响应式引用。' }
+    }))
+    const res = scan(dir, externalsGraph())
+    expect(res.errors).toEqual([])
+    expect(res.ignored).toEqual([])
+    expect(res.stats.perPass).toEqual({ externals: 2 })
+    const byId = new Map(res.entries.map((e) => [e.objectId, e.value]))
+    expect(byId.get('node:fs::readFile')).toEqual({
+      purpose: '读取文件内容。',
+      signature: 'readFile(path, options?)'
+    })
+    expect(byId.get('vue::ref')).toEqual({ purpose: '创建响应式引用。' })
+  })
+
+  it('objectId 不在当前图谱的外部符号集：逐条判错，同文件其余条目照用', () => {
+    const dir = freshDir()
+    writeSupply(dir, 'externals.qoder.json', envelope('externals', 'qoder', {
+      'vue::ref': { purpose: '合法。' },
+      'vue::missing': { purpose: '符号不存在。' },
+      'react::useState': { purpose: '模块不存在。' },
+      'vue': { purpose: '缺少分隔符。' },
+      '::ref': { purpose: '缺少模块。' },
+      'vue::': { purpose: '缺少符号。' }
+    }))
+    const res = scan(dir, externalsGraph())
+    expect(res.entries.map((e) => e.objectId)).toEqual(['vue::ref'])
+    expect(res.errors).toHaveLength(5)
+    expect(res.errors.every((e) => e.reason.includes('外部库符号集'))).toBe(true)
+    expect(res.errors.map((e) => e.objectId)).toEqual(['vue::missing', 'react::useState', 'vue', '::ref', 'vue::'])
+  })
+
+  it('值校验：空 purpose / 超长 / 契约外字段 / signature 非法 / 非对象', () => {
+    const dir = freshDir()
+    writeSupply(dir, 'externals.qoder.json', envelope('externals', 'qoder', {
+      'node:fs::readFile': { purpose: '   ' },
+      'node:fs::writeFile': { purpose: 'x'.repeat(501) },
+      'vue::ref': { purpose: '合法。', desc: '契约外字段' }
+    }))
+    writeSupply(dir, 'externals.codex.json', envelope('externals', 'codex', {
+      'vue::ref': { purpose: '合法。', signature: '' },
+      'node:fs::readFile': [],
+      'node:fs::writeFile': { purpose: '合法。', signature: 'x'.repeat(501) }
+    }))
+    const res = scan(dir, externalsGraph())
+    expect(res.entries).toEqual([])
+    const reasonsOf = (file: string): string =>
+      res.errors
+        .filter((e) => e.file === file)
+        .map((e) => e.reason)
+        .join('\n')
+    expect(reasonsOf('externals.qoder.json')).toContain('purpose 必须是非空字符串')
+    expect(reasonsOf('externals.qoder.json')).toContain('purpose 超过 500 字符上限')
+    expect(reasonsOf('externals.qoder.json')).toContain('契约外字段')
+    expect(reasonsOf('externals.codex.json')).toContain('signature 若提供须为非空字符串')
+    expect(reasonsOf('externals.codex.json')).toContain('值必须是对象 { purpose, signature? }')
+    expect(reasonsOf('externals.codex.json')).toContain('signature 超过 500 字符上限')
+  })
+
+  it('空 values / 携带 basis：判错（externals 是稳定符号 id，不需要划分指纹）', () => {
+    const dir = freshDir()
+    writeSupply(dir, 'externals.qoder.json', envelope('externals', 'qoder', {}))
+    writeSupply(dir, 'externals.codex.json', envelope('externals', 'codex', { 'vue::ref': { purpose: 'x' } }, undefined, BASIS))
+    const res = scan(dir, externalsGraph())
+    const byFile = new Map(res.errors.map((e) => [e.file, e.reason]))
+    expect(byFile.get('externals.qoder.json')).toContain('values 不能是空 map')
+    expect(byFile.get('externals.codex.json')).toContain('禁止携带 basis')
+  })
+})
+
 
 
 describe('多 Agent 供给同一对象（writtenAt 最新者赢）', () => {
@@ -1251,7 +1371,7 @@ function emptyScan(dir: string, graph: ProjectGraph): AgentSupplyScanResult {
 }
 
 describe('suggestSupplyTasks（缺口建议：按 pass 分组 + 排序 + 每类上限 20）', () => {
-  it('九个洞察侧 pass 的缺口都进建议，按 pass 顺序分组（partition 永远第一）', () => {
+  it('洞察侧各 pass 的缺口都进建议，按 pass 顺序分组（partition 永远第一；无外部调用时无 externals 建议）', () => {
     const graph = fixtureGraph()
     applyCoreJudgment(graph, { [FN_A]: { core: true, reason: '' } })
     const sugs = suggestSupplyTasks(graph, emptyScan(freshDir(), graph))
@@ -1282,6 +1402,7 @@ describe('suggestSupplyTasks（缺口建议：按 pass 分组 + 排序 + 每类�
     expect(sugs.filter((s) => s.pass === 'keySteps').map((s) => s.targetId)).toEqual([FN_B, FN_D])
     expect(sugs.find((s) => s.pass === 'keySteps')?.kind).toBe('function-key-steps')
     expect(sugs.find((s) => s.pass === 'keySteps')?.label).toBe('ClsB.beta（1 次调用）')
+    expect(sugs.some((s) => s.pass === 'externals')).toBe(false)
     expect(sugs.every((s) => s.kind.length > 0 && s.label.length > 0)).toBe(true)
   })
 
@@ -1308,6 +1429,32 @@ describe('suggestSupplyTasks（缺口建议：按 pass 分组 + 排序 + 每类�
     expect(sugs.some((s) => s.pass === 'flows')).toBe(false)
     // FN_B 已被供给，只剩 FN_D
     expect(sugs.filter((s) => s.pass === 'keySteps').map((s) => s.targetId)).toEqual([FN_D])
+  })
+
+  it('externals：按外部符号给出建议（调用点越多越优先），已供给的符号消失', () => {
+    const graph = externalsGraph()
+    const sugs = suggestSupplyTasks(graph, emptyScan(freshDir(), graph))
+    const externals = sugs.filter((s) => s.pass === 'externals')
+    expect(externals.map((s) => s.targetId)).toEqual([
+      'vue::ref',
+      'node:fs::readFile',
+      'node:fs::writeFile'
+    ])
+    expect(externals.every((s) => s.kind === 'external-symbol')).toBe(true)
+    expect(externals[0]).toMatchObject({
+      pass: 'externals',
+      targetId: 'vue::ref',
+      label: 'vue.ref（2 处调用）'
+    })
+
+    const dir = freshDir()
+    writeSupply(dir, 'externals.qoder.json', envelope('externals', 'qoder', {
+      'vue::ref': { purpose: '创建响应式引用。' }
+    }))
+    const res = scan(dir, graph)
+    expect(res.errors).toEqual([])
+    const after = suggestSupplyTasks(graph, res).filter((s) => s.pass === 'externals')
+    expect(after.map((s) => s.targetId)).toEqual(['node:fs::readFile', 'node:fs::writeFile'])
   })
 
   it('已生效供给（winners）消掉对应建议；坏条目不算覆盖', () => {
@@ -1530,6 +1677,42 @@ describe('完整索引 index.json（supply/<projectId>/index.json）', () => {
     ])
     expect(index.chains[0].path).toEqual([FN_B, FN_A])
     expect(index.chains[0].pathLabels).toHaveLength(2)
+    expect(index.externalSymbols).toEqual([])
+  })
+
+  it('externalSymbols：从 calleeId 缺失且 externalModule 非空的调用去重，附 caller functionId/line 锚点', () => {
+    const graph = externalsGraph()
+    const index = buildSupplyIndexFile(graph, 'p1')
+    expect(index.externalSymbols).toEqual([
+      {
+        id: 'node:fs::readFile',
+        module: 'node:fs',
+        symbol: 'readFile',
+        callers: [{ functionId: FN_A, line: 4 }]
+      },
+      {
+        id: 'node:fs::writeFile',
+        module: 'node:fs',
+        symbol: 'writeFile',
+        callers: [{ functionId: FN_A, line: 12 }]
+      },
+      {
+        id: 'vue::ref',
+        module: 'vue',
+        symbol: 'ref',
+        callers: [
+          { functionId: FN_A, line: 8 },
+          { functionId: FN_B, line: 5 }
+        ]
+      }
+    ])
+    // 契约内联索引同样给出外部符号，建议清单的 targetId 才能逐字对上
+    const inline = buildSupplyIndex(graph, [])
+    expect(inline.externalSymbols.map((s) => s.id)).toEqual([
+      'node:fs::readFile',
+      'node:fs::writeFile',
+      'vue::ref'
+    ])
   })
 
   it('writeSupplyIndexFile：写到 supply/<projectId>/index.json，绝不落进 insight/', () => {
@@ -1563,7 +1746,7 @@ describe('完整索引 index.json（supply/<projectId>/index.json）', () => {
 
 
 describe('generateSupplyRulesText（契约文本）', () => {
-  it('含落盘目录/命名规则/九个 pass 的 schema 表/真实 id 示例/索引/建议/两轮契约/边界', () => {
+  it('含落盘目录/命名规则/十个 pass 的 schema 表/真实 id 示例/索引/建议/两轮契约/边界', () => {
     const graph = fixtureGraph()
     applyCoreJudgment(graph, { [FN_A]: { core: true, reason: '' } })
     const dir = join(freshDir(), 'insight')
@@ -1579,12 +1762,13 @@ describe('generateSupplyRulesText（契约文本）', () => {
     expect(t).toContain('**`proj-x`**')
     expect(t).toContain('narratives.qoder.json')
     expect(t).toContain('绝不写进被分析的目标项目')
-    // 九个洞察侧 pass 与本地 ai-cache 键的映射表（changes 在第 9 节）
-    expect(t).toContain('九个 pass')
-    expect(t).toContain('## 4. 九个洞察侧 pass')
+    // 十个洞察侧 pass 与本地 ai-cache 键的映射表（changes 在第 9 节）
+    expect(t).toContain('十个 pass')
+    expect(t).toContain('## 4. 十个洞察侧 pass')
     for (const pass of SUPPLY_PASSES.filter((p) => p !== 'changes')) expect(t).toContain(`| \`${pass}\` |`)
     expect(t).toContain('`chunk:blocks:<hash>`')
     expect(t).toContain('`chunk:keySteps:<hash>`')
+    expect(t).toContain('`<图指纹>:externals`')
     expect(t).toContain('`<图指纹>:flows:tree`')
     expect(t).toContain('`<图指纹>:narratives:v2`')
     expect(t).toContain('`<图指纹>:coreJudgment`')
@@ -1595,6 +1779,7 @@ describe('generateSupplyRulesText（契约文本）', () => {
     expect(t).toContain('### 4.0 `partition` — 整项目划分（结构层，先于其它 pass 应用）')
     expect(t).toContain('### 4.7 `keySteps` — 调用主干（关键步骤）')
     expect(t).toContain('### 4.8 `flows` — 递归脉络树（业务主线，整树原子应用）')
+    expect(t).toContain('### 4.9 `externals` — 外部库补全（按符号字段级合并）')
     expect(t).toContain('唯一键 `root`')
     expect(t).toContain('每个函数必须**恰好出现一次**')
     expect(t).toContain('## 10. 两轮契约（先划分，后语义）')
@@ -1602,11 +1787,11 @@ describe('generateSupplyRulesText（契约文本）', () => {
     expect(t).toContain('第二轮：再写 `flows` + `modules`')
     expect(t).toContain('flows 是整树语义 pass，依赖 partition 应用后的划分身份（basis），必须放在第二轮。')
     expect(t).not.toContain('- `partition`：模块划分含模块成员归属')
-    // 只拒绝 externals（flows / keySteps 已进入供给范围）
-    expect(t).not.toContain('递归脉络树是本地 AI 专属能力')
-    expect(t).toContain('- `externals`：外部库补全是本地 AI 专属能力')
-    // 八个用真实 id 的完整示例（partition 的示例在 4.0 内）
-    for (const label of ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']) expect(t).toContain(`**示例 ${label}：`)
+    // externals 已进入供给范围（不再是本地专属）；changes 仍被引导到 changes/ 子目录
+    expect(t).not.toContain('外部库补全是本地 AI 专属能力')
+    expect(t).toContain('`changes`：changes 属于变更侧供给')
+    // 九个用真实 id 的完整示例（partition 的示例在 4.0 内；I 为 externals）
+    for (const label of ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']) expect(t).toContain(`**示例 ${label}：`)
     expect(t).toContain(JSON.stringify(FN_A))
     expect(t).toContain(JSON.stringify(FN_B))
     expect(t).toContain('"chain:0"')
@@ -1633,6 +1818,39 @@ describe('generateSupplyRulesText（契约文本）', () => {
       indexFunctionCount: 3,
       indexChainCount: 2
     })
+  })
+
+  it('externals：§4.9 + 内联外部符号索引 + 真实 id 示例 + 建议清单逐字一致', () => {
+    const graph = externalsGraph()
+    const dir = join(freshDir(), 'insight')
+    const scanRes = scan(dir, graph)
+    const sugs = suggestSupplyTasks(graph, scanRes)
+    const rules = generateSupplyRulesText({
+      graph,
+      scan: scanRes,
+      suggestions: sugs,
+      projectId: 'proj-ext',
+      dir,
+      baseline: baselineOf(graph)
+    })
+    const t = rules.rulesText
+    expect(t).toContain('### 4.9 `externals` — 外部库补全（按符号字段级合并）')
+    expect(t).toContain('**对象 id = `${externalModule}::${symbol}`**')
+    expect(t).toContain('按**最后一个** `::` 拆分')
+    expect(t).toContain('单条目 ≤ 32KB')
+    expect(t).toContain('### 外部库符号（externals 候选，共 3 个）')
+    for (const id of ['node:fs::readFile', 'node:fs::writeFile', 'vue::ref']) {
+      expect(t).toContain(`\`${id}\``)
+    }
+    // 示例 I 用真实外部符号 id，而不是占位
+    expect(t).toContain('**示例 I：`externals.qoder.json`**')
+    expect(t).toContain('"node:fs::readFile"')
+    expect(t).toContain('示例 I 的键来自当前图谱的真实外部调用：`node:fs.readFile`')
+    expect(sugs.filter((s) => s.pass === 'externals')).toHaveLength(3)
+    for (const s of sugs.filter((s) => s.pass === 'externals')) {
+      expect(t).toContain(`\`${s.targetId}\``)
+      expect(s.kind).toBe('external-symbol')
+    }
   })
 
   it('空项目：索引给出提示而非报错，示例退回占位并重申纪律', () => {

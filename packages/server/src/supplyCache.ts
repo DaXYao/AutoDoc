@@ -8,6 +8,7 @@ import type {
   AiPassKey,
   AiPassStatus,
   AnyAgentSupplyEntry,
+  ExternalSymbolInfo,
   InsightAgentSources,
   InternalStep,
   ProjectInsight,
@@ -19,7 +20,7 @@ import { rebuildModuleCores, syncModuleCores, type ProjectGraph } from './graph.
 import { isCategoryCandidate, markClassified } from './categoryCandidates.js'
 import { applyAgentPartitionToInsight } from './supplyPartition.js'
 import { applyAgentFlowsToInsight, validateAgentFlowShape } from './supplyFlows.js'
-import { SUPPLY_PASSES } from './agentSupply.js'
+import { collectGraphExternalSymbols, SUPPLY_PASSES } from './agentSupply.js'
 
 /* ------------------------- 供给缓存命名空间 ------------------------- */
 
@@ -202,6 +203,7 @@ export function applyWinnerToInsight(
     case 'coreRoles': return applyCoreRoleMerge(insight, winner.objectId, entry)
     case 'blocks': return applyBlocksMerge(insight, graph, winner.objectId, entry)
     case 'keySteps': return applyKeyStepsMerge(insight, graph, winner.objectId, entry)
+    case 'externals': return applyExternalsMerge(insight, graph, winner.objectId, entry)
     default: return 'missing'
   }
 }
@@ -425,6 +427,58 @@ function applyKeyStepsMerge(
   return 'changed'
 }
 
+/** 图 → 外部符号 id 集合（读取端复用；graph 在一次装配内不变，external 调用边也不受 partition 影响） */
+const externalSymbolIdsOf = new WeakMap<ProjectGraph, Set<string>>()
+
+function hasGraphExternalSymbol(graph: ProjectGraph, id: string): boolean {
+  let ids = externalSymbolIdsOf.get(graph)
+  if (!ids) {
+    ids = new Set(collectGraphExternalSymbols(graph).map((s) => s.id))
+    externalSymbolIdsOf.set(graph, ids)
+  }
+  return ids.has(id)
+}
+
+/**
+ * externals → insight.externals[module][symbol]（按符号字段级合并，绝不整模块覆盖）。
+ * objectId 按**最后一个** `::` 拆分，兼容 `node:fs` 这类内置模块；supplier 只带 purpose/可选 signature，
+ * 与自动生成的 CallEdge 完全隔离。未供给的符号（同模块或其它模块）保持原值。
+ */
+function applyExternalsMerge(
+  insight: ProjectInsight,
+  graph: ProjectGraph,
+  objectId: string,
+  entry: AnyAgentSupplyEntry
+): ApplyOutcome {
+  if (entry.pass !== 'externals') return 'missing'
+  const splitAt = objectId.lastIndexOf('::')
+  if (splitAt <= 0 || splitAt + 2 >= objectId.length) return 'missing'
+  // 只接受当前图谱里真实存在的外部符号（缓存损坏/契约过期时不写入幽灵符号）
+  if (!hasGraphExternalSymbol(graph, objectId)) return 'missing'
+  const module = objectId.slice(0, splitAt)
+  const symbol = objectId.slice(splitAt + 2)
+  const val = entry.value as ExternalSymbolInfo | undefined
+  if (!val || typeof val.purpose !== 'string' || val.purpose.length === 0) return 'missing'
+  const existing = insight.externals
+  const currentModule =
+    existing && Object.prototype.hasOwnProperty.call(existing, module) ? existing[module] : undefined
+  const current = currentModule ? currentModule[symbol] : undefined
+  const next: ExternalSymbolInfo = { purpose: val.purpose }
+  if (typeof val.signature === 'string') next.signature = val.signature
+  // 字段级合并：Agent 未给 signature 时保留本地已有签名，不整体替换
+  else if (current?.signature !== undefined) next.signature = current.signature
+  if (current && current.purpose === next.purpose && current.signature === next.signature) return 'same'
+  // 归一为 null-prototype 容器：`__proto__` / `constructor` 这类模块名不得污染原型链
+  const target =
+    existing && Object.getPrototypeOf(existing) === null
+      ? existing
+      : (insight.externals = Object.assign(Object.create(null), existing ?? {}))
+  const moduleMap = Object.assign(Object.create(null), currentModule ?? {})
+  moduleMap[symbol] = next
+  target[module] = moduleMap
+  return 'changed'
+}
+
 /* ------------------------- pass → aiStatus/aiSource 口径 ------------------------- */
 
 /**
@@ -440,7 +494,8 @@ const PASS_TO_AI_KEY: Partial<Record<AgentSupplyPass, AiPassKey>> = {
   coreJudgment: 'coreJudgment',
   coreRoles: 'coreRoles',
   blocks: 'blocks',
-  keySteps: 'keySteps'
+  keySteps: 'keySteps',
+  externals: 'externals'
 }
 
 /**
@@ -482,6 +537,10 @@ export function computePassUniverse(
       case 'keySteps':
         // 只有「有调用点」的函数才需要主干判定；空数组供给也算覆盖（明确无主干）
         for (const fn of graph.nodes.values()) if (fn.calls.length > 0) n++
+        break
+      case 'externals':
+        // 分母 = 图谱里去重后的外部库符号数（calleeId 缺失且 externalModule 非空）
+        n = collectGraphExternalSymbols(graph).length
         break
       default:
         n = 0

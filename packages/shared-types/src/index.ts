@@ -501,8 +501,8 @@ export type AiPassKey =
   | 'flows'
 
 /**
- * AI 凭训练知识补全的外部库符号信息（用途/常见签名）。
- * 注意：这是模型对公开库的通用了解，非项目内确证内容，展示时必须醒目标注「AI 推断」。
+ * 外部库符号的用途/常见签名信息（本地 AI 凭训练知识补全，或外部 Agent 按契约供给）。
+ * 注意：这是模型/Agent 对公开库的通用了解，非项目内确证内容，展示时必须醒目标注「AI 推断」。
  */
 export interface ExternalSymbolInfo {
   /** 一句话中文用途 */
@@ -541,9 +541,9 @@ export interface ProjectInsight {
    */
   aiSource?: Partial<Record<AiPassKey, SemanticSource>>
   /**
-   * 外部库符号 AI 补全（外层 key=模块说明符，内层 key=函数名）。
-   * 由 AI 凭训练知识对「裸模块说明符的外部调用」补全用途/签名，非项目内确证内容；
-   * 与自动生成的 FunctionDoc/CallEdge 分离，只存于洞察层。AI 未生成/失败时缺省（前端保持既有文案）。
+   * 外部库符号补全（外层 key=模块说明符，内层 key=函数名）。
+   * 本地 AI 与 Agent 供给都会落到这里，供给按符号字段级合并（不整模块覆盖）；
+   * 仍与自动生成的 FunctionDoc/CallEdge 分离，只存于洞察层。AI/Agent 未生成/失败时缺省（前端保持既有文案）。
    */
   externals?: Record<string, Record<string, ExternalSymbolInfo>>
   /**
@@ -772,16 +772,17 @@ export type SemanticSource = 'api' | 'agent' | 'mixed'
 
 /**
  * G1 预留（G2 合并时写入 ProjectInsight.agentSources）：字段级来源标记。
- * key = `${AgentSupplyPass}:${objectId}`（objectId 为 moduleId / chainId / functionId；partition / flows 固定为 `root`），
- * value = 生效的 agent 标识。
+ * key = `${AgentSupplyPass}:${objectId}`（objectId 为 moduleId / chainId / functionId / 外部符号 id；
+ * partition / flows 固定为 `root`），value = 生效的 agent 标识。
  */
 export type InsightAgentSources = Record<string, string>
 
 /**
- * 可被外部 Agent 供给的语义 pass：九个洞察侧 pass（partition + flows + modules + narratives + categories +
- * coreJudgment + coreRoles + blocks + keySteps）+ 变更侧 changes。
+ * 可被外部 Agent 供给的语义 pass：十个洞察侧 pass（partition + flows + modules + narratives + categories +
+ * coreJudgment + coreRoles + blocks + keySteps + externals）+ 变更侧 changes。
  * 每个 pass 一类一份文件，值形状逐字段对齐 `ai-cache.json` 里同名本地 pass 的值（详见 AgentSupplyValueShapes）。
- * externals 仍为本地专属（AI 凭训练知识补全外部库符号，不在供给范围内）。
+ * externals 的 objectId 为 `${externalModule}::${symbol}`（按**最后一个** `::` 拆分，兼容 `node:fs` 这类内置模块），
+ * value 对齐 ExternalSymbolInfo（只补用途/签名，不改调用边与分类）。
  * partition 是**结构层**供给：它决定模块划分本身（basis 的来源），必须先于其它 pass 应用；
  * flows 是整树语义 pass：依赖 partition 应用后的划分身份（basis），故在 partition 之后、其它 pass 之前应用。
  */
@@ -795,6 +796,7 @@ export type AgentSupplyPass =
   | 'coreRoles'
   | 'blocks'
   | 'keySteps'
+  | 'externals'
   | 'changes'
 
 /**
@@ -946,6 +948,8 @@ export interface AgentSupplyChangesValue {
  * - coreRoles    → 本地 `<图指纹>:coreRoles`（Record<functionId, string>）
  * - blocks       → 本地 `chunk:blocks:<hash>`（Record<functionId, InternalStep[]>）
  * - keySteps     → 本地 `chunk:keySteps:<hash>`（Record<functionId, number[]>；供给按 calleeName 映射回下标）
+ * - externals    → 本地 `<图指纹>:externals`（Record<module, Record<symbol, ExternalSymbolInfo>>；
+ *                  供给的 values 键是 `${module}::${symbol}`，value 只含 purpose/signature）
  */
 export interface AgentSupplyValueShapes {
   /** 结构层：整项目划分（唯一键 root；先于其它 pass 应用） */
@@ -962,6 +966,8 @@ export interface AgentSupplyValueShapes {
   blocks: InternalStep[]
   /** ④调用主干：该函数 calls[].calleeName 的子集（空数组=无主干；无 basis） */
   keySteps: AgentSupplyKeyStepsValue
+  /** ④外部库补全：objectId = `${externalModule}::${symbol}`，按符号字段级合并 */
+  externals: ExternalSymbolInfo
   /** G5：变更侧三层语义（提交叙事 / 链路影响 / 函数角色） */
   changes: AgentSupplyChangesValue
 }
@@ -989,7 +995,10 @@ export interface AgentSupplyFile<P extends AgentSupplyPass = AgentSupplyPass> {
 /** 校验通过的单个供给条目（对象级，G2 字段级合并的最小单位） */
 export interface AgentSupplyEntry<P extends AgentSupplyPass = AgentSupplyPass> {
   pass: P
-  /** 对象 id：partition 固定为 `root`；其余按 pass 为 moduleId / chainId / functionId */
+  /**
+   * 对象 id：partition 固定为 `root`；flows 固定为 `root`；其余按 pass 为 moduleId / chainId / functionId；
+   * externals 为 `${externalModule}::${symbol}`（按最后一个 `::` 拆分）。
+   */
   objectId: string
   value: AgentSupplyValueShapes[P]
   agent: string
@@ -1072,7 +1081,8 @@ export interface AgentSupplyScanResult {
 
 /**
  * 建议清单条目：还缺哪一类语义供给。
- * kind 与 pass 一一对应，targetId 按 pass 分别是 moduleId / chainId / functionId（project-partition 固定为 root）。
+ * kind 与 pass 一一对应，targetId 按 pass 分别是 moduleId / chainId / functionId / 外部符号 id
+ * （project-partition / project-flows 固定为 root；external-symbol 为 `${module}::${symbol}`）。
  */
 export type AgentSupplySuggestionKind =
   | 'project-partition'
@@ -1084,6 +1094,7 @@ export type AgentSupplySuggestionKind =
   | 'function-purpose'
   | 'function-steps'
   | 'function-key-steps'
+  | 'external-symbol'
   | 'changes-narrative'
   | 'changes-chain-impact'
   | 'changes-function-role'

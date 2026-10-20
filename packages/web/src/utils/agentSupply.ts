@@ -19,7 +19,7 @@ import type { TagType } from './format'
  * 错误/建议分组、状态条摘要。全部脱离 Vue/网络，可独立单测。
  */
 
-/** 九个洞察侧 pass + 变更侧的展示顺序（与后端 SUPPLY_PASSES 同序；partition 结构层在最前，flows 紧随其后） */
+/** 十个洞察侧 pass + 变更侧的展示顺序（与后端 SUPPLY_PASSES 同序；partition 结构层在最前，flows 紧随其后） */
 export const SUPPLY_PASS_ORDER: AgentSupplyPass[] = [
   'partition',
   'flows',
@@ -30,6 +30,7 @@ export const SUPPLY_PASS_ORDER: AgentSupplyPass[] = [
   'coreRoles',
   'blocks',
   'keySteps',
+  'externals',
   'changes'
 ]
 
@@ -44,6 +45,7 @@ export const SUPPLY_PASS_LABELS: Record<AgentSupplyPass, string> = {
   coreRoles: '系统角色',
   blocks: '内部步骤',
   keySteps: '调用主干',
+  externals: '外部库补全',
   changes: '变更语义'
 }
 
@@ -58,6 +60,7 @@ export const SUPPLY_SUGGESTION_KIND_LABELS: Record<AgentSupplySuggestionKind, st
   'function-purpose': '系统角色',
   'function-steps': '内部步骤',
   'function-key-steps': '调用主干',
+  'external-symbol': '外部库补全',
   'changes-narrative': '提交叙事',
   'changes-chain-impact': '链路影响',
   'changes-function-role': '函数角色'

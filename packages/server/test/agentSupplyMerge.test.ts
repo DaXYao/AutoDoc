@@ -163,6 +163,72 @@ function fixtureGraph(): ProjectGraph {
   return buildGraph(fixtureFiles())
 }
 
+/** 外部调用边：calleeId 缺失 + externalModule 非空 */
+function externalEdge(callerId: string, externalModule: string, calleeName: string, line = 3): CallEdge {
+  return {
+    callerId,
+    calleeName,
+    stepId: `${callerId}>${calleeName}`,
+    calleeId: null,
+    calleeCategory: 'external',
+    role: 'core',
+    line,
+    calleePurpose: null,
+    externalModule
+  }
+}
+
+/** externals 专用夹具：FN_A 调 node:fs 两个符号 + vue；FN_B 也调 vue（与主夹具分开，避免影响既有断言） */
+function externalsFiles(): FileDoc[] {
+  return [
+    {
+      fileId: 'src/ext.ts',
+      path: 'src/ext.ts',
+      language: 'typescript',
+      functions: [
+        mkFn(FN_A, 'alpha', {
+          calls: [
+            externalEdge(FN_A, 'node:fs', 'readFile', 4),
+            externalEdge(FN_A, 'vue', 'ref', 8),
+            externalEdge(FN_A, 'node:fs', 'writeFile', 12)
+          ]
+        }),
+        mkFn(FN_B, 'beta', {
+          className: 'ClsB',
+          calls: [externalEdge(FN_B, 'vue', 'ref', 5), externalEdge(FN_B, 'vue', 'computed', 9)]
+        })
+      ]
+    }
+  ]
+}
+
+function externalsGraph(): ProjectGraph {
+  return buildGraph(externalsFiles())
+}
+
+const EXTERNALS_VALUE = {
+  'node:fs::readFile': { purpose: '读取文件内容。', signature: 'readFile(path, options?)' },
+  'node:fs::writeFile': { purpose: '写入文件内容。' },
+  'vue::ref': { purpose: '创建响应式引用。', signature: 'ref<T>(value: T)' },
+  'vue::computed': { purpose: '创建计算属性。', signature: 'computed<T>(getter)' }
+}
+
+/** 供给合并后的洞察形状（外层 module、内层 symbol） */
+const EXTERNALS_INSIGHT: NonNullable<ProjectInsight['externals']> = {
+  'node:fs': {
+    readFile: { purpose: '读取文件内容。', signature: 'readFile(path, options?)' },
+    writeFile: { purpose: '写入文件内容。' }
+  },
+  vue: {
+    ref: { purpose: '创建响应式引用。', signature: 'ref<T>(value: T)' },
+    computed: { purpose: '创建计算属性。', signature: 'computed<T>(getter)' }
+  }
+}
+
+function externalsEnvelope(agent = 'qoder', values: unknown = EXTERNALS_VALUE): string {
+  return envelope('externals', agent, values)
+}
+
 /** 结构常量：id / basis 只由夹具结构决定，跨实例恒定（单独一份，不参与任何断言的可变状态） */
 const REF = fixtureGraph()
 const BASIS = flowsBasis(REF)
@@ -403,7 +469,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
     service.storage.close()
   })
 
-  it('agentSources 与 perPass 正确填充（八个语义 pass 全部生效，未供 partition 则不出现）', async () => {
+  it('agentSources 与 perPass 正确填充（八个语义 pass 全部生效，未供 partition / externals 则不出现）', async () => {
     const dir = freshDir()
     validFiles(dir)
     const graph = fixtureGraph()
@@ -417,7 +483,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
     expect(result.agentSources[`coreJudgment:${FN_A}`]).toBe('qoder')
     expect(result.agentSources[`modules:mod:0`]).toBe('qoder')
     expect(result.perPass.map((p) => p.pass).sort()).toEqual(
-      SUPPLY_PASSES.filter((p) => p !== 'changes' && p !== 'partition').sort()
+      SUPPLY_PASSES.filter((p) => !['changes', 'partition', 'externals'].includes(p)).sort()
     )
     expect(result.perPass.every((p) => p.agents.join() === 'qoder')).toBe(true)
     expect(result.insight.agentSources).toEqual(result.agentSources)
@@ -565,6 +631,132 @@ describe('mergeAgentSupply（字段级合并）', () => {
     expect(result.agentSources).toEqual({})
     expect(result.insight.flows).toBeUndefined()
     expect(result.insight.functions[FN_A].keyCallIndexes).toBeUndefined()
+    service.storage.close()
+  })
+
+  it('externals：按符号字段级合并，保留同模块未供符号与本地既有内容', async () => {
+    const dir = freshDir()
+    writeSupplyFile(dir, 'externals.qoder.json', externalsEnvelope('qoder', {
+      'vue::ref': { purpose: 'Agent 的 ref 用途。', signature: 'ref<T>(value: T)' },
+      // Agent 未给 signature：必须保留本地已有的 computed 签名（字段级合并）
+      'vue::computed': { purpose: 'Agent 的 computed 用途。' }
+    }))
+    const graph = externalsGraph()
+    const scan = scanAgentSupply({ dir, graph })
+    expect(scan.errors).toEqual([])
+    const service = await makeService(freshDir(), externalsFiles())
+    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    // 本地已有一个同模块符号 + 一个同符号旧值 + 另一个模块
+    baseInsight.externals = {
+      vue: {
+        ref: { purpose: '本地 ref。' },
+        computed: { purpose: '本地 computed。', signature: 'computed<T>(getter)' }
+      },
+      'node:fs': { readFile: { purpose: '本地读取。' } }
+    }
+
+    const result = mergeAgentSupply({ insight: baseInsight, graph, winners: scan.winners, entries: scan.entries })
+    expect(result.changed).toBe(true)
+    expect(result.insight.externals).toEqual({
+      vue: {
+        ref: { purpose: 'Agent 的 ref 用途。', signature: 'ref<T>(value: T)' },
+        computed: { purpose: 'Agent 的 computed 用途。', signature: 'computed<T>(getter)' }
+      },
+      'node:fs': { readFile: { purpose: '本地读取。' } }
+    })
+    expect(result.agentSources['externals:vue::ref']).toBe('qoder')
+    expect(result.agentSources['externals:vue::computed']).toBe('qoder')
+    expect(result.perPass).toContainEqual({ pass: 'externals', count: 2, agents: ['qoder'] })
+    expect(result.insight.aiStatus?.externals).toBe('partial')
+    expect(result.insight.aiSource?.externals).toBe('agent')
+    service.storage.close()
+  })
+
+  it('externals：同值重复合并不改写（same），并保留深度拷贝隔离', async () => {
+    const dir = freshDir()
+    writeSupplyFile(dir, 'externals.qoder.json', externalsEnvelope())
+    const graph = externalsGraph()
+    const scan = scanAgentSupply({ dir, graph })
+    const service = await makeService(freshDir(), externalsFiles())
+    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    baseInsight.externals = structuredClone(EXTERNALS_INSIGHT)
+
+    const result = mergeAgentSupply({ insight: baseInsight, graph, winners: scan.winners, entries: scan.entries })
+    expect(result.changed).toBe(false)
+    expect(result.provenance).toHaveLength(4)
+    expect(result.insight.aiStatus?.externals).toBe('ok')
+    expect(result.insight.aiSource?.externals).toBe('agent')
+    // 合并值必须是深拷贝：改写供给条目对象不应污染洞察
+    const entry = scan.entries.find((e) => e.objectId === 'vue::ref')!
+    ;(entry.value as { purpose: string }).purpose = '被外部改写'
+    expect(result.insight.externals?.vue.ref.purpose).toBe('创建响应式引用。')
+    service.storage.close()
+  })
+
+  it('externals：对象 id 非法 / 符号不存在 → missing，不写入也不记来源', async () => {
+    const service = await makeService(freshDir(), externalsFiles())
+    const { insight: baseInsight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const result = mergeAgentSupply({
+      insight: baseInsight,
+      graph,
+      winners: [
+        { pass: 'externals', objectId: 'vue::ghost', agent: 'qoder', writtenAt: '', file: '', contenders: 1 },
+        { pass: 'externals', objectId: 'vue', agent: 'qoder', writtenAt: '', file: '', contenders: 1 }
+      ],
+      entries: [
+        { pass: 'externals', objectId: 'vue::ghost', value: { purpose: '幽灵符号' }, agent: 'qoder', writtenAt: '', file: '' },
+        { pass: 'externals', objectId: 'vue', value: { purpose: '缺分隔符' }, agent: 'qoder', writtenAt: '', file: '' }
+      ] as never
+    })
+    expect(result.provenance).toEqual([])
+    expect(result.changed).toBe(false)
+    expect(result.agentSources).toEqual({})
+    expect(result.insight.externals).toBeUndefined()
+    service.storage.close()
+  })
+
+  it('externals：__proto__ / constructor 模块名不污染原型链', async () => {
+    const service = await makeService(freshDir(), externalsFiles())
+    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const graph = buildGraph([
+      {
+        fileId: 'src/evil.ts',
+        path: 'src/evil.ts',
+        language: 'typescript',
+        functions: [
+          mkFn(FN_A, 'alpha', { calls: [externalEdge(FN_A, '__proto__', 'polluted', 4)] })
+        ]
+      }
+    ])
+    const result = mergeAgentSupply({
+      insight: baseInsight,
+      graph,
+      winners: [
+        {
+          pass: 'externals',
+          objectId: '__proto__::polluted',
+          agent: 'qoder',
+          writtenAt: '',
+          file: '',
+          contenders: 1
+        }
+      ],
+      entries: [
+        {
+          pass: 'externals',
+          objectId: '__proto__::polluted',
+          value: { purpose: '危险符号。' },
+          agent: 'qoder',
+          writtenAt: '',
+          file: ''
+        }
+      ] as never
+    })
+    expect(result.changed).toBe(true)
+    const ex = result.insight.externals!
+    expect(Object.getPrototypeOf(ex)).toBeNull()
+    expect(Object.prototype.hasOwnProperty.call(ex, '__proto__')).toBe(true)
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
     service.storage.close()
   })
 })
@@ -723,6 +915,30 @@ describe('aiStatus 与 aiSource（裁决②）', () => {
     await app.close()
     service.storage.close()
   })
+
+  it('Agent-only 端到端：externals 供给后 aiStatus.externals=ok、aiSource=agent、insight.externals 正确', async () => {
+    const dir = freshDir()
+    const supplyDir = supplyDirOfService(dir)
+    writeSupplyFile(supplyDir, 'externals.qoder.json', externalsEnvelope())
+    const service = await makeService(dir, externalsFiles())
+    const app = await makeApp(service)
+    const res = await app.inject({ method: 'POST', url: '/api/agent-supply/merge' })
+    expect(res.statusCode).toBe(200)
+    expect((res.json() as MergeBody).code).toBe('merged')
+
+    const live = loadInsight(service)
+    expect(live.insight.aiEnabled).toBe(false)
+    expect(live.insight.aiGenerated).toBe(true)
+    expect(live.insight.aiStatus?.externals).toBe('ok')
+    expect(live.insight.aiSource?.externals).toBe('agent')
+    expect(live.insight.externals).toEqual(EXTERNALS_INSIGHT)
+    expect(live.insight.agentSources?.['externals:node:fs::readFile']).toBe('qoder')
+    expect(live.insight.agentSources?.['externals:vue::ref']).toBe('qoder')
+    // aiSource 只登记 Agent 实际供给过的 pass（本次没有本地 KEY 产出）
+    expect(live.insight.aiSource).toEqual({ externals: 'agent' })
+    await app.close()
+    service.storage.close()
+  })
 })
 
 /* ------------------------- 🔴1 归档不再自锁 ------------------------- */
@@ -774,6 +990,29 @@ describe('archiveMergedInsight（归档与回滚指针）', () => {
     expect(r2.deduplicated).toBe(true)
     expect(r2.snapshotId).toBe(r1.snapshotId)
     expect(service.storage.listInsightSnapshots()).toHaveLength(1)
+    service.storage.close()
+  })
+
+  it('externals 同内容重复归档去重；符号内容变化产生新快照', async () => {
+    const service = await makeService(freshDir())
+    const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const m1 = structuredClone(insight)
+    m1.externals = {
+      'node:fs': { readFile: { purpose: '读取文件。' }, writeFile: { purpose: '写入文件。' } }
+    }
+    const r1 = archiveMergedInsight({ service, insight: m1, graph })
+    const again = structuredClone(m1)
+    const r2 = archiveMergedInsight({ service, insight: again, graph })
+    expect(r1.deduplicated).toBe(false)
+    expect(r2.deduplicated).toBe(true)
+    expect(r2.snapshotId).toBe(r1.snapshotId)
+
+    const changed = structuredClone(m1)
+    changed.externals!['node:fs'].readFile.purpose = '读取文件（Agent 修正）。'
+    const r3 = archiveMergedInsight({ service, insight: changed, graph })
+    expect(r3.deduplicated).toBe(false)
+    expect(r3.snapshotId).not.toBe(r1.snapshotId)
+    expect(service.storage.listInsightSnapshots()).toHaveLength(2)
     service.storage.close()
   })
 
@@ -883,6 +1122,37 @@ describe('insightContentHash（去重口径）', () => {
     expect(insightContentHash(i3)).not.toBe(insightContentHash(i2))
   })
 
+  it('externals：module/symbol 键序无关；signature 缺省与空串不同、内容变化不同哈希', async () => {
+    const i1 = await plainInsight()
+    i1.externals = {
+      vue: { ref: { purpose: '创建引用。' }, computed: { purpose: '计算属性。', signature: 'computed(fn)' } },
+      'node:fs': { readFile: { purpose: '读取文件。' } }
+    }
+    const i2 = structuredClone(i1)
+    i2.externals = {
+      'node:fs': { readFile: { purpose: '读取文件。' } },
+      vue: { computed: { purpose: '计算属性。', signature: 'computed(fn)' }, ref: { purpose: '创建引用。' } }
+    }
+    expect(insightContentHash(i2)).toBe(insightContentHash(i1))
+
+    const missingSignature = structuredClone(i1)
+    delete missingSignature.externals!.vue.computed.signature
+    expect(insightContentHash(missingSignature)).not.toBe(insightContentHash(i1))
+
+    const emptySignature = structuredClone(i1)
+    // node:fs 在对象键里写作带冒号的字符串
+    emptySignature.externals!['node:fs'].readFile.signature = ''
+    expect(insightContentHash(emptySignature)).not.toBe(insightContentHash(i1))
+
+    const changedPurpose = structuredClone(i1)
+    changedPurpose.externals!.vue.ref.purpose = '另一条用途。'
+    expect(insightContentHash(changedPurpose)).not.toBe(insightContentHash(i1))
+
+    const noExternals = structuredClone(i1)
+    delete noExternals.externals
+    expect(insightContentHash(noExternals)).not.toBe(insightContentHash(i1))
+  })
+
   it('基线已带 agentSources 时二次合并不丢旧键（整份替换会让 provenance 递减）', async () => {
     const dir = freshDir()
     validFiles(dir)
@@ -917,6 +1187,51 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
     expect(insight.functions[FN_B].systemRole).toBe('缓存里的角色。')
     expect(insight.agentSources?.[`coreRoles:${FN_B}`]).toBe('qoder')
     expect(insight.aiGenerated).toBe(true)
+    service.storage.close()
+  })
+
+  it('externals 缓存套用：按符号合并、保留未供符号，状态记 ok/agent', async () => {
+    const dir = freshDir()
+    const graph = externalsGraph()
+    const cache = new AiCache(dir)
+    writeSupplyCache(
+      cache,
+      graph.fingerprint,
+      flowsBasis(graph),
+      passDataOf([
+        ['externals', 'node:fs::readFile', { purpose: 'Agent 读取文件。', signature: 'readFile(path)' }],
+        ['externals', 'node:fs::writeFile', { purpose: 'Agent 写入文件。' }],
+        ['externals', 'vue::ref', { purpose: 'Agent 创建引用。' }],
+        ['externals', 'vue::computed', { purpose: '本地计算属性。' }]
+      ]),
+      ['qoder']
+    )
+    const service = await makeService(freshDir(), externalsFiles())
+    const { insight, graph: liveGraph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    insight.externals = { 'node:fs': { readFile: { purpose: '本地读取。' } }, vue: { computed: { purpose: '本地计算属性。' } } }
+    expect(applySupplyOverlay(insight, liveGraph, new AiCache(dir))).toBe(true)
+    expect(insight.externals).toEqual({
+      'node:fs': {
+        readFile: { purpose: 'Agent 读取文件。', signature: 'readFile(path)' },
+        writeFile: { purpose: 'Agent 写入文件。' }
+      },
+      vue: {
+        computed: { purpose: '本地计算属性。' },
+        ref: { purpose: 'Agent 创建引用。' }
+      }
+    })
+    expect(insight.agentSources).toMatchObject({
+      'externals:node:fs::readFile': 'qoder',
+      'externals:node:fs::writeFile': 'qoder',
+      'externals:vue::ref': 'qoder',
+      'externals:vue::computed': 'qoder'
+    })
+    expect(insight.aiStatus?.externals).toBe('ok')
+    expect(insight.aiSource?.externals).toBe('agent')
+    // 重复套用：同值不再改写，哈希稳定
+    const hash = insightContentHash(insight)
+    expect(applySupplyOverlay(insight, liveGraph, new AiCache(dir))).toBe(false)
+    expect(insightContentHash(insight)).toBe(hash)
     service.storage.close()
   })
 

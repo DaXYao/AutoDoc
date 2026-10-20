@@ -166,10 +166,11 @@ describe('groupSuggestionsByPass', () => {
     expect(groups[2].items.map((i) => i.targetId)).toEqual(['f1', 'f2'])
   })
 
-  it('未知 pass 不进入分组（顺序表是白名单）', () => {
-    const groups = groupSuggestionsByPass([suggestion('externals' as AgentSupplyPass, 'x')])
+  it('未知 pass 不进入分组（顺序表是白名单），externals 已在顺序表内', () => {
+    const groups = groupSuggestionsByPass([suggestion('futurePass' as AgentSupplyPass, 'x')])
     expect(groups).toEqual([])
-    expect(SUPPLY_PASS_ORDER).not.toContain('externals' as AgentSupplyPass)
+    expect(SUPPLY_PASS_ORDER).toContain('externals')
+    expect(SUPPLY_PASS_ORDER).not.toContain('futurePass' as AgentSupplyPass)
   })
 })
 
@@ -271,18 +272,21 @@ describe('snapshotSourceTag', () => {
 })
 
 describe('变更侧（G6）pass / 建议种类标签', () => {
-  it('SUPPLY_PASS_ORDER 与 LABELS 覆盖 changes，且 changes 收尾（后端把变更侧计数追加在 perPass 尾部）', () => {
+  it('SUPPLY_PASS_ORDER 与 LABELS 覆盖 changes / externals，且 changes 收尾（后端把变更侧计数追加在 perPass 尾部）', () => {
     expect(SUPPLY_PASS_ORDER).toContain('changes')
+    expect(SUPPLY_PASS_ORDER).toContain('externals')
     expect(SUPPLY_PASS_ORDER[SUPPLY_PASS_ORDER.length - 1]).toBe('changes')
+    expect(SUPPLY_PASS_ORDER.indexOf('externals')).toBeLessThan(SUPPLY_PASS_ORDER.indexOf('changes'))
     // partition 是结构层，必须排在最前（与后端 SUPPLY_PASSES 同序）
     expect(SUPPLY_PASS_ORDER[0]).toBe('partition')
     expect(SUPPLY_PASS_LABELS.partition).toBe('整项目划分')
+    expect(SUPPLY_PASS_LABELS.externals).toBe('外部库补全')
     expect(SUPPLY_PASS_LABELS.changes).toBe('变更语义')
     // 漏一个 pass 的标签，抽屉里就会渲染出 undefined
     for (const pass of SUPPLY_PASS_ORDER) expect(SUPPLY_PASS_LABELS[pass].length).toBeGreaterThan(0)
   })
 
-  it('十二种建议种类都有中文标签；变更侧「函数角色」不得与洞察侧「系统角色」同文案', () => {
+  it('十三种建议种类都有中文标签；变更侧「函数角色」不得与洞察侧「系统角色」同文案', () => {
     const kinds: AgentSupplySuggestionKind[] = [
       'project-partition',
       'project-flows',
@@ -293,6 +297,7 @@ describe('变更侧（G6）pass / 建议种类标签', () => {
       'function-purpose',
       'function-steps',
       'function-key-steps',
+      'external-symbol',
       'changes-narrative',
       'changes-chain-impact',
       'changes-function-role'
@@ -301,6 +306,7 @@ describe('变更侧（G6）pass / 建议种类标签', () => {
     expect(SUPPLY_SUGGESTION_KIND_LABELS['project-partition']).toBe('项目划分')
     expect(SUPPLY_SUGGESTION_KIND_LABELS['project-flows']).toBe('业务脉络树')
     expect(SUPPLY_SUGGESTION_KIND_LABELS['function-key-steps']).toBe('调用主干')
+    expect(SUPPLY_SUGGESTION_KIND_LABELS['external-symbol']).toBe('外部库补全')
     expect(SUPPLY_SUGGESTION_KIND_LABELS['changes-narrative']).toBe('提交叙事')
     expect(SUPPLY_SUGGESTION_KIND_LABELS['changes-chain-impact']).toBe('链路影响')
     expect(SUPPLY_SUGGESTION_KIND_LABELS['changes-function-role']).toBe('函数角色')

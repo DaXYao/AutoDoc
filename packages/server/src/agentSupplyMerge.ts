@@ -213,6 +213,26 @@ export function insightContentHash(insight: ProjectInsight): string {
   )
   // flows：递归稳定序列化（不含 flowsGeneratedAt / flowsFingerprint 两个派生时间戳）
   h.update(stable(insight.flows === undefined ? null : insight.flows.map(flowNodeStable)))
+  // externals：外层 module、内层 symbol 都按 key 排序；signature 的 undefined（缺省）与 ''（显式空串）必须区分。
+  const externals = insight.externals
+  const externalsStable = (): unknown => {
+    if (externals === undefined) return null
+    const out: Record<string, unknown> = {}
+    for (const module of Object.keys(externals).sort()) {
+      const symbols = externals[module] ?? {}
+      const symbolOut: Record<string, unknown> = {}
+      for (const symbol of Object.keys(symbols).sort()) {
+        const info = symbols[symbol]
+        symbolOut[symbol] = {
+          purpose: info.purpose,
+          signature: info.signature === undefined ? null : info.signature
+        }
+      }
+      out[module] = symbolOut
+    }
+    return out
+  }
+  h.update(stable(externalsStable()))
   for (const k of Object.keys(insight.functions).sort()) {
     const f = insight.functions[k]
     h.update(k)
