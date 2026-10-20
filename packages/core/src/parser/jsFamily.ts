@@ -15,6 +15,18 @@ const FUNCTION_LIKE = new Set([
   'generator_function'
 ])
 
+/** 函数表达式节点（`const x = function () {}` / 对象属性 `foo: function () {}`） */
+const FUNCTION_EXPRESSION = new Set([...FUNCTION_LIKE, 'function_expression'])
+
+/**
+ * Vue SFC 专用解析选项（仅 VueParser 传入；默认 parse 输出口径不变）。
+ * Options API 的事件处理器声明在 `export default { methods: { ... } }` 对象内，
+ * 顶层遍历无法产出函数条目；开启后额外把这些成员方法纳入输出。
+ */
+export interface JsParseOptions {
+  includeOptionsApiMethods?: boolean
+}
+
 /** web-tree-sitter 0.25 的子节点类型允许 null，统一过滤 */
 function namedKids(node: SyntaxNode): SyntaxNode[] {
   return node.namedChildren.filter((c): c is SyntaxNode => c !== null)
@@ -231,14 +243,100 @@ export class JsFamilyParser implements LanguageParser {
     private readonly parser: Parser
   ) {}
 
-  async parse(source: string): Promise<ParsedFile> {
+  async parse(source: string, options?: JsParseOptions): Promise<ParsedFile> {
     const tree = this.parser.parse(source)
     const out: ParsedFunction[] = []
     if (!tree) return { functions: out, imports: [] }
     for (const child of namedKids(tree.rootNode)) {
       this.collectTopLevel(child, false, out)
     }
+    if (options?.includeOptionsApiMethods) {
+      this.collectOptionsApiMethods(tree.rootNode, out)
+    }
     return { functions: out, imports: collectImports(tree.rootNode) }
+  }
+
+  /**
+   * Options API 方法提取（仅 Vue SFC script 块启用）：
+   * `export default { methods: { foo() {}, bar: function () {}, baz: () => {} } }`
+   * 的对象成员按方法条目输出；`defineComponent({...})` 包装同样识别。
+   * className 取 null（对象字面量无类名），visibility 视为 public、exported=false。
+   */
+  private collectOptionsApiMethods(root: SyntaxNode, out: ParsedFunction[]): void {
+    for (const stmt of namedKids(root)) {
+      if (stmt.type !== 'export_statement') continue
+      if (!allKids(stmt).some((c) => c.type === 'default')) continue
+      const options = this.findOptionsObject(stmt)
+      if (!options) continue
+      const methods = namedKids(options).find(
+        (child) =>
+          child.type === 'pair' &&
+          child.childForFieldName('key')?.text === 'methods' &&
+          child.childForFieldName('value')?.type === 'object'
+      )
+      const methodsObject = methods?.childForFieldName('value')
+      if (!methodsObject) continue
+      for (const member of namedKids(methodsObject)) {
+        this.collectOptionsApiMember(member, out)
+      }
+    }
+  }
+
+  /** export default 的选项对象：裸对象字面量或 defineComponent({...}) 的首个对象参数 */
+  private findOptionsObject(exportStmt: SyntaxNode): SyntaxNode | null {
+    for (const child of namedKids(exportStmt)) {
+      if (child.type === 'object') return child
+      if (child.type === 'call_expression') {
+        // 只认 defineComponent：任意 default someCall({ methods }) 不应被当成组件选项
+        const callee = child.childForFieldName('function')?.text ?? ''
+        if (callee !== 'defineComponent' && !callee.endsWith('.defineComponent')) continue
+        const args = child.childForFieldName('arguments')
+        const object = args ? namedKids(args).find((c) => c.type === 'object') : undefined
+        if (object) return object
+      }
+    }
+    return null
+  }
+
+  private collectOptionsApiMember(member: SyntaxNode, out: ParsedFunction[]): void {
+    if (member.type === 'method_definition') {
+      out.push(
+        this.buildEntry({
+          node: member,
+          anchor: member,
+          nameNode: member.childForFieldName('name'),
+          paramsNode: member.childForFieldName('parameters'),
+          bodyNode: member.childForFieldName('body'),
+          returnTypeNode: member.childForFieldName('return_type'),
+          // 合成组件类名：避免与顶层同名同参函数生成相同稳定 ID（批注/变更历史错位）
+          className: '[component]',
+          kind: 'method',
+          exported: false,
+          visibility: 'public',
+          decorators: leadingDecorators(member)
+        })
+      )
+      return
+    }
+    if (member.type !== 'pair') return
+    const key = member.childForFieldName('key')
+    const value = member.childForFieldName('value')
+    if (!key || !value || !FUNCTION_EXPRESSION.has(value.type)) return
+    out.push(
+      this.buildEntry({
+        node: member,
+        anchor: member,
+        nameNode: key,
+        paramsNode: value.childForFieldName('parameters'),
+        bodyNode: value.childForFieldName('body'),
+        returnTypeNode: value.childForFieldName('return_type'),
+        className: '[component]',
+        kind: 'method',
+        exported: false,
+        visibility: 'public',
+        decorators: leadingDecorators(member)
+      })
+    )
   }
 
   private buildEntry(opts: BuildOptions): ParsedFunction {

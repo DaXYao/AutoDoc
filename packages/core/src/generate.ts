@@ -52,8 +52,15 @@ function derivePurpose(parsed: ParsedFunction): string {
     if (first) return first.trim()
   }
   const paramsText = parsed.params.length > 0 ? parsed.params.join(', ') : '无参数'
+  // Options API 的 methods 成员没有类名（className=null），按「方法」描述而非「类 的方法」
   const prefix =
-    parsed.kind === 'method' ? `类 ${parsed.className ?? ''} 的方法` : '函数'
+    parsed.kind === 'method'
+      ? parsed.className === '[component]'
+        ? '组件方法'
+        : parsed.className
+          ? `类 ${parsed.className} 的方法`
+          : '方法'
+      : '函数'
   const returnType = parsed.returnType ? `，返回 ${parsed.returnType}` : ''
   return `${prefix} ${parsed.name}，参数（${paramsText}）${returnType}`
 }
@@ -227,15 +234,17 @@ function resolveModule(
   if (!source.startsWith('./') && !source.startsWith('../')) return null
   const base = posix
     .normalize(posix.join(posix.dirname(importerRel), source))
-    .replace(/\.(ts|tsx|js|jsx|mjs|cjs)$/, '')
+    .replace(/\.(ts|tsx|js|jsx|mjs|cjs|vue)$/, '')
   const candidates = [
     `${base}.ts`,
     `${base}.tsx`,
     `${base}.js`,
     `${base}.jsx`,
+    `${base}.vue`,
     `${base}/index.ts`,
     `${base}/index.tsx`,
-    `${base}/index.js`
+    `${base}/index.js`,
+    `${base}/index.vue`
   ]
   for (const candidate of candidates) {
     if (knownPaths.has(candidate)) return candidate

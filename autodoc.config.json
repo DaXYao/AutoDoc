@@ -2,9 +2,11 @@
   "include": [
     "packages/core/src/**/*.ts",
     "packages/server/src/**/*.ts",
-    "packages/shared-types/src/**/*.ts"
+    "packages/shared-types/src/**/*.ts",
+    "packages/web/src/**/*.vue",
+    "packages/web/src/**/*.ts"
   ],
-  "exclude": ["**/*.test.ts", "**/*.spec.ts"],
+  "exclude": ["**/*.test.ts", "**/*.spec.ts", "**/*.d.ts"],
   "classification": {
     "fallback": "pending",
     "rules": [

@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,6 +24,12 @@ describe('文档生成管线（fixture 集成测试）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'autodoc-gen-'))
     dirs.push(dir)
     cpSync(fixtureDir, dir, { recursive: true })
+    return dir
+  }
+
+  function prepareEmpty(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'autodoc-gen-vue-'))
+    dirs.push(dir)
     return dir
   }
 
@@ -160,6 +166,77 @@ describe('文档生成管线（fixture 集成测试）', () => {
 
     // 变更历史归档保留：isEmpty 应有「新增 + 重命名」两条记录
     expect(storage.listChanges(isEmpty.id)).toHaveLength(2)
+    storage.close()
+  })
+
+  it('Vue SFC：language=vue、[template] 入口与跨文件调用边', async () => {
+    const root = prepareEmpty()
+    mkdirSync(join(root, 'src'), { recursive: true })
+    writeFileSync(
+      join(root, 'autodoc.config.json'),
+      JSON.stringify(
+        {
+          include: ['src/**/*.vue', 'src/**/*.ts'],
+          classification: { fallback: 'implementation' },
+          storage: { type: 'json', path: '.autodoc/autodoc.json' }
+        },
+        null,
+        2
+      )
+    )
+    writeFileSync(
+      join(root, 'src/App.vue'),
+      `<script setup lang="ts">
+import { formatTitle } from './format'
+
+function handleClick() {
+  formatTitle('clicked')
+}
+</script>
+
+<template>
+  <button @click="handleClick">click</button>
+  <button @click="formatTitle('raw')">raw</button>
+</template>
+`
+    )
+    writeFileSync(
+      join(root, 'src/format.ts'),
+      `/** 格式化标题 */
+export function formatTitle(text: string): string {
+  return text.trim()
+}
+`
+    )
+
+    const normalized = await loadConfig(root)
+    const storage = createStorage(normalized.config.storage, root)
+    const { files } = await generateDocs({ rootDir: root, normalized, storage })
+
+    expect(files.map((f) => f.fileId).sort()).toEqual(['src/App.vue', 'src/format.ts'])
+    const vueFile = files.find((f) => f.fileId === 'src/App.vue')!
+    expect(vueFile.language).toBe('vue')
+    expect(vueFile.functions.map((fn) => fn.name)).toEqual(['handleClick', '[template]'])
+
+    const handleClick = vueFile.functions.find((fn) => fn.name === 'handleClick')!
+    expect(handleClick.startLine).toBe(4)
+    expect(handleClick.endLine).toBe(6)
+
+    const template = vueFile.functions.find((fn) => fn.name === '[template]')!
+    expect(template.startLine).toBe(9)
+    expect(template.endLine).toBe(12)
+    // 模板事件按执行顺序接入调用图：本地函数 + import 的函数
+    expect(template.calls.map((edge) => edge.calleeName)).toEqual(['handleClick', 'formatTitle'])
+    expect(template.calls.map((edge) => edge.line)).toEqual([10, 11])
+    expect(template.calls[0].calleeId).toBe(handleClick.id)
+    expect(template.calls[0].calleeCategory).toBe('implementation')
+
+    // 跨文件：formatTitle 经 import 解析到 ./format 的导出函数
+    const formatFile = files.find((f) => f.fileId === 'src/format.ts')!
+    const formatTitle = formatFile.functions.find((fn) => fn.name === 'formatTitle')!
+    expect(template.calls[1].calleeId).toBe(formatTitle.id)
+    expect(template.calls[1].calleeCategory).toBe('implementation')
+    expect(template.calls[1].calleePurpose).toBe('格式化标题')
     storage.close()
   })
 
