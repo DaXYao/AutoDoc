@@ -2,6 +2,16 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · H3：Agent-only 洞察页状态呈现 + 实机复验 · web
+
+- **动机**：H2 实机暴露 Agent-only（无 KEY）时洞察页仍显示「未配置 AI / 纯静态图谱」警告、顶部仍写「AI 已增强」来源不明；功能已生效但界面在自相矛盾。
+- **内容**：`InsightHome` 新增 `hasAgentSupply`（`partitionSource==='agent'` 或 `agentSources` 非空），把「本地 KEY 能力」与「语义是否生效」分开判定：顶部标签在无 KEY 且有供给时显示「Agent 已增强」；新增绿色「Agent 语义供给已生效」横幅（指向 @agent 标记与供给抽屉）；真正无供给时的 warning 文案补上「可让外部 Agent 按规则契约供给」路径。`AgentSupplyPanel` 错误清单说明由「六个 pass」改为九个。
+- **实机复验**（demo `h2-demo`，`DEEPSEEK_API_KEY=` 空值模拟 Agent-only）：21 项供给生效（partition 1 / flows 1 / narratives 4 / coreRoles 8 / keySteps 7），0 错误；洞察页显示 Agent 已增强横幅与「下单主流程」Agent 脉络树；`handleCreateOrder` 函数页显示 Agent 系统角色、调用链路按 keySteps 拆分主干/次要（无降级提示）、所在链路 4 条均有叙事与「我的角色」+ @qoder 徽标；供给抽屉显示 `洞察 21 / 变更 0`、建议 19（均属未供给的 pass）。
+- **排障记录**：复验时误用 `#/insight`（该路由不存在，`<main>` 渲染为空），洞察页实际路由是 `#/`；与代码无关，未产生改动。
+- **影响范围**：仅 web 两文件（`InsightHome.vue`、`AgentSupplyPanel.vue`）；core/server/shared-types 未改，不新增依赖。
+- **测试**：`pnpm lint` 全绿；`pnpm test` 全绿（core 170 / web 259 / server 421 = 850）。
+- **关联 commit**：5b50c52。
+
 ## 2026-10-20 · H2：Agent 业务脉络树 + 调用主干供给（flows / keySteps）——整树原子替换 + 双口径 basis · server+shared-types+web
 
 - **动机**：Agent-only 实测暴露两个空洞：①业务脉络树只有静态/本地结果，Agent 无法供给；②随机打开函数面板，「所在链路」与「调用主干角色」大面积未生成。H2 把 `flows`（整树）与 `keySteps`（调用主干）纳入供给通道，补齐「结构划分 + 业务脉络 + 函数主干」三层。
