@@ -2,6 +2,38 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · A1：AutoDoc 自我分析（Agent-only）——797 函数 / 200 链路 / 15 模块全量供给
+
+- **目标**：用 AutoDoc 分析 AutoDoc 自身（非示例项目），验证 Agent-only 全链路，并把此前缺失的三分类、核心判定、内部步骤、外部库补全全部供上。
+- **范围**：`autodoc.config.json` 纳入 web `.vue` / `.ts`（94 个文件、797 个函数，含 20 个 `.vue`）；partition 先按职责重划为 15 个模块（语言解析、核心引擎、服务入口、洞察、供给、前端等），应用后 basis `e050b8e0`，再按新划分供其余 pass。
+- **供给**：qoder 一份 Agent 供给 2371 条、0 错误、0 忽略：partition 1 / flows 1 / modules 15 / narratives 200 / categories 329 / coreJudgment 797 / coreRoles 113 / blocks 167 / keySteps 697 / externals 51。两次快照：partition 应用 `f712ffc5`，全量语义合并 `b1ccd6ec`（均可回滚）。
+- **验收**：`/api/insight` 的 9 个洞察侧 AI 段全部 `ok` + `aiSource=agent`；`agentSources=2371`；页面「AI 段状态」零「未生成」，业务脉络 5 条主线，供给抽屉显示生效 2371 / 错误 0；函数页可看到 Agent 系统角色、调用主干、内部步骤与所在链路叙事。
+- **说明**：供给文件与洞察数据库位于 `.autodoc/`（gitignored），不进入代码提交；本轮代码提交包含 Vue 解析与 externals 供给能力。
+- **关联 commit**：本次代码提交。
+
+## 2026-10-21 · E1：externals Agent 供给（外部库补全）· shared-types+server+web
+
+- **动机**：Agent-only 时「外部库补全」一直显示未生成；该 pass 原被明确标为本地 AI 专属，Agent 无法供给。补齐后洞察侧十个语义 pass 均可由 Agent 产出。
+- **供给协议**：pass `externals`；objectId `${externalModule}::${symbol}`（按最后一个 `::` 拆分，兼容 `node:fs`）；value `{ purpose, signature? }`（对齐 `ExternalSymbolInfo`）；无 basis；只补用途/签名，不改 CallEdge/分类。
+- **服务端**：`collectGraphExternalSymbols` 从 CallEdge（calleeId 缺失 + externalModule 非空）去重收集，附 caller/line 锚点；校验 objectId 必须存在于实时图谱、purpose 非空/长度上限、禁止契约外字段；索引 `externalSymbols` + 契约 §4.9 + 建议 `external-symbol`；按符号字段级合并（保留同模块其它符号与本地已有 signature）；容器归一为 null-prototype，防 `__proto__` / `constructor` 键污染原型链；`PASS_TO_AI_KEY`、覆盖度、内容哈希、overlay 全链路接入。
+- **前端**：`SUPPLY_PASS_ORDER` / 标签、建议 kind、抽屉「十个 pass」。
+- **测试**：校验/索引/建议/契约、按符号冲突与保留、missing、Agent-only overlay、内容哈希（undefined signature vs 空串）、原型污染、signature 保留。`pnpm lint` 全绿；`pnpm test` 通过（core 180 / server 436 / web 259）。
+- **边界**：workspace 自有包暂未在 Agent 索引中过滤；索引外部符号未截断，大仓契约体积需关注。
+- **关联 commit**：本次提交。
+
+## 2026-10-21 · V1：Vue 单文件组件（.vue）解析支持 · core/config
+
+- **动机**：AutoDoc 全量自我分析需要覆盖 `packages/web` 的 Vue SPA；此前 `.vue` 无解析器，前端代码（含模板事件）完全缺席文档与调用图。
+- **内容**：新增 `packages/core/src/parser/vue.ts`（`VueParser implements LanguageParser`，extensions `['vue']`）。
+  - 只解析 `<script>` / `<script setup>`（`lang` = ts/tsx/js/jsx，缺省 js，两块可并存），复用注册表中的 JS/TS 解析器；函数 startLine/endLine、callSites、codeBlocks 行号按 script 块起始行回填为 `.vue` 原文件坐标；imports 合并去重。
+  - 轻量扫描根 `<template>`（支持嵌套，忽略 HTML 注释；script 内容区间不参与 HTML 注释判断，脚本注释里的 `<!--` 不会吞掉模板），用 `@event` / `v-on:event`（含修饰符、单双引号）提取模板引用：显式调用/成员调用一律接入（解析不到由主流程归外部/未解析），裸引用只接脚本函数名或 import localName，`$event` 等内置对象过滤。
+  - 每个 `.vue` 都生成合成入口函数 `[template]`（kind=function、className=null、visibility=module-local、exported=false、bodyText=模板块源码，无模板时为空入口；callSites=模板事件引用 role=core）。
+  - Options API 只识别裸 default 对象与 `defineComponent` 包装的 `methods`，成员方法按 `kind=method` 提取并合成 `className='[component]'`（避免与顶层同名同参函数生成相同稳定 ID）；`JsFamilyParser.parse` 增加可选 `includeOptionsApiMethods`（默认不启用，.ts/.js 输出口径不变）。
+  - `registry.ts` 在 JS/TS 解析器之后注册 VueParser；`PARSER_VERSION` 1→2，旧增量解析缓存整体失效；默认 include 纳入 `.vue`，`autodoc.config.json` 纳入 `packages/web/src/**/*.vue` 与 `packages/web/src/**/*.ts` 并排除 `**/*.d.ts`；相对导入解析增加 `.vue` / `index.vue` 候选。
+- **测试**：新增 `packages/core/test/vueParser.test.ts`（script setup 事件/行号/`[template]`/无模板/无事件模板/Options API/双 script/import 去重/codeBlocks 行号/本地成员调用/script 内 `<!--`/同名函数 ID 区分）与 generateDocs 集成用例（`.vue` language、跨文件调用边）。core 180 项、server 436 项通过，`pnpm lint` 全绿；全仓测试通过。
+- **已知边界**：不支持 Pug 等非 HTML 模板语言；script 字符串中出现 `</script>` 会提前截断；模板内联表达式只做轻量词法扫描（模板字符串插值、正则字面量、复杂嵌套属性可能漏判/误判）；跨 `.vue` 文件 import 已加入解析候选但未做专门集成测试。
+- **关联 commit**：本次 core/config 提交。
+
 ## 2026-10-21 · R1 收尾：MIT 许可证 + Node engines 对齐 · docs/config
 
 - 新增根目录 `LICENSE`（MIT，Copyright (c) 2026 DaXYao），README 末尾增加「许可证」段落。

@@ -36,10 +36,33 @@
 - [ ] **让外部 Agent 当「第二语义生产者」的供给通道范式**：按 pass 一类一份文件（值形状照搬本地缓存）+ 位置化 id 双重对账（文件级划分指纹 + 条目级锚点）+ 逐条严格校验（坏条目不废整份）+ 索引取实时图谱且建议自检补齐 + 字段级合并（冲突 Agent 赢）→ 归档为带来源的版本并生效 + 三级来源标注 + 撤回即清缓存（见 2026-10-20 条）。
 - [ ] **结构层供给范式（两轮契约）**：结构 pass（划分/骨架）先行、应用到请求私有图并重算 basis，旧 basis 下的语义文件自然过期；结构变化按「被改写字段清单」保留/重算/同步，派生树失效；来源状态不写本地状态缓存（见 2026-10-20 条）。
 - [ ] **整树供给范式**：整棵树作为唯一键 `root` 的原子值，引用一次性对账、失败整棵拒绝；服务端归一化结构与 id；本地生成在供给存在时完全让位、撤回即恢复；供给指纹与本地派生缓存指纹分离（见 2026-10-20 条）。
+- [ ] **Vue SFC 解析**：轻量块扫描（script 整块跳过、template 按嵌套深度配对）+ 复用既有 JS/TS 解析器并平移行号 + 合成 `[template]` 入口把模板事件接入调用图（见 2026-10-21 条）。
+- [ ] **外部库补全按符号供给**：`${module}::${symbol}` 复合对象 id + 按符号字段级合并 + 可选字段缺省保留本地值 + null-prototype 容器防原型污染（见 2026-10-21 E1 条）。
 
 ---
 
 ## 成功经验条目
+
+### 2026-10-21 · Vue SFC：复用脚本解析器 + 轻量模板扫描 + 合成模板入口
+- **场景**：已有 tree-sitter JS/TS 解析器，要给 `.vue` 增加文档与调用图支持。**适用条件**：SFC 的 script 块是标准 JS/TS；模板是 HTML 形态、事件处理器写在属性值里；不引入 HTML parser 依赖。
+- **做法**：
+  1. **块扫描而非全文正则**：顺序找 `<script>`/`<template>` 开标签；script 直接跳到 `</script>`（其内容里的 `<template>` 不误判），根 template 按 `<template>`/`</template>` 嵌套深度配对；HTML 注释区间统一跳过。
+  2. **复用脚本解析器 + 行号回填**：script 内容交给注册表中的 ts/tsx/js 解析器，按「内容起始行 - 1」平移函数 startLine/endLine、callSites[].line、codeBlocks 起止行；imports 按四元组合并去重。
+  3. **合成模板入口**：每个 SFC 都产出一个 `[template]` ParsedFunction（无模板时为空入口；bodyText=模板整块源码，保证模板变化改指纹；callSites=事件引用），让模板→脚本函数的调用边走既有 buildCallEdges，无需改图谱层。
+  4. **引用接入与防误报**：显式调用/成员调用一律接入（不强制已知名，解析不到交给主流程归外部/未解析）；裸引用只接脚本函数名或 import localName；`$event` 等内置对象过滤；script 内容区间不参与 HTML 注释判断（脚本注释里的 `<!--` 不吞模板）。
+  5. **Options API 兼容**：对象字面量方法不是顶层声明，靠解析选项在 SFC 场景额外提取裸 `export default { methods }` / `defineComponent({...})` 的 methods，合成 `className='[component]'` 防与顶层同名同参函数撞稳定 ID；默认 JS/TS 输出不变。
+- **验证清单**：行号（脚本/模板/codeBlocks）、双 script、import 去重、嵌套模板、无模板/无事件模板、Options API、成员调用 receiver、script 内 `<!--`、跨文件调用边；同时用仓库内 20 个真实 `.vue` 做冒烟解析。
+- **证据**：`packages/core/src/parser/vue.ts`、`packages/core/test/vueParser.test.ts`、`packages/core/test/generate.test.ts` 的 Vue 集成用例。
+
+### 2026-10-21 · 外部库补全按符号供给：复合对象 id + 可选字段保留 + 原型安全
+- **场景**：已有「按 pass 一类一份文件」的 Agent 供给通道，要新增外部库补全（每个外部模块的每个符号一条用途/签名）。**适用条件**：值天然是「两级 key（模块→符号）→ 小对象」，且本地也有一份同形状的 AI 结果。
+- **做法**：
+  1. **对象 id 用复合键**：`${module}::${symbol}`，按最后一个 `::` 拆分（兼容 `node:fs` 这类含冒号的模块名）；服务端从图谱的「calleeId 缺失 + externalModule 非空」调用去重得到合法 id，并附 caller/line 锚点。
+  2. **按符号合并**：写入 `insight.externals[module][symbol]`，保留同模块其它符号；可选字段（signature）缺省时保留本地已有值，不整体替换。
+  3. **原型安全**：外部可控的 module/symbol 键写入前把容器归一为 `Object.create(null)`，并用 `hasOwnProperty` 读取，防 `__proto__` / `constructor` 污染。
+  4. **状态与索引**：`PASS_TO_AI_KEY` 映射、覆盖度分母=去重外部符号数、内容哈希纳入（signature 的 undefined 与空串区分）、索引/契约/建议同一套 id。
+- **验证清单**：按符号冲突与保留、missing、Agent-only overlay 状态、内容哈希去重、原型污染、signature 保留、索引/契约/建议自洽。
+- **证据**：`packages/server/src/agentSupply.ts`、`supplyCache.ts`、`agentSupplyMerge.ts`、`packages/server/test/agentSupplyMerge.test.ts`。
 
 ### 2026-10-20 · 整树供给范式：原子值 + 引用对账 + 双口径指纹 + 本地让位
 - **场景**：外部 Agent 要供给一个整体结构（如递归脉络树），结构内部大量引用位置化 id（`mod:N` / `chain:N`）与稳定函数 id，而本地还有同一结构的 AI/启发式生成路径。**适用条件**：该结构可以被无歧义地序列化成单棵树；本地与外部两条链路都能产出同形状结果。
