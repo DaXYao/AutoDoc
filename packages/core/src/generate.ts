@@ -6,6 +6,7 @@ import { diffFileSnapshots, type DetectedChange, type FileSnapshot } from './cha
 import type { NormalizedConfig } from './config.js'
 import { collectFiles } from './files.js'
 import { fingerprint, makeStableId, sha256 } from './identity.js'
+import { overloadQualifier } from './parser/identity.js'
 import { ensureDefaultParsers, PARSER_VERSION, parserRegistry } from './parser/registry.js'
 import type { ParsedFile, ParsedFunction, ParsedImport } from './parser/types.js'
 import type { ParseCacheEntry, StorageAdapter } from './storage/StorageAdapter.js'
@@ -181,13 +182,41 @@ function isParsedFileShape(value: unknown): value is ParsedFile {
   )
 }
 
+/** C++ 模块扩展名（include 目标与稳定 ID 判定共用；只含 C++ 源/头） */
+const CPP_MODULE_EXTENSIONS = ['hpp', 'h', 'hh', 'hxx', 'cpp', 'cc', 'cxx', 'inl']
+const CPP_EXTENSION_SET = new Set(CPP_MODULE_EXTENSIONS)
+
+/** 去除 JS/TS/Vue 模块说明符扩展名（C++ include 走独立的 resolveCppModule） */
+const MODULE_EXTENSION_PATTERN = /\.(ts|tsx|js|jsx|mjs|cjs|vue)$/
+
+/** 去除 C++ include 说明符扩展名（`.hpp` → 基名，便于补全候选） */
+const CPP_EXTENSION_PATTERN = /\.(hpp|h|hh|hxx|cpp|cc|cxx|inl)$/
+
+/** C++ quoted include 合成的 ParsedImport localName 前缀（与 C1a 解析器约定） */
+const CPP_INCLUDE_LOCAL_PREFIX = '__cpp_include__:'
+
+/** 当前文件是否 C++ 源/头（决定稳定 ID 是否并入重载限定符） */
+function isCppSource(relPath: string): boolean {
+  const match = /\.([^./\\]+)$/.exec(relPath)
+  return match !== null && CPP_EXTENSION_SET.has(match[1].toLowerCase())
+}
+
 /** 由解析中间结构构建 FunctionDoc（调用边留空，阶段二回填） */
 function buildFunctionDoc(
   relPath: string,
   parsed: ParsedFunction,
   normalized: NormalizedConfig
 ): FunctionDoc {
-  const id = makeStableId(relPath, parsed.className, parsed.name, parsed.params)
+  // C++ 的 const/非 const 重载参数签名相同：把 cv/ref/noexcept/override/final 并入 ID 哈希。
+  // 非 C++ 与无限定符的 C++ 函数 qualifier 为空，既有稳定 ID 不变。
+  const qualifier = isCppSource(relPath) ? overloadQualifier(parsed.signature) : ''
+  const id = makeStableId(
+    relPath,
+    parsed.className,
+    parsed.name,
+    parsed.params,
+    qualifier || undefined
+  )
   const category = classifyFunction(
     {
       relPath,
@@ -222,9 +251,10 @@ function buildFunctionDoc(
 }
 
 /**
- * 相对模块说明符 → 项目内文件 id。
+ * 相对模块说明符 → 项目内文件 id（仅 JS/TS/Vue）。
  * 仅解析 './' '../' 相对导入；裸模块（vue/fastify/node:fs）返回 null（外部）。
  * 依次尝试 .ts/.tsx/.js/.jsx 与 /index.* 形态，命中已知文件才返回（principled，不猜测）。
+ * C++ include 不走这里：避免 `#include "x.h"` 命中同目录 x.ts，也避免 JS import 命中 C++ 文件。
  */
 function resolveModule(
   importerRel: string,
@@ -234,7 +264,7 @@ function resolveModule(
   if (!source.startsWith('./') && !source.startsWith('../')) return null
   const base = posix
     .normalize(posix.join(posix.dirname(importerRel), source))
-    .replace(/\.(ts|tsx|js|jsx|mjs|cjs|vue)$/, '')
+    .replace(MODULE_EXTENSION_PATTERN, '')
   const candidates = [
     `${base}.ts`,
     `${base}.tsx`,
@@ -253,8 +283,141 @@ function resolveModule(
 }
 
 /**
+ * C++ include 专用模块解析：只认 C++ 源/头扩展名。
+ * 优先精确命中 include 说明符本身（`x.h` 存在时不会被 `x.ts` 或 `x.cpp` 抢走），
+ * 再去掉扩展名按 C++ 扩展名补全；零个候选返回 null（不猜）。
+ */
+function resolveCppModule(
+  importerRel: string,
+  source: string,
+  knownPaths: Set<string>
+): string | null {
+  if (!source.startsWith('./') && !source.startsWith('../')) return null
+  const specifier = posix.normalize(posix.join(posix.dirname(importerRel), source))
+  if (knownPaths.has(specifier)) return specifier
+  const base = specifier.replace(CPP_EXTENSION_PATTERN, '')
+  for (const extension of CPP_MODULE_EXTENSIONS) {
+    const candidate = `${base}.${extension}`
+    if (knownPaths.has(candidate)) return candidate
+  }
+  return null
+}
+
+/**
+ * C++ include 兜底：按「唯一 basename/后缀」在已知文件里定位（如 `#include "widget.hpp"`）。
+ * 仅接受纯相对说明符，且只匹配 C++ 源/头（防止 include 落到 .ts 等其它语言）；
+ * 零个或多个候选返回 null（不猜）。
+ */
+function resolveByUniqueSuffix(source: string, knownPaths: Set<string>): string | null {
+  const normalized = posix.normalize(source).replace(/^\.\//, '')
+  if (normalized.startsWith('../') || normalized.startsWith('/') || normalized === '.') {
+    return null
+  }
+  let match: string | null = null
+  for (const relPath of knownPaths) {
+    if (!CPP_EXTENSION_PATTERN.test(relPath)) continue
+    if (relPath !== normalized && !relPath.endsWith(`/${normalized}`)) continue
+    if (match !== null) return null
+    match = relPath
+  }
+  return match
+}
+
+/** 收集本文件 quoted include 解析出的项目内文件集合（系统头不产生 import，天然排除） */
+function resolveCppIncludes(
+  relPath: string,
+  imports: ParsedImport[],
+  knownPaths: Set<string>
+): Set<string> {
+  const included = new Set<string>()
+  for (const imp of imports) {
+    if (!imp.localName.startsWith(CPP_INCLUDE_LOCAL_PREFIX)) continue
+    const target =
+      resolveCppModule(relPath, imp.source, knownPaths) ??
+      resolveByUniqueSuffix(imp.source, knownPaths)
+    if (target !== null) included.add(target)
+  }
+  return included
+}
+
+/** FunctionDoc.id → 文件路径（稳定 ID 首段为相对路径，不改数据模型） */
+function fileOfFunctionId(id: string): string {
+  const separator = id.indexOf('::')
+  return separator >= 0 ? id.slice(0, separator) : id
+}
+
+/** C++ 建图上下文：全局同名索引 + 本文件 include 可见文件集合 + 文件语言索引 */
+interface CppCallContext {
+  allByName: Map<string, FunctionDoc[]>
+  includedFiles: Set<string>
+  /** 文件 id → 语言：全局回退只允许 language === 'cpp'，避免 C++ 连到同名 TS/JS 函数 */
+  languageByFile: Map<string, string>
+}
+
+/**
+ * 候选收窄：仅当 receiver 以 `::` 开头（限定名 `a::foo()`）时按 className 匹配；
+ * `obj.foo()` 的 plain receiver 是变量名，不能当类名，否则变量名撞类名会误连。
+ * 之后优先当前函数所在作用域（命名空间/类）；过滤后为空则保持原候选池。
+ */
+function narrowCppCandidates(
+  fn: FunctionDoc,
+  receiver: string | undefined,
+  candidates: FunctionDoc[]
+): FunctionDoc[] {
+  let narrowed = candidates
+  if (receiver?.startsWith('::')) {
+    const scope = receiver.slice(2)
+    const byReceiver = narrowed.filter(
+      (candidate) =>
+        candidate.className === scope || candidate.className?.endsWith(`::${scope}`) === true
+    )
+    if (byReceiver.length > 0) narrowed = byReceiver
+  }
+  if (fn.className !== null) {
+    const sameScope = narrowed.filter((candidate) => candidate.className === fn.className)
+    if (sameScope.length > 0) narrowed = sameScope
+  }
+  return narrowed
+}
+
+/**
+ * C++ 调用解析（严格、不猜）：
+ * 1) include 可见候选（目标文件 ∈ 本文件 include 集合且 exported）：先按 receiver/当前作用域收窄，
+ *    收窄后恰好 1 个 → 命中，多个 → 放弃（不再绕过 receiver 直接判多候选）；
+ * 2) 无 include 命中 → 全局同名回退：receiver 限定作用域 > 当前 className > 全局唯一；
+ * 回退候选同样遵守可见性（本文件，或 exported 的跨文件函数），且只允许 C++ 文件；
+ * 任一优先级过滤后多候选一律放弃，解析不到保持外部/未解析。
+ */
+function resolveCppCallee(
+  fn: FunctionDoc,
+  calledName: string,
+  receiver: string | undefined,
+  context: CppCallContext
+): FunctionDoc | null {
+  const candidates = (context.allByName.get(calledName) ?? []).filter(
+    (candidate) => context.languageByFile.get(fileOfFunctionId(candidate.id)) === 'cpp'
+  )
+  const visible = candidates.filter(
+    (candidate) => candidate.exported && context.includedFiles.has(fileOfFunctionId(candidate.id))
+  )
+  if (visible.length > 0) {
+    const narrowed = narrowCppCandidates(fn, receiver, visible)
+    return narrowed.length === 1 ? narrowed[0] : null
+  }
+  // 私有/static 不跨文件可见；本文件内不受 exported 限制
+  const reachable = candidates.filter(
+    (candidate) => candidate.exported || fileOfFunctionId(candidate.id) === fileOfFunctionId(fn.id)
+  )
+  if (reachable.length === 0) return null
+  const narrowed = narrowCppCandidates(fn, receiver, reachable)
+  // 全局唯一才解析
+  return narrowed.length === 1 ? narrowed[0] : null
+}
+
+/**
  * 构建单个函数的调用边（阶段二）：
  * 1) 自调用；2) 文件内同名（优先同类方法）；3) 跨文件——经 import 映射到目标文件导出表；
+ * C++ 走严格模式：include 可见候选 → 限定作用域/同名回退，多候选一律不猜。
  * 解析不到一律归「外部/未解析」，禁止强行猜测。
  */
 function buildCallEdges(
@@ -264,7 +427,9 @@ function buildCallEdges(
   importByName: Map<string, ParsedImport>,
   relPath: string,
   knownPaths: Set<string>,
-  exportedIndex: Map<string, Map<string, FunctionDoc>>
+  exportedIndex: Map<string, Map<string, FunctionDoc>>,
+  language: string,
+  cppContext: CppCallContext
 ): CallEdge[] {
   const edges: CallEdge[] = []
   const seen = new Set<string>()
@@ -274,7 +439,8 @@ function buildCallEdges(
     const calledName = site.name
     if (seen.has(calledName)) continue
     seen.add(calledName)
-    if (calledName === fn.name) {
+    // 自调用短路：非 C++ 维持原口径；C++ 交给严格解析（重载/作用域唯一才连，多候选不猜）
+    if (calledName === fn.name && language !== 'cpp') {
       edges.push({
         callerId: fn.id,
         calleeName: calledName,
@@ -287,29 +453,35 @@ function buildCallEdges(
       })
       continue
     }
-    const candidates = byName.get(calledName) ?? []
-    let resolved: FunctionDoc | null =
-      candidates.find((c) => fn.className !== null && c.className === fn.className) ??
-      candidates[0] ??
-      null
-    if (!resolved) {
-      const imp = importByName.get(calledName)
-      if (imp) {
-        const targetFile = resolveModule(relPath, imp.source, knownPaths)
-        if (targetFile) {
-          resolved = exportedIndex.get(targetFile)?.get(imp.importedName) ?? null
+    let resolved: FunctionDoc | null
+    if (language === 'cpp') {
+      // C++ 不走 import 映射：include 可见候选 + 限定作用域回退，多候选不猜
+      resolved = resolveCppCallee(fn, calledName, site.receiver, cppContext)
+    } else {
+      const candidates = byName.get(calledName) ?? []
+      resolved =
+        candidates.find((c) => fn.className !== null && c.className === fn.className) ??
+        candidates[0] ??
+        null
+      if (!resolved) {
+        const imp = importByName.get(calledName)
+        if (imp) {
+          const targetFile = resolveModule(relPath, imp.source, knownPaths)
+          if (targetFile) {
+            resolved = exportedIndex.get(targetFile)?.get(imp.importedName) ?? null
+          }
         }
       }
-    }
-    // 命名空间内部调用：`import * as lib from './x'` + `lib.fn()` → 连到 x 导出的 fn。
-    // 仅当接收者是命名空间 import 的局部名时命中，静态 100% 确定才连（铁证级）。
-    // 暂缓：re-export(`export…from`)链与类静态方法 `Foo.bar()` 解析（更复杂/有歧义，留待后续阶段）。
-    if (!resolved && site.receiver) {
-      const nsImp = importByName.get(site.receiver)
-      if (nsImp && nsImp.kind === 'namespace') {
-        const targetFile = resolveModule(relPath, nsImp.source, knownPaths)
-        if (targetFile) {
-          resolved = exportedIndex.get(targetFile)?.get(calledName) ?? null
+      // 命名空间内部调用：`import * as lib from './x'` + `lib.fn()` → 连到 x 导出的 fn。
+      // 仅当接收者是命名空间 import 的局部名时命中，静态 100% 确定才连（铁证级）。
+      // 暂缓：re-export(`export…from`)链与类静态方法 `Foo.bar()` 解析（更复杂/有歧义，留待后续阶段）。
+      if (!resolved && site.receiver) {
+        const nsImp = importByName.get(site.receiver)
+        if (nsImp && nsImp.kind === 'namespace') {
+          const targetFile = resolveModule(relPath, nsImp.source, knownPaths)
+          if (targetFile) {
+            resolved = exportedIndex.get(targetFile)?.get(calledName) ?? null
+          }
         }
       }
     }
@@ -449,6 +621,43 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
     exportedIndex.set(unit.relPath, table)
   }
 
+  // 全局同名索引：仅 C++ 的「无 include 命中」回退使用；JS/TS 仍只用文件内 byName，
+  // 既有跨文件解析口径（必须经 import 映射）保持不变。languageByFile 保证 C++ 只回退到 C++。
+  const allFunctionsByName = new Map<string, FunctionDoc[]>()
+  const languageByFile = new Map<string, string>()
+  for (const unit of units) {
+    languageByFile.set(unit.relPath, unit.language)
+    for (const fn of unit.functions) {
+      const list = allFunctionsByName.get(fn.name) ?? []
+      list.push(fn)
+      allFunctionsByName.set(fn.name, list)
+    }
+  }
+
+  // C++ 类外定义在所在 .cpp 里看不到类声明：用全局已观测到的「方法作用域」回填 kind。
+  // 只对首段像类型名（大写开头）的作用域生效，避免把 namespace demo 的自由函数误判为方法。
+  const cppMethodScopes = new Set<string>()
+  for (const unit of units) {
+    if (unit.language !== 'cpp') continue
+    for (const fn of unit.functions) {
+      if (fn.kind === 'method' && fn.className) cppMethodScopes.add(fn.className)
+    }
+  }
+  if (cppMethodScopes.size > 0) {
+    for (const unit of units) {
+      if (unit.language !== 'cpp') continue
+      unit.functions.forEach((fn, index) => {
+        if (fn.kind !== 'function' || !fn.className || !cppMethodScopes.has(fn.className)) return
+        const last = fn.className.split('::').pop() ?? ''
+        if (!/^[A-Z]/.test(last)) return
+        const parsed = unit.parsed[index]
+        if (!parsed) return
+        fn.kind = 'method'
+        fn.purpose = derivePurpose({ ...parsed, kind: 'method' })
+      })
+    }
+  }
+
   const files: FileDoc[] = []
   const allChanges: DetectedChange[] = []
 
@@ -475,6 +684,13 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
         importByName.set(imp.localName, imp)
       }
     }
+    // C++ include 集合按文件隔离：系统头不产生 import，不会把别的文件的 include 带进来
+    const cppContext: CppCallContext = {
+      allByName: allFunctionsByName,
+      languageByFile,
+      includedFiles:
+        unit.language === 'cpp' ? resolveCppIncludes(relPath, imports, knownPaths) : new Set()
+    }
 
     parsed.forEach((p, index) => {
       functions[index].calls = buildCallEdges(
@@ -484,7 +700,9 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
         importByName,
         relPath,
         knownPaths,
-        exportedIndex
+        exportedIndex,
+        unit.language,
+        cppContext
       )
     })
 

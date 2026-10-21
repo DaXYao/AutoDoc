@@ -2,6 +2,7 @@ import { extname } from 'node:path'
 import type { LanguageParser } from './types.js'
 import { JsFamilyParser } from './jsFamily.js'
 import { CSharpParser } from './csharp.js'
+import { CppParser } from './cpp.js'
 import { VueParser } from './vue.js'
 import { createParser } from './wasm.js'
 
@@ -35,15 +36,16 @@ export class ParserRegistry {
  * - 升级 @vscode/tree-sitter-wasm（grammar wasm）或 web-tree-sitter；
  * - ParsedFile / ParsedFunction / ParsedImport / CodeBlock 结构调整。
  * v2：新增 VueParser（.vue script + 模板事件 + [template] 节点），.vue 首入解析范围。
+ * v3：新增 CppParser（.cpp/.cc/.cxx/.h/.hpp/.hh/.hxx/.inl 的命名空间/方法/lambda/include 提取）。
  * 仅改注释、重命名内部变量等不影响输出的变更无需 bump。
  */
-export const PARSER_VERSION = 2
+export const PARSER_VERSION = 3
 
 export const parserRegistry = new ParserRegistry()
 
 let defaultsRegistered = false
 
-/** 注册内置语言解析器（TypeScript / TSX / JavaScript / C# / Vue SFC），幂等 */
+/** 注册内置语言解析器（TypeScript / TSX / JavaScript / C# / Vue SFC / C++），幂等 */
 export async function ensureDefaultParsers(): Promise<void> {
   if (defaultsRegistered) return
   defaultsRegistered = true
@@ -52,6 +54,7 @@ export async function ensureDefaultParsers(): Promise<void> {
   const tsx = await createParser('tree-sitter-tsx')
   const javascript = await createParser('tree-sitter-javascript')
   const csharp = await createParser('tree-sitter-c-sharp')
+  const cpp = await createParser('tree-sitter-cpp')
   const tsParser = new JsFamilyParser('typescript', ['ts'], typescript)
   const tsxParser = new JsFamilyParser('tsx', ['tsx'], tsx)
   const jsParser = new JsFamilyParser('javascript', ['js', 'jsx', 'mjs', 'cjs'], javascript)
@@ -62,5 +65,12 @@ export async function ensureDefaultParsers(): Promise<void> {
   // Vue SFC 依赖 JS/TS 解析器解析 script 块，必须在其后注册
   parserRegistry.register(
     new VueParser({ ts: tsParser, tsx: tsxParser, js: jsParser, jsx: jsParser })
+  )
+  parserRegistry.register(
+    new CppParser(
+      'cpp',
+      ['cpp', 'cc', 'cxx', 'h', 'hpp', 'hh', 'hxx', 'inl'],
+      cpp
+    )
   )
 }

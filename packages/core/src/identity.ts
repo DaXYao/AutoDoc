@@ -11,15 +11,20 @@ export function paramsSignatureHash(params: string[]): string {
 /**
  * 函数稳定 ID = 相对路径 + 类名 + 方法名 + 参数签名哈希。
  * 批注与变更历史一律经由该 ID 关联，禁止退化为按文件名关联。
+ *
+ * 可选 qualifier（C++ const/volatile/&/&&/noexcept/override/final）非空时并入参数签名哈希，
+ * 区分参数相同但 const 与否不同的重载；非 C++ 调用方不传，既有 ID 保持不变。
  */
 export function makeStableId(
   relPath: string,
   className: string | null,
   name: string,
-  params: string[]
+  params: string[],
+  qualifier?: string
 ): string {
   const path = relPath.split('\\').join('/')
-  return `${path}::${className ?? '-'}::${name}@${paramsSignatureHash(params)}`
+  const signatureParams = qualifier ? [...params, `@qualifier:${qualifier}`] : params
+  return `${path}::${className ?? '-'}::${name}@${paramsSignatureHash(signatureParams)}`
 }
 
 /**

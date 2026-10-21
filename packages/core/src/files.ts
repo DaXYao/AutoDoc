@@ -2,7 +2,21 @@ import { readdir } from 'node:fs/promises'
 import { join, relative, sep } from 'node:path'
 import picomatch from 'picomatch'
 
-export const DEFAULT_INCLUDE = ['**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx', '**/*.vue']
+export const DEFAULT_INCLUDE = [
+  '**/*.ts',
+  '**/*.tsx',
+  '**/*.js',
+  '**/*.jsx',
+  '**/*.vue',
+  '**/*.cpp',
+  '**/*.cc',
+  '**/*.cxx',
+  '**/*.h',
+  '**/*.hpp',
+  '**/*.hh',
+  '**/*.hxx',
+  '**/*.inl'
+]
 
 export const DEFAULT_EXCLUDE = [
   '**/node_modules/**',
