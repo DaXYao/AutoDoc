@@ -42,6 +42,9 @@ const ALPHA = 'src/a.ts::-::alpha@aaaaaaaaaaaa'
 const BETA = 'src/a.ts::-::beta@bbbbbbbbbbbb'
 const GAMMA = 'src/util/c.ts::-::gamma@cccccccccccc'
 const DELTA = 'py/foreign.py::-::delta@dddddddddddd'
+const CS_LIST = 'Services/UserService.cs::UserService::ListUsers@111111111111'
+const CS_FETCH = 'Services/UserService.cs::IRepository::Fetch@222222222222'
+const CS_NAME = 'Services/UserService.cs::UserService::ComputeName@333333333333'
 const EXTERNAL_ID = 'node:fs::readFile'
 
 const workDirs: string[] = []
@@ -115,7 +118,7 @@ function mkFn(id: string, name: string, opts: Partial<FunctionDoc> = {}): Functi
   }
 }
 
-function fixtureFiles(includePython = false): FileDoc[] {
+function fixtureFiles(includePython = false, includeCsharp = false): FileDoc[] {
   const alpha = mkFn(ALPHA, 'alpha', {
     signature: 'alpha(req: Request): Promise<Result>',
     params: ['req: Request'],
@@ -146,6 +149,55 @@ function fixtureFiles(includePython = false): FileDoc[] {
       path: 'py/foreign.py',
       language: 'python',
       functions: [mkFn(DELTA, 'delta', { category: 'utility' })]
+    })
+  }
+  if (includeCsharp) {
+    // 字段与真实夹具 Services/UserService.cs 对齐：类级 [Description] 不落到方法、ListUsers 调 Fetch、注释块 26-29 行
+    const listUsers = mkFn(CS_LIST, 'ListUsers', {
+      className: 'UserService',
+      kind: 'method',
+      signature: 'ListUsers(int page): User[]',
+      params: ['int page'],
+      returnType: 'User[]',
+      visibility: 'public',
+      exported: true,
+      category: 'business',
+      docComment: '/// <summary>\n/// 分页拉取用户列表。\n/// </summary>',
+      startLine: 24,
+      endLine: 31,
+      calls: [mkCall(CS_LIST, CS_FETCH, 'Fetch', 29)],
+      codeBlocks: [{ ...mkBlock(CS_LIST, 26, 27, 'if (page < 1) throw new ArgumentOutOfRangeException(nameof(page));'), commentText: '// 参数校验' }]
+    })
+    const fetch = mkFn(CS_FETCH, 'Fetch', {
+      className: 'IRepository',
+      kind: 'method',
+      signature: 'Fetch(int page): User[]',
+      params: ['int page'],
+      returnType: 'User[]',
+      visibility: 'public',
+      exported: false,
+      category: 'implementation',
+      startLine: 51,
+      endLine: 51
+    })
+    const computeName = mkFn(CS_NAME, 'ComputeName', {
+      className: 'UserService',
+      kind: 'method',
+      signature: 'ComputeName(): string',
+      params: [],
+      returnType: 'string',
+      visibility: 'private',
+      exported: false,
+      category: 'utility',
+      startLine: 42,
+      endLine: 46,
+      codeBlocks: [{ ...mkBlock(CS_NAME, 44, 45, 'return "user-" + DateTime.Now.Ticks;'), commentText: '// 拼接显示名' }]
+    })
+    files.push({
+      fileId: 'Services/UserService.cs',
+      path: 'Services/UserService.cs',
+      language: 'csharp',
+      functions: [listUsers, fetch, computeName]
     })
   }
   return files
@@ -236,8 +288,13 @@ interface Fixture {
  * 完整 KEY 语义夹具：categories/coreJudgment/coreRoles/keySteps/blocks/externals/
  * modules/narratives/flows/partition 全部有本地生成内容。
  */
-function fullFixture(opts: { includePython?: boolean; withFlows?: boolean; partitionSource?: 'ai' | 'dir' } = {}): Fixture {
-  const graph = buildGraph(fixtureFiles(opts.includePython === true))
+function fullFixture(opts: {
+  includePython?: boolean
+  includeCsharp?: boolean
+  withFlows?: boolean
+  partitionSource?: 'ai' | 'dir'
+} = {}): Fixture {
+  const graph = buildGraph(fixtureFiles(opts.includePython === true, opts.includeCsharp === true))
   // graph 的目录划分描述为空；模拟本地 AI 划分写入模块职责
   for (const mod of graph.modules) {
     mod.description = `模块 ${mod.name} 的职责`
@@ -282,6 +339,19 @@ function fullFixture(opts: { includePython?: boolean; withFlows?: boolean; parti
       ...functions[DELTA],
       aiCategory: 'utility',
       aiCategoryReason: '脚本工具'
+    }
+  }
+  if (functions[CS_LIST]) {
+    functions[CS_LIST] = {
+      ...functions[CS_LIST],
+      isCore: true,
+      coreSource: 'ai',
+      coreReason: '用户列表入口',
+      aiCategory: 'business',
+      aiCategoryReason: '对外业务接口',
+      systemRole: '用户列表服务入口',
+      keyCallIndexes: [0],
+      internalSteps: []
     }
   }
 
@@ -1719,12 +1789,45 @@ describe('SG2 读取路径（readBackKeyGuarantees）', () => {
 /* ------------------------- 跳过规则 ------------------------- */
 
 describe('SG2 跳过规则', () => {
-  it('非 TS 对象跳过，不生成担保', async () => {
+  it('未接入语言（.py）对象跳过，不生成担保', async () => {
     const { graph, insight } = fullFixture({ includePython: true, withFlows: false })
     mockAuto()
     await attachKeyGuarantees(insight, graph, new AiCache(freshDir()))
     expect(insight.semanticGuarantees?.[`categories:${DELTA}`]).toBeUndefined()
     expect(insight.semanticGuarantees?.[`categories:${ALPHA}`]).toBeDefined()
+  })
+
+  it('C# 对象参与担保；同项目未接入语言（.py）仍跳过', async () => {
+    const { graph, insight } = fullFixture({ includePython: true, includeCsharp: true, withFlows: false })
+    mockAuto()
+    const stats = await attachKeyGuarantees(insight, graph, new AiCache(freshDir()))
+    expect(insight.semanticGuarantees?.[`categories:${CS_LIST}`]?.status).toBe('verified')
+    expect(insight.semanticGuarantees?.[`coreRoles:${CS_LIST}`]?.status).toBe('verified')
+    expect(insight.semanticGuarantees?.[`categories:${DELTA}`]).toBeUndefined()
+    expect(stats.skippedNonTs).toBe(1)
+  })
+
+  it('C# KEY 路径：TS+C# 项目生成 categories/modules/narratives/partition/flows 担保，不生成 C# externals', async () => {
+    const { graph, insight } = fullFixture({ includeCsharp: true })
+    const csChainId = chainIdOfEntry(graph, CS_LIST)
+    const csChain = insight.chains.find((c) => c.id === csChainId)!
+    csChain.narrative = '分页查询用户列表并按页读取。'
+    csChain.stepRoles = { [CS_LIST]: '入口校验并分页', [CS_FETCH]: '读取用户数据' }
+    const csModuleId = moduleIdOf(graph, 'Services')
+    mockAuto()
+    await attachKeyGuarantees(insight, graph, new AiCache(freshDir()))
+
+    expect(insight.semanticGuarantees?.[`categories:${CS_LIST}`]?.status).toBe('verified')
+    expect(insight.semanticGuarantees?.[`modules:${csModuleId}`]?.status).toBe('verified')
+    expect(insight.semanticGuarantees?.[`narratives:${csChainId}`]?.status).toBe('verified')
+    expect(insight.semanticGuarantees?.['partition:root']?.status).toBe('verified')
+    expect(insight.semanticGuarantees?.['flows:root']?.status).toBe('verified')
+    // C# 未解析调用的 externalModule 为 null：不会凭空生成 externals 担保对象
+    const externalKeys = Object.keys(insight.semanticGuarantees ?? {}).filter((k) =>
+      k.startsWith('externals:')
+    )
+    expect(externalKeys).toEqual([`externals:${EXTERNAL_ID}`])
+    expect(externalKeys.some((k) => k.includes('Services/'))).toBe(false)
   })
 
   it('Agent 已供给对象不覆盖（agent 担保原样保留）', async () => {
@@ -1784,7 +1887,7 @@ describe('SG2 跳过规则', () => {
     expect(insight.semanticGuarantees?.[`categories:${ALPHA}`]?.status).toBe('verified')
   })
 
-  it('非 TS 混合项目：partition/flows 不生成项目级担保', async () => {
+  it('含未接入语言（.py）的混合项目：partition/flows 不生成项目级担保', async () => {
     const { graph, insight } = fullFixture({ includePython: true })
     mockAuto()
     await attachKeyGuarantees(insight, graph, new AiCache(freshDir()))

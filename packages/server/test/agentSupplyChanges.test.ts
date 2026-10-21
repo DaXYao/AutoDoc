@@ -826,6 +826,9 @@ describe('buildChangesRulesSection', () => {
     expect(text).toContain('guarantees（SG3）')
     expect(text).toContain('"guarantees"')
     expect(text).toContain('"kind": "intent"')
+    expect(text).toContain('TypeScript / JavaScript 家族')
+    expect(text).toContain('C#（`.cs`）')
+    expect(text).toContain('该语言尚未接入语义担保')
   })
 
   it('🔴2 索引正文含链路 entryId 锚点', () => {

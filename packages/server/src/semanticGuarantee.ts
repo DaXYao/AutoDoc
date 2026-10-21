@@ -21,7 +21,7 @@ import type {
 import type { ProjectGraph } from './graph.js'
 
 /**
- * SG1：语义担保的静态证据校验（仅 TypeScript / JavaScript 家族）。
+ * SG1：语义担保的静态证据校验（已接入语言：TypeScript / JavaScript / TSX、C#）。
  *
  * 本模块只依赖 shared-types 与 graph.js（禁止 import agentSupply / supplyCache）：
  * - agentSupply.ts 负责供给文件的结构/长度校验并挂载 guarantee；
@@ -29,16 +29,16 @@ import type { ProjectGraph } from './graph.js'
  *   applyAgentGuaranteesToInsight，把担保结果写入 insight.semanticGuarantees；
  * - 本模块不调用 LLM（KEY 第二遍复核见 semanticVerifier.ts），也不做前端展示。
  *
- * 本轮支持的语言：.ts / .tsx / .js / .jsx / .mjs / .cjs。
- * 其它语言、项目级混合对象一律 unverified（原因「该语言尚未接入语义担保」），不阻塞合并。
+ * 已接入语言：.ts / .tsx / .js / .jsx / .mjs / .cjs / .cs。
+ * 未接入语言、项目级混合对象一律 unverified（原因「该语言尚未接入语义担保」），不阻塞合并。
  */
 
-/** 本轮接入语义担保的文件扩展名 */
-const TS_FAMILY_EXTENSIONS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'])
-const NON_TS_REASON = '该语言尚未接入语义担保'
-const MIXED_PROJECT_REASON = '项目级混合对象包含非 TypeScript/JavaScript 文件'
+/** 已接入语义担保的文件扩展名 */
+const GUARANTEE_LANGUAGE_EXTENSIONS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'cs'])
+const UNSUPPORTED_LANGUAGE_REASON = '该语言尚未接入语义担保'
+const MIXED_PROJECT_REASON = '项目级混合对象包含尚未接入语义担保的文件'
 /** import 静态校验（import 语句/模块解析）尚未接入：允许 claim，但只能停在未证实 */
-const IMPORT_UNSUPPORTED_REASON = 'TypeScript 轮次暂不支持 import 静态校验'
+const IMPORT_UNSUPPORTED_REASON = '语义担保暂不支持 import 静态校验'
 
 const CLAIM_KINDS: SemanticClaimKind[] = [
   'call',
@@ -110,12 +110,12 @@ export function fileIdOfFunctionId(functionId: string): string | null {
   return at > 0 ? functionId.slice(0, at) : null
 }
 
-/** 本轮只支持 TypeScript/JavaScript 家族（按文件扩展名判定） */
-export function isTsFamilyFile(fileId: string): boolean {
+/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C#，按文件扩展名判定） */
+export function isGuaranteeLanguageFile(fileId: string): boolean {
   const lower = fileId.toLowerCase()
   const dot = lower.lastIndexOf('.')
   if (dot < 0 || dot === lower.length - 1) return false
-  return TS_FAMILY_EXTENSIONS.has(lower.slice(dot + 1))
+  return GUARANTEE_LANGUAGE_EXTENSIONS.has(lower.slice(dot + 1))
 }
 
 /* ------------------------- 上下文与结果 ------------------------- */
@@ -374,12 +374,12 @@ interface LanguageGate {
   reason?: string
 }
 
-function nonTsGate(fileIds: Iterable<string>, label?: string): LanguageGate {
-  const bad = [...new Set(fileIds)].filter((f) => !isTsFamilyFile(f)).sort()
+function unsupportedLanguageGate(fileIds: Iterable<string>, label?: string): LanguageGate {
+  const bad = [...new Set(fileIds)].filter((f) => !isGuaranteeLanguageFile(f)).sort()
   if (bad.length === 0) return { blocked: false }
   const shown = bad.slice(0, 3).join('、') + (bad.length > 3 ? ' 等' : '')
   const subject = label ? `${label}（如 ${shown}）` : `${shown} 文件`
-  return { blocked: true, reason: `${subject}：${NON_TS_REASON}` }
+  return { blocked: true, reason: `${subject}：${UNSUPPORTED_LANGUAGE_REASON}` }
 }
 
 function externalCallsOf(graph: ProjectGraph, module: string, symbol: string): EdgeRef[] {
@@ -495,9 +495,9 @@ function resolveSubjectRef(ctx: FactContext, id: string): SubjectRef | null {
   return null
 }
 
-/** subject 解析后的语言闸门：非 TS 家族 → unverified（该语言尚未接入） */
+/** subject 解析后的语言闸门：未接入语义担保的语言 → unverified */
 function subjectLanguageGate(ref: SubjectRef): LanguageGate {
-  return nonTsGate(ref.files)
+  return unsupportedLanguageGate(ref.files)
 }
 
 function languageGateOf(
@@ -516,7 +516,7 @@ function languageGateOf(
             '变更范围没有可定位的函数/链路证据（需在 changeRoles 或 affectedChains 中给出变更函数/链路）'
         }
       }
-      return nonTsGate(changesScope.files, '变更范围包含非 TypeScript/JavaScript 文件')
+      return unsupportedLanguageGate(changesScope.files, '变更范围包含尚未接入语义担保的文件')
     }
     case 'categories':
     case 'coreJudgment':
@@ -526,20 +526,20 @@ function languageGateOf(
       if (!graph.nodes.has(objectId)) {
         return { blocked: true, reason: `对象 ${objectId} 不在当前图谱的函数集中` }
       }
-      return nonTsGate(fileOfFunction(graph, objectId))
+      return unsupportedLanguageGate(fileOfFunction(graph, objectId))
     }
     case 'partition':
     case 'flows': {
       if (graph.nodes.size === 0) return { blocked: true, reason: '当前项目没有可校验的函数' }
       const files: string[] = []
       for (const id of graph.nodes.keys()) files.push(...fileOfFunction(graph, id))
-      return nonTsGate(files, MIXED_PROJECT_REASON)
+      return unsupportedLanguageGate(files, MIXED_PROJECT_REASON)
     }
     case 'modules': {
       const mod = graph.modules.find((m) => m.id === objectId)
       if (!mod) return { blocked: true, reason: `对象 ${objectId} 不在当前图谱的模块集中` }
       if (mod.fileIds.length === 0) return { blocked: true, reason: `模块 ${objectId} 没有可校验的文件` }
-      return nonTsGate(mod.fileIds, '模块包含非 TypeScript/JavaScript 文件')
+      return unsupportedLanguageGate(mod.fileIds, '模块包含尚未接入语义担保的文件')
     }
     case 'narratives': {
       const chain = graph.chains.find((c) => c.id === objectId)
@@ -547,7 +547,7 @@ function languageGateOf(
       const files: string[] = []
       for (const fnId of chain.path) files.push(...fileOfFunction(graph, fnId))
       if (files.length === 0) return { blocked: true, reason: `链路 ${objectId} 没有可校验的函数` }
-      return nonTsGate(files, '链路包含非 TypeScript/JavaScript 文件')
+      return unsupportedLanguageGate(files, '链路包含尚未接入语义担保的文件')
     }
     case 'externals': {
       const parsed = splitExternalId(objectId)
@@ -558,7 +558,7 @@ function languageGateOf(
       }
       const files: string[] = []
       for (const ref of calls) files.push(...fileOfFunction(graph, ref.callerId))
-      return nonTsGate(files, '外部调用所在文件包含非 TypeScript/JavaScript 文件')
+      return unsupportedLanguageGate(files, '外部调用所在文件包含尚未接入语义担保的文件')
     }
   }
 }
@@ -634,7 +634,7 @@ function checkEvidenceAnchors(
       }
     }
   }
-  const gate = nonTsGate(files)
+  const gate = unsupportedLanguageGate(files)
   if (gate.blocked) return { kind: 'unverified', reason: gate.reason }
   return { kind: 'ok' }
 }
@@ -730,7 +730,11 @@ function effectiveCore(ctx: FactContext, functionId: string): boolean | null {
 }
 
 function normalizeDecorator(s: string): string {
-  return s.trim().replace(/^@/, '').replace(/\(.*$/s, '').trim()
+  let text = s.trim().replace(/^@/, '').trim()
+  // C# 的 Attribute 写法：[Obsolete] / [Obsolete("...")] / ObsoleteAttribute
+  if (text.startsWith('[') && text.endsWith(']')) text = text.slice(1, -1).trim()
+  text = text.replace(/\(.*$/s, '').trim()
+  return text.replace(/Attribute$/, '').trim()
 }
 
 /** 类型文本归一：折叠空白，避免「Promise <Result>」这类排版差异 */
@@ -738,8 +742,135 @@ function normalizeTypeText(s: string): string {
   return s.replace(/\s+/g, ' ').trim()
 }
 
-/** 取参数的类型段（`req: Request` → `Request`；无冒号时整段视作类型） */
-function paramTypeText(param: string): string {
+const CSHARP_PARAM_MODIFIERS = new Set(['ref', 'out', 'in', 'params', 'this', 'scoped', 'readonly'])
+
+/** 逐字符扫描顶层（忽略 <> () [] 内部与字符串字面量），对顶层字符回调 */
+function scanTopLevel(text: string, visit: (index: number, ch: string) => void): void {
+  let angle = 0
+  let paren = 0
+  let bracket = 0
+  let quote: string | null = null
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quote !== null) {
+      if (ch === '\\') i++
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === '<') {
+      angle++
+      continue
+    }
+    if (ch === '>') {
+      if (angle > 0) angle--
+      continue
+    }
+    if (ch === '(') {
+      paren++
+      continue
+    }
+    if (ch === ')') {
+      if (paren > 0) paren--
+      continue
+    }
+    if (ch === '[') {
+      bracket++
+      continue
+    }
+    if (ch === ']') {
+      if (bracket > 0) bracket--
+      continue
+    }
+    if (angle === 0 && paren === 0 && bracket === 0) visit(i, ch)
+  }
+}
+
+/** 去掉 C# 参数的顶层默认值（`= 1`、`= default`、`= null` 等；`=>`/`==`/`>=` 不算） */
+function stripCSharpDefaultValue(text: string): string {
+  let cut = -1
+  scanTopLevel(text, (i, ch) => {
+    if (cut >= 0 || ch !== '=') return
+    const prev = text[i - 1]
+    const next = text[i + 1]
+    if (prev === '=' || prev === '!' || prev === '<' || prev === '>' || next === '=' || next === '>') return
+    cut = i
+  })
+  return cut >= 0 ? text.slice(0, cut) : text
+}
+
+/** 找到与开头 `[` 匹配的 `]` 下标（跳过字符串字面量）；未匹配返回 -1 */
+function matchSquareBracket(text: string): number {
+  let depth = 0
+  let quote: string | null = null
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quote !== null) {
+      if (ch === '\\') i++
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === '[') depth++
+    else if (ch === ']') {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+  return -1
+}
+
+/** 去掉参数开头的属性列表（可多个，如 `[FromBody] [Required] User user`） */
+function stripCSharpAttributes(text: string): string {
+  let rest = text.trim()
+  while (rest.startsWith('[')) {
+    const end = matchSquareBracket(rest)
+    if (end < 0) break
+    rest = rest.slice(end + 1).trim()
+  }
+  return rest
+}
+
+/** 去掉参数修饰符（可组合，如 `ref readonly` / `scoped ref`） */
+function stripCSharpParamModifiers(text: string): string {
+  let rest = text.trim()
+  for (;;) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)\b/.exec(rest)
+    if (!m || !CSHARP_PARAM_MODIFIERS.has(m[1])) return rest
+    rest = rest.slice(m[0].length).trim()
+  }
+}
+
+/**
+ * C# 参数声明 → 参数类型：
+ * 去默认值 → 去属性 → 去修饰符 → 在顶层从右往左找最后一个空白，左侧为类型。
+ * 例：`int page`→`int`；`out string reason`→`string`；`List<User> users`→`List<User>`；
+ * `(int Id, string Name) user`→`(int Id, string Name)`；`[FromBody] User user`→`User`。
+ */
+function csharpParamTypeText(param: string): string {
+  let text = stripCSharpAttributes(stripCSharpDefaultValue(param)).trim()
+  text = stripCSharpParamModifiers(text)
+  let lastSpace = -1
+  scanTopLevel(text, (i, ch) => {
+    if (/\s/.test(ch)) lastSpace = i
+  })
+  if (lastSpace < 0) return text
+  const type = text.slice(0, lastSpace).trim()
+  return type.length > 0 ? type : text
+}
+
+/**
+ * 取参数的类型段：TypeScript / JavaScript 保持冒号后类型；
+ * C#（文件扩展名 `.cs`）按参数声明提取类型，参数名不会被当作类型。
+ */
+function paramTypeText(param: string, csharp: boolean): string {
+  if (csharp) return csharpParamTypeText(param)
   const at = param.indexOf(':')
   return at >= 0 ? param.slice(at + 1) : param
 }
@@ -754,23 +885,35 @@ function typeTokensOf(text: string): string[] {
 }
 
 /**
- * type 断言：object 必须精确等于签名/参数/返回值整体，或命中其中的完整类型 token。
- * 禁止 `includes` 子串（`Requ` 不得命中 `Request`）。
+ * 函数的可断言类型文本：参数类型 + 返回类型（不含参数名与整个签名）。
+ * 供 type claim 校验与 KEY 静态事实生成共用，保证两侧口径一致。
+ */
+export function functionTypeTexts(fn: FunctionDoc): string[] {
+  const file = fileIdOfFunctionId(fn.id)
+  const csharp = file !== null && file.toLowerCase().endsWith('.cs')
+  const out: string[] = []
+  for (const param of fn.params) {
+    const text = normalizeTypeText(paramTypeText(param, csharp))
+    if (text) out.push(text)
+  }
+  if (fn.returnType) {
+    const text = normalizeTypeText(fn.returnType)
+    if (text) out.push(text)
+  }
+  return out
+}
+
+/**
+ * type 断言：object 必须精确等于参数类型 / 返回类型整体，或命中其中的完整类型 token。
+ * 完整参数声明（含参数名）与整个签名不算类型；禁止 `includes` 子串（`Requ` 不得命中 `Request`）。
  */
 function matchesTypeText(fn: FunctionDoc, object: string): boolean {
   const target = normalizeTypeText(object)
   if (target.length === 0) return false
-  const paramTypes = fn.params.map((p) => normalizeTypeText(paramTypeText(p)))
-  const fullTexts = [
-    normalizeTypeText(fn.signature),
-    ...fn.params.map(normalizeTypeText),
-    ...paramTypes,
-    ...(fn.returnType ? [normalizeTypeText(fn.returnType)] : [])
-  ]
-  if (fullTexts.includes(target)) return true
+  const typeTexts = functionTypeTexts(fn)
+  if (typeTexts.includes(target)) return true
   const tokens = new Set<string>()
-  for (const text of paramTypes) for (const token of typeTokensOf(text)) tokens.add(token)
-  if (fn.returnType) for (const token of typeTokensOf(fn.returnType)) tokens.add(token)
+  for (const text of typeTexts) for (const token of typeTokensOf(text)) tokens.add(token)
   return tokens.has(target)
 }
 
@@ -1092,8 +1235,8 @@ function validateClaimFact(ctx: FactContext, claim: ClaimShape, subject: Subject
       if (!object) return failResult('type 断言必须提供 object（类型文本）')
       if (!matchesTypeText(fn, object)) {
         return failResult(
-          `type 断言与签名不符：${claim.subject} 的签名/参数/返回值中没有类型 token「${object}」` +
-            '（不接受子串匹配；整体类型须逐字一致）'
+          `type 断言与签名不符：${claim.subject} 的参数类型/返回类型中没有类型 token「${object}」` +
+            '（不接受子串匹配、参数名或完整参数声明；整体类型须逐字一致）'
         )
       }
       if (!hasEvidence(claim.evidence, (e) => e.functionId === claim.subject)) {
@@ -1422,7 +1565,7 @@ function changesSubjectViolation(
  * 校验一份 Agent 担保（claims + 自审），返回带 staticStatus / reviewStatus / status 的担保结果。
  *
  * 规则：
- * - 对象/证据引用非 TS 文件或项目级混合对象 → 全部 claim 记 not-applicable，最终 unverified；
+ * - 对象/证据引用尚未接入语义担保的文件、或项目级混合对象 → 全部 claim 记 not-applicable，最终 unverified；
  * - 硬事实 claim 必须有可解析且与图谱一致的证据，否则 staticStatus=fail；
  * - intent 类 staticStatus=not-applicable，由 review 担保；
  * - 所有 claim 静态通过（含 intent）且 review.verdict='pass' → declared，否则 unverified；
@@ -1514,7 +1657,7 @@ export function validateGuaranteeClaims(
       // changes：证据必须整体落在 scope 内（先于 subject 解析，任何 scope 外强锚点整条违规）。
       const changesEvidenceReason =
         pass === 'changes' ? changesEvidenceViolation(claim.evidence, ctx) : null
-      // 所有 claim 的 subject 必须是当前图谱/洞察里真实存在的对象；引用函数必须属 TS/JS 家族。
+      // 所有 claim 的 subject 必须是当前图谱/洞察里真实存在的对象；引用函数必须属已接入语言。
       const subject = resolveSubjectRef(ctx, claim.subject)
       const subjectGate = subject ? subjectLanguageGate(subject) : null
       const scopeViolation = subject ? changesSubjectViolation(pass, changesScope, subject) : null

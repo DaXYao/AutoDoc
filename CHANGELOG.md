@@ -2,6 +2,29 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · C# 语义担保初审修复：参数类型假阳性 / 接口隐式 public / 真实解析集成 · core+server+docs
+
+- **🔴1 参数类型假阳性**：`semanticGuarantee.ts` 的 `paramTypeText` 改为语言感知——TS/JS 保持冒号后类型；`.cs` 先去掉顶层默认值、参数属性（可多个 `[...]`）与修饰符（`ref`/`out`/`in`/`params`/`this`/`scoped`/`readonly`，可组合），再在顶层（忽略 `<> () []` 与字符串）从右往左找最后一个空白，左侧为类型。`matchesTypeText` 只保留参数类型与返回类型（不再收完整 `fn.params` 或整个 `fn.signature`），参数名/完整参数声明不再能通过 `type` claim；KEY 静态事实原先用整签名生成的 `type` claim 改为按去重后的参数类型/返回类型逐条生成（`functionTypeTexts` 共用同一口径）。
+- **🔴2 接口成员隐式 public**：`csharp.ts` 的 `toVisibility(mods, defaultPublic)` 在无显式可见性时按上下文决定；`walk`/`walkMember`/`emitFunction`/`emitProperty` 把「当前类型是 interface」传下去，接口方法、表达式属性与接口属性均覆盖；本地函数与嵌套类型不继承。`PARSER_VERSION` 7→8（唯一 parser 输出变化），Go/Java/Python 测试中的硬编码版本号同步为 8。
+- **🟡3 真实解析集成**：`semanticGuarantee.test.ts` 新增用默认 C# 解析器解析 `packages/core/test/fixtures/csharp-sample/Services/UserService.cs` 的用例——真实 attribute（`[Obsolete]` 在 TryValidate、类级 `[Description]` 不落到方法）、调用边（ListUsers→Fetch、未解析构造调用）、注释块 26-27/28-29 行、参数类型与 `IRepository.Fetch` 可见性全部取自解析结果；`semanticVerifier.test.ts` 新增 TS+C# KEY 路径用例（categories/modules/narratives/partition/flows verified，且不生成 C# externals 对象）。两处手造 C# 夹具同步修正了 attribute 归属、调用关系与注释块行号。
+- **🟡4 decorator 归一化**：`normalizeDecorator` 去掉首尾 `[]`、可选的参数与 `Attribute` 后缀，`[Obsolete]` / `ObsoleteAttribute` / `Obsolete` 等价；契约与文档写明 C# 两种写法均可。
+- **🟡5 C# external/跨文件限制**：契约 4.10、`docs/SEMANTIC_GUARANTEE.md`、README 语义担保章节与 CHANGELOG 明确 C# 只支持文件内可解析的内部调用，未解析调用 `externalModule` 恒为 null，`external` claim 与 KEY `externals` 实际不可用，跨文件调用未解析；测试用真实夹具断言 `externals` 担保被拒。
+- **🟢6 清理**：`semanticGuarantee.ts` 头部、`insight.ts` 的 attachKeyGuarantees 注释、`semanticVerifier.ts` 注释与测试标题中的「非 TS」「TS/JS 家族」改为「已接入语义担保的语言 / 未接入语言」。
+- **测试**：core 368（+2）、server 572（+10）、web 279，全仓 1219 项通过；`pnpm lint`（ESLint + 各包 typecheck）全绿。
+- **已知边界**：C# 的 `external` claim/跨文件调用仍未接入；Agent 自审最高 `declared`，`verified` 仅由 KEY 第二链路产生（本轮未改）；未改前端、未引入依赖、未提交 git。
+- **关联 commit**：随 C# 轮次一并提交。
+
+## 2026-10-21 · 语义担保第二轮：C#（.cs）接入语言闸门 · server+shared-types+docs
+
+- **语言闸门**：`TS_FAMILY_EXTENSIONS` 改为 `GUARANTEE_LANGUAGE_EXTENSIONS` 并加入 `cs`；`isTsFamilyFile` 重命名为 `isGuaranteeLanguageFile`（无旧别名）。`semanticVerifier.ts` 的 `isTsFunction` / `isTsFileSet` / `allGraphFilesTs` 同步改为 `isGuaranteeFunction` / `isGuaranteeFileSet` / `allGraphFilesGuaranteed`，KEY 对象枚举与跳过统计改用新判定。
+- **闸门文案**：未接入语言仍为「该语言尚未接入语义担保」；混合项目/混合模块/链路/变更 scope 的原因改为「…包含尚未接入语义担保的文件」，不再写死 TS/JS；`import` 限制文案改为「语义担保暂不支持 import 静态校验」。
+- **C# 证据**：不改 C# parser，复用通用 `FunctionDoc` 证据包——`className` / `signature` / `params` / `returnType` / `visibility` / `decorators`（`[Attribute]`）/ `calls`（内部与外部调用边）/ `codeBlocks`（注释块）；`using` 不映射源文件，`import` claim 仍只能停在未证实。
+- **契约/文档**：`agentSupply.ts` 4.10 语言范围改为「TypeScript / JavaScript 家族 + C#（.cs）」，补充 C# 证据口径；`agentSupplyChanges.ts` 9.1 增加变更侧语言范围说明。`docs/SEMANTIC_GUARANTEE.md` 状态改为 TS/JS/TSX + C# 已落地、下一轮 Vue SFC，语言顺序勾掉 C#；README 语义担保章节同步状态与语言范围；shared-types 注释同步。
+- **测试**：`semanticGuarantee.test.ts` 语言判定 `.cs=true`、`.vue/.cpp/.py/.java/.go=false`，新增独立 C# 夹具（class/signature/visibility/Attribute/内部调用/注释块/链路）覆盖 categories/coreJudgment/coreRoles、narratives/order/role、partition/flows（全 C# 可 declared，含 .py 时 unverified 且原因含「尚未接入」）、changes scope（C# declared / .py unverified）；`semanticVerifier.test.ts` 新增 C# 对象参与 KEY 担保、同项目 .py 仍跳过的用例。server 562 项、core 366 项、web 279 项，全仓 1207 项通过，`pnpm lint` 全绿。
+- **实跑**：以 `packages/core/test/fixtures/csharp-sample` 为目标，配置/存储指向系统临时目录（不写目标仓），`serve --port 7811` 后写入 `supply/default/insight/categories.qoder.json` 与 `coreRoles.qoder.json` 并调用 `/api/agent-supply/merge`；`/api/insight` 出现 6 条 `source=agent,status=declared` 的 C# 担保（ListUsers / TryValidate / ComputeName 的 categories + coreRoles），claim 覆盖 category/type/visibility/decorator/call/block/role/intent。临时服务与数据已清理，夹具目录保持只读。
+- **已知边界**：C# 未新增专属证据类型（Attribute 走 decorators、可见性/调用/注释块复用通用字段）；实跑为 Agent-only，最高 `declared`，`verified` 需 KEY 模式（已由单测覆盖）；`.vue/.cpp/.py/.java/.go` 仍是 unverified；未改前端组件、未引入依赖、未提交 git。
+- **关联 commit**：随 C# 轮次一并提交。
+
 ## 2026-10-21 · SG3 初审修复：变更侧证据 scope / workspace 别名 / 待合并 / 静态对象徽标 · server+web+docs
 
 - **🔴1 变更侧证据落在 scope 内**：`semanticGuarantee.ts` 新增 `changesEvidenceViolation`，在 subject 解析前逐条检查变更证据——functionId/chainId/stepId(caller)/fileId 必须在 scope 内，moduleId 直接违规，symbol/line/detail/snippet 不能单独作证，且至少一条 scope 内强锚点；任一条 scope 外强锚点整条 claim 记 `staticStatus=fail`/`unverified`，不降级放行。`claimReferencesObject` 的 changes 分支把解析为 changes 主体的 subject（含别名）也算引用。

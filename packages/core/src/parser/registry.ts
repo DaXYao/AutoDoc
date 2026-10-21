@@ -44,9 +44,10 @@ export class ParserRegistry {
  * v5：新增 JavaParser（.java 的包/类型/方法/构造器/lambda/类型推断/import 提取）。
  * v6：新增 GoParser（.go 的 package/函数/方法/接口/类型推断/lambda/import 提取）。
  * v7：GoParser 词法作用域、`::pkg?` 候选、函数值 `::?`、重复 init/_ 合成名与 calleeId 去重。
+ * v8：C# 接口成员无显式可见性修饰符时输出 `public`（原为 `private`）。
  * 仅改注释、重命名内部变量等不影响输出的变更无需 bump。
  */
-export const PARSER_VERSION = 7
+export const PARSER_VERSION = 8
 
 export const parserRegistry = new ParserRegistry()
 

@@ -270,7 +270,7 @@ describe('Go 解析器：注册与 package/类型作用域', () => {
     expect(parserRegistry.forFile('pkg/widget.golang')).toBeUndefined()
     expect(parserRegistry.forFile('pkg/widget_test.go')?.id).toBe('go')
     expect(DEFAULT_INCLUDE).toContain('**/*.go')
-    expect(PARSER_VERSION).toBe(7)
+    expect(PARSER_VERSION).toBe(8)
   })
 
   it('package 前缀进入方法/接口方法 className；包级函数 className 为 null', () => {

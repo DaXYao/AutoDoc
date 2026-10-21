@@ -194,7 +194,7 @@ describe('Python 解析器：注册与基础签名', () => {
     expect(parser?.extensions).toEqual(['py'])
     expect(parserRegistry.forFile('pkg/module.pyi')).toBeUndefined()
     expect(DEFAULT_INCLUDE).toContain('**/*.py')
-    expect(PARSER_VERSION).toBe(7)
+    expect(PARSER_VERSION).toBe(8)
   })
 
   it('模块级 async 函数：类型注解、默认参数、*args/**kwargs、返回注解', () => {

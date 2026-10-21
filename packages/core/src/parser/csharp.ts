@@ -66,15 +66,18 @@ function attributesOf(node: SyntaxNode): string[] {
   return out
 }
 
-/** C# 修饰符 → AutoDoc Visibility 枚举 */
-function toVisibility(mods: string[]): Visibility {
+/**
+ * C# 修饰符 → AutoDoc Visibility 枚举。
+ * 显式修饰符优先；无显式可见性时，接口成员按 C# 语义隐式 public，其它类型成员默认 private。
+ */
+function toVisibility(mods: string[], defaultPublic = false): Visibility {
   if (mods.includes('public')) return 'public'
   if (mods.includes('private')) return 'private'
   if (mods.includes('protected')) return 'protected'
   // internal / protected internal / private protected 都视作模块内可见
   if (mods.includes('internal')) return 'module-local'
-  // C# 类成员默认 private；顶层类型默认 internal
-  return 'private'
+  // C# 类成员默认 private；接口成员默认 public；顶层类型默认 internal
+  return defaultPublic ? 'public' : 'private'
 }
 
 /** 紧邻声明前的连续 `///` XML 文档注释合并为一段（也接受 `//`） */
@@ -272,30 +275,36 @@ export class CSharpParser implements LanguageParser {
       const body =
         node.childForFieldName('body') ??
         namedKids(node).find((c) => c.type === 'declaration_list')
+      const inInterface = node.type === 'interface_declaration'
       if (body) {
-        for (const member of namedKids(body)) this.walkMember(member, qualified, out)
+        for (const member of namedKids(body)) this.walkMember(member, qualified, out, inInterface)
       }
       return
     }
 
     // 顶层语句（TopLevelStatement）里的本地函数：无类型包裹
     if (FUNCTION_LIKE.has(node.type)) {
-      this.emitFunction(node, node, className, out)
+      this.emitFunction(node, node, className, out, false)
       return
     }
     for (const child of namedKids(node)) this.walk(child, className, out)
   }
 
-  private walkMember(member: SyntaxNode, className: string, out: ParsedFunction[]): void {
+  private walkMember(
+    member: SyntaxNode,
+    className: string,
+    out: ParsedFunction[],
+    inInterface: boolean
+  ): void {
     if (FUNCTION_LIKE.has(member.type)) {
-      this.emitFunction(member, member, className, out)
+      this.emitFunction(member, member, className, out, inInterface)
       return
     }
     if (member.type === 'property_declaration') {
-      this.emitProperty(member, className, out)
+      this.emitProperty(member, className, out, inInterface)
       return
     }
-    // 嵌套类型
+    // 嵌套类型：由 walk 按自身类型（class/struct/record/interface）重新判定默认可见性
     if (TYPE_DECLARATION.has(member.type)) {
       this.walk(member, className, out)
       return
@@ -332,10 +341,11 @@ export class CSharpParser implements LanguageParser {
     node: SyntaxNode,
     anchor: SyntaxNode,
     className: string | null,
-    out: ParsedFunction[]
+    out: ParsedFunction[],
+    inInterface: boolean
   ): void {
     const mods = modifiersOf(node)
-    const visibility = toVisibility(mods)
+    const visibility = toVisibility(mods, inInterface)
     const decorators = attributesOf(node)
     const nameNode = node.childForFieldName('name')
     const paramsNode = node.childForFieldName('parameters')
@@ -360,11 +370,11 @@ export class CSharpParser implements LanguageParser {
       })
     )
 
-    // 方法体内的本地函数：递归下钻
+    // 方法体内的本地函数：递归下钻（本地函数不继承接口成员的默认 public）
     if (bodyNode) {
       const visitLocal = (n: SyntaxNode): void => {
         if (n.type === 'local_function_statement') {
-          this.emitFunction(n, n, className, out)
+          this.emitFunction(n, n, className, out, false)
           return
         }
         for (const c of namedKids(n)) visitLocal(c)
@@ -375,9 +385,14 @@ export class CSharpParser implements LanguageParser {
 
   /** 属性声明：将所有带实体的 accessor 聚合成一条 ParsedFunction（name = 属性名）；
    *  表达式属性（`public string X => Y();`）无 accessor_list，直接以 arrow_expression_clause 为 body。 */
-  private emitProperty(node: SyntaxNode, className: string, out: ParsedFunction[]): void {
+  private emitProperty(
+    node: SyntaxNode,
+    className: string,
+    out: ParsedFunction[],
+    inInterface: boolean
+  ): void {
     const mods = modifiersOf(node)
-    const visibility = toVisibility(mods)
+    const visibility = toVisibility(mods, inInterface)
     const nameNode = node.childForFieldName('name')
     const typeNode = node.childForFieldName('type')
     const name = nameNode ? nameNode.text : 'anonymous'

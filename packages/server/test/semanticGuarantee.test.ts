@@ -1,6 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import type {
   AgentSupplyChangesValue,
@@ -17,6 +18,7 @@ import type {
   SemanticEvidence
 } from '@autodoc/shared-types'
 import { buildGraph, type ProjectGraph } from '../src/graph.js'
+import { ensureDefaultParsers, makeStableId, parserRegistry } from '@autodoc/core'
 import { flowsBasis } from '../src/flow.js'
 import { AiCache } from '../src/aiCache.js'
 // 注意 import 顺序：supplyCache 必须在 agentSupply 之前（agentSupply → insight → supplyCache 的循环里，
@@ -26,7 +28,7 @@ import { generateSupplyRulesText, scanAgentSupply } from '../src/agentSupply.js'
 import { mergeAgentSupply, insightContentHash } from '../src/agentSupplyMerge.js'
 import {
   applyAgentGuaranteesToInsight,
-  isTsFamilyFile,
+  isGuaranteeLanguageFile,
   semanticGuaranteeStats,
   validateChangesGuarantee,
   validateGuaranteeClaims
@@ -63,6 +65,11 @@ const DELTA = 'py/foreign.py::-::delta@dddddddddddd'
 const MIX_TS = 'src/mix/mix.ts::-::mixTs@111111111111'
 const MIX_PY = 'src/mix/mix.py::-::mixPy@222222222222'
 const EXTERNAL_ID = 'node:fs::readFile'
+const CS_LIST = 'Services/UserService.cs::UserService::ListUsers@111111111111'
+const CS_FETCH = 'Services/UserService.cs::IRepository::Fetch@222222222222'
+const CS_NAME = 'Services/UserService.cs::UserService::ComputeName@333333333333'
+const CS_VALIDATE = 'Services/UserService.cs::UserService::TryValidate@444444444444'
+const CS_PY = 'scripts/foreign.py::-::foreign@555555555555'
 
 function mkBlock(fnId: string, startLine: number, endLine: number, codeText = 'run()'): CodeBlock {
   return {
@@ -192,6 +199,184 @@ function fixtureFiles(): FileDoc[] {
 
 const GRAPH = buildGraph(fixtureFiles())
 
+/** C# 夹具：字段与真实夹具 Services/UserService.cs 对齐（[Obsolete] 在 TryValidate、类级 [Description] 不落到方法、ListUsers 调 Fetch、注释块 26-29 行） */
+function csharpFiles(): FileDoc[] {
+  const listUsers = mkFn(CS_LIST, 'ListUsers', {
+    className: 'UserService',
+    kind: 'method',
+    signature: 'ListUsers(int page): User[]',
+    params: ['int page'],
+    returnType: 'User[]',
+    visibility: 'public',
+    exported: true,
+    category: 'business',
+    docComment: '/// <summary>\n/// 分页拉取用户列表。\n/// </summary>',
+    startLine: 24,
+    endLine: 31,
+    calls: [mkCall(CS_LIST, CS_FETCH, 'Fetch', 29)],
+    codeBlocks: [
+      { ...mkBlock(CS_LIST, 26, 27, 'if (page < 1) throw new ArgumentOutOfRangeException(nameof(page));'), commentText: '// 参数校验' },
+      { ...mkBlock(CS_LIST, 28, 29, 'var rows = _repo.Fetch(page);'), commentText: '// 拉取原始数据' }
+    ]
+  })
+  const fetch = mkFn(CS_FETCH, 'Fetch', {
+    className: 'IRepository',
+    kind: 'method',
+    signature: 'Fetch(int page): User[]',
+    params: ['int page'],
+    returnType: 'User[]',
+    visibility: 'public',
+    exported: false,
+    category: 'implementation',
+    startLine: 51,
+    endLine: 51
+  })
+  const tryValidate = mkFn(CS_VALIDATE, 'TryValidate', {
+    className: 'UserService',
+    kind: 'method',
+    signature: 'TryValidate(string name, out string reason): bool',
+    params: ['string name', 'out string reason'],
+    returnType: 'bool',
+    visibility: 'private',
+    decorators: ['Obsolete'],
+    exported: false,
+    category: 'utility',
+    startLine: 34,
+    endLine: 38
+  })
+  const computeName = mkFn(CS_NAME, 'ComputeName', {
+    className: 'UserService',
+    kind: 'method',
+    signature: 'ComputeName(): string',
+    params: [],
+    returnType: 'string',
+    visibility: 'private',
+    exported: false,
+    category: 'utility',
+    startLine: 42,
+    endLine: 46,
+    codeBlocks: [{ ...mkBlock(CS_NAME, 44, 45, 'return "user-" + DateTime.Now.Ticks;'), commentText: '// 拼接显示名' }]
+  })
+  return [
+    {
+      fileId: 'Services/UserService.cs',
+      path: 'Services/UserService.cs',
+      language: 'csharp',
+      functions: [listUsers, fetch, tryValidate, computeName]
+    }
+  ]
+}
+
+function csharpPythonFile(): FileDoc {
+  return {
+    fileId: 'scripts/foreign.py',
+    path: 'scripts/foreign.py',
+    language: 'python',
+    functions: [mkFn(CS_PY, 'foreign', { category: 'utility' })]
+  }
+}
+
+/* ------------------------- 真实 C# 夹具解析 ------------------------- */
+
+const CSHARP_FIXTURE = fileURLToPath(
+  new URL('../../core/test/fixtures/csharp-sample/Services/UserService.cs', import.meta.url)
+)
+
+interface RealCSharpFixture {
+  graph: ProjectGraph
+  insight: ProjectInsight
+  fnByName: Map<string, FunctionDoc>
+}
+
+let realCSharpCache: RealCSharpFixture | null = null
+
+/**
+ * 用默认 C# 解析器解析真实夹具，按 generate 管线同口径（同文件内按名解析、无 import 不跨文件）
+ * 组装 FunctionDoc 与图谱；attribute/可见性/调用行/注释块全部来自真实解析结果。
+ */
+async function realCSharpFixture(): Promise<RealCSharpFixture> {
+  if (realCSharpCache) return realCSharpCache
+  await ensureDefaultParsers()
+  const parser = parserRegistry.forFile('Services/UserService.cs')
+  if (!parser) throw new Error('未注册 C# 解析器')
+  const parsed = await parser.parse(readFileSync(CSHARP_FIXTURE, 'utf-8'))
+  const categories: Record<string, FunctionDoc['category']> = {
+    ListUsers: 'business',
+    Fetch: 'implementation'
+  }
+  const docs: FunctionDoc[] = parsed.functions.map((p) => {
+    const id = makeStableId('Services/UserService.cs', p.className, p.name, p.params)
+    return {
+      id,
+      name: p.name,
+      className: p.className,
+      kind: p.kind,
+      signature: p.signature,
+      params: [...p.params],
+      returnType: p.returnType,
+      visibility: p.visibility,
+      decorators: [...p.decorators],
+      exported: p.exported,
+      category: categories[p.name] ?? 'utility',
+      purpose: p.name,
+      docComment: p.docComment,
+      fingerprint: `fp-${p.name}`,
+      startLine: p.startLine,
+      endLine: p.endLine,
+      calls: [],
+      codeBlocks: p.codeBlocks.map((b) => ({ ...b, functionId: id }))
+    }
+  })
+  const byName = new Map<string, FunctionDoc[]>()
+  for (const fn of docs) {
+    const list = byName.get(fn.name) ?? []
+    list.push(fn)
+    byName.set(fn.name, list)
+  }
+  parsed.functions.forEach((p, index) => {
+    const fn = docs[index]
+    const seen = new Set<string>()
+    const calls: CallEdge[] = []
+    for (const site of [...p.callSites].sort((a, b) => a.line - b.line)) {
+      if (seen.has(site.name)) continue
+      seen.add(site.name)
+      const candidates = byName.get(site.name) ?? []
+      const target = candidates.find((c) => c.className === fn.className) ?? candidates[0] ?? null
+      calls.push({
+        callerId: fn.id,
+        calleeName: site.name,
+        stepId: `${fn.id}>${site.name}`,
+        calleeId: target?.id ?? null,
+        calleeCategory: target ? target.category : 'external',
+        role: site.role,
+        line: site.line,
+        calleePurpose: target ? target.purpose : null,
+        ...(target ? {} : { externalModule: null })
+      })
+    }
+    fn.calls = calls
+  })
+  const graph = buildGraph([
+    {
+      fileId: 'Services/UserService.cs',
+      path: 'Services/UserService.cs',
+      language: 'csharp',
+      functions: docs
+    }
+  ])
+  realCSharpCache = {
+    graph,
+    insight: baseInsightOf(graph),
+    fnByName: new Map(docs.map((fn) => [fn.name, fn]))
+  }
+  return realCSharpCache
+}
+
+const CSHARP_GRAPH = buildGraph(csharpFiles())
+const CSHARP_MIXED_GRAPH = buildGraph([...csharpFiles(), csharpPythonFile()])
+const CS_MOD = CSHARP_GRAPH.modules.find((m) => m.name === 'Services')!.id
+const CS_CHAIN = CSHARP_GRAPH.chains.find((c) => c.entryId === CS_LIST)!.id
+
 function moduleIdOf(name: string): string {
   const mod = GRAPH.modules.find((m) => m.name === name)
   if (!mod) throw new Error(`夹具缺少模块 ${name}`)
@@ -209,15 +394,11 @@ const MOD_UTIL = moduleIdOf('src/util')
 const MOD_MIX = moduleIdOf('src/mix')
 const CHAIN = chainIdOfEntry(ALPHA)
 
-function insightOf(graph: ProjectGraph): ProjectInsight {
+function baseInsightOf(graph: ProjectGraph): ProjectInsight {
   const functions: ProjectInsight['functions'] = {}
   for (const [id, ins] of graph.insights) {
     functions[id] = { ...ins, chainRoles: {}, moduleIds: [...ins.moduleIds] }
   }
-  functions[ALPHA].isCore = true
-  functions[ALPHA].aiCategory = 'business'
-  functions[BETA].isCore = false
-  functions[BETA].aiCategory = 'implementation'
   return {
     generatedAt: '2026-10-21T00:00:00.000Z',
     graphFingerprint: graph.fingerprint,
@@ -232,13 +413,34 @@ function insightOf(graph: ProjectGraph): ProjectInsight {
   }
 }
 
+function insightOf(graph: ProjectGraph): ProjectInsight {
+  const insight = baseInsightOf(graph)
+  insight.functions[ALPHA].isCore = true
+  insight.functions[ALPHA].aiCategory = 'business'
+  insight.functions[BETA].isCore = false
+  insight.functions[BETA].aiCategory = 'implementation'
+  return insight
+}
+
 const INSIGHT = insightOf(GRAPH)
 
 /** 纯 TS 项目（排除 .py 文件）：用于 partition / flows root 的正常担保用例 */
-const TS_GRAPH = buildGraph(fixtureFiles().filter((f) => isTsFamilyFile(f.fileId)))
+const TS_GRAPH = buildGraph(fixtureFiles().filter((f) => isGuaranteeLanguageFile(f.fileId)))
 const TS_INSIGHT = insightOf(TS_GRAPH)
 const TS_MOD_SRC = TS_GRAPH.modules.find((m) => m.name === 'src')!.id
 const TS_CHAIN = TS_GRAPH.chains.find((c) => c.entryId === ALPHA)!.id
+
+const CSHARP_INSIGHT = baseInsightOf(CSHARP_GRAPH)
+CSHARP_INSIGHT.functions[CS_LIST] = {
+  ...CSHARP_INSIGHT.functions[CS_LIST],
+  isCore: true,
+  coreSource: 'ai',
+  coreReason: '用户列表入口',
+  aiCategory: 'business',
+  aiCategoryReason: '对外业务接口',
+  systemRole: '用户列表服务入口'
+}
+const CSHARP_MIXED_INSIGHT = baseInsightOf(CSHARP_MIXED_GRAPH)
 
 /* ------------------------- claim / guarantee 构造 ------------------------- */
 
@@ -290,16 +492,16 @@ function validate(
 /* ------------------------- 基础语言判定 ------------------------- */
 
 describe('语言判定', () => {
-  it('按扩展名识别 TS/JS 家族，其余语言不接入', () => {
-    for (const f of ['a.ts', 'a.tsx', 'a.js', 'a.jsx', 'a.mjs', 'a.cjs', 'dir/b.d.ts']) {
-      expect(isTsFamilyFile(f), f).toBe(true)
+  it('按扩展名识别已接入语言（TS/JS/TSX、C#）与未接入语言', () => {
+    for (const f of ['a.ts', 'a.tsx', 'a.js', 'a.jsx', 'a.mjs', 'a.cjs', 'dir/b.d.ts', 'Services/UserService.cs']) {
+      expect(isGuaranteeLanguageFile(f), f).toBe(true)
     }
-    for (const f of ['a.vue', 'a.cs', 'a.cpp', 'a.py', 'a.java', 'a.go', 'README']) {
-      expect(isTsFamilyFile(f), f).toBe(false)
+    for (const f of ['a.vue', 'a.cpp', 'a.py', 'a.java', 'a.go', 'README']) {
+      expect(isGuaranteeLanguageFile(f), f).toBe(false)
     }
   })
 
-  it('非 TS 对象 → unverified，原因「该语言尚未接入语义担保」', () => {
+  it('未接入语言对象 → unverified，原因「该语言尚未接入语义担保」', () => {
     const res = validate('coreRoles', DELTA, [
       claim('intent', DELTA, [{ detail: '对照用途。' }], { text: '这是外部脚本。' })
     ])
@@ -549,7 +751,7 @@ describe('变更侧担保（SG3：scope 证据）', () => {
     expect(res.reason).toContain('没有可定位')
   })
 
-  it('混合语言 scope → unverified 且原因含「非 TypeScript」', () => {
+  it('混合语言 scope → unverified 且原因含「尚未接入」', () => {
     const res = validateChangesGuarantee(
       INSIGHT,
       GRAPH,
@@ -558,7 +760,7 @@ describe('变更侧担保（SG3：scope 证据）', () => {
       guaranteeOf([claim('intent', 'commit:abc', [{ functionId: DELTA }], { text: 'Python 函数。' })])
     )
     expect(res.status).toBe('unverified')
-    expect(res.reason).toContain('非 TypeScript')
+    expect(res.reason).toContain('尚未接入')
   })
 
   it('硬事实 claim 的 subject 在 scope 外 → unverified（不借用图谱里的任意对象）', () => {
@@ -665,7 +867,7 @@ describe('claim / evidence 形状与锚点', () => {
     expect(ghost.claims[0].reason).toContain('断言主体不在当前图谱/洞察')
   })
 
-  it('subject 引用非 TS 函数 → unverified（即使 pass 对象是 TS）', () => {
+  it('subject 引用未接入语言的函数 → unverified（即使 pass 对象是 TS）', () => {
     const res = validate('coreRoles', ALPHA, [
       claim('intent', DELTA, [{ functionId: DELTA }], { text: '外部脚本入口。' })
     ])
@@ -674,12 +876,12 @@ describe('claim / evidence 形状与锚点', () => {
     expect(res.claims[0].reason).toContain('该语言尚未接入语义担保')
   })
 
-  it('混合语言模块对象：模块含非 TS 文件 → unverified', () => {
+  it('混合语言模块对象：模块含未接入语言文件 → unverified', () => {
     const res = validate('modules', MOD_MIX, [
       claim('containment', MOD_MIX, [{ moduleId: MOD_MIX }], { object: MIX_TS, text: '模块包含 mixTs。' })
     ])
     expect(res.status).toBe('unverified')
-    expect(res.reason).toContain('模块包含非 TypeScript/JavaScript 文件')
+    expect(res.reason).toContain('模块包含尚未接入语义担保的文件')
   })
 
   it('intent：staticStatus=not-applicable；review pass → declared，fail → unverified', () => {
@@ -745,7 +947,7 @@ describe('claim / evidence 形状与锚点', () => {
     expect(res.status).toBe('unverified')
     expect(res.claims[0].staticStatus).toBe('not-applicable')
     expect(res.claims[0].status).toBe('unverified')
-    expect(res.claims[0].reason).toBe('TypeScript 轮次暂不支持 import 静态校验')
+    expect(res.claims[0].reason).toBe('语义担保暂不支持 import 静态校验')
     expect(res.reason).toContain('import 静态校验')
   })
 })
@@ -864,6 +1066,15 @@ describe('TS 硬事实静态校验', () => {
       claim('type', ALPHA, [{ functionId: ALPHA }], { object: 'Socket' })
     ])
     expect(bad.claims[0].staticStatus).toBe('fail')
+    // 完整参数声明（含参数名）与整个签名都不是类型
+    const decl = validate('coreRoles', ALPHA, [
+      claim('type', ALPHA, [{ functionId: ALPHA }], { object: 'req: Request' })
+    ])
+    expect(decl.claims[0].staticStatus).toBe('fail')
+    const sig = validate('coreRoles', ALPHA, [
+      claim('type', ALPHA, [{ functionId: ALPHA }], { object: 'alpha(req: Request): Promise<Result>' })
+    ])
+    expect(sig.claims[0].staticStatus).toBe('fail')
   })
 
   it('decorator / visibility', () => {
@@ -982,6 +1193,383 @@ describe('TS 硬事实静态校验', () => {
       claim('block', GAMMA, [{ functionId: GAMMA, snippet: 'not-in-block' }], { object: '0' })
     ])
     expect(badSnippet.claims[0].staticStatus).toBe('fail')
+  })
+})
+
+/* ------------------------- C# 硬事实通过 ------------------------- */
+
+describe('C# 硬事实静态校验', () => {
+  it('categories / coreJudgment / coreRoles 的 C# 对象可 declared', () => {
+    const category = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'categories', CS_LIST, [
+      claim('category', CS_LIST, [{ functionId: CS_LIST }], { object: 'business', text: 'C# 业务接口。' })
+    ])
+    expect(category.status).toBe('declared')
+    expect(category.claims[0].status).toBe('declared')
+
+    const core = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'coreJudgment', CS_LIST, [
+      claim('core', CS_LIST, [{ functionId: CS_LIST }], { object: 'true', text: 'C# 核心入口。' })
+    ])
+    expect(core.status).toBe('declared')
+
+    const role = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'coreRoles', CS_LIST, [
+      claim('role', CS_LIST, [{ functionId: CS_LIST }, { chainId: CS_CHAIN }], {
+        object: CS_CHAIN,
+        text: 'C# 链路入口。'
+      })
+    ])
+    expect(role.status).toBe('declared')
+  })
+
+  it('C# 类型/可见性/Attribute/调用边/注释块证据可 declared', () => {
+    const fn = CSHARP_GRAPH.nodes.get(CS_LIST)!
+    expect(fn.className).toBe('UserService')
+    expect(fn.visibility).toBe('public')
+    expect(fn.decorators).toEqual([])
+    expect(fn.calls.map((c) => c.calleeName)).toContain('Fetch')
+    expect(fn.codeBlocks.length).toBe(2)
+
+    const type = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'coreRoles', CS_LIST, [
+      claim('type', CS_LIST, [{ functionId: CS_LIST }], { object: 'User[]', text: 'C# 返回类型。' })
+    ])
+    expect(type.status).toBe('declared')
+
+    const visibility = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'coreRoles', CS_LIST, [
+      claim('visibility', CS_LIST, [{ functionId: CS_LIST }], { object: 'public' })
+    ])
+    expect(visibility.status).toBe('declared')
+
+    const decorator = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'coreRoles', CS_VALIDATE, [
+      claim('decorator', CS_VALIDATE, [{ functionId: CS_VALIDATE }], { object: '[Obsolete]' })
+    ])
+    expect(decorator.status).toBe('declared')
+
+    const call = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'coreRoles', CS_LIST, [
+      claim('call', CS_LIST, [{ stepId: `${CS_LIST}>Fetch` }], {
+        object: CS_FETCH,
+        text: 'C# 内部调用。'
+      })
+    ])
+    expect(call.status).toBe('declared')
+
+    const block = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'coreRoles', CS_LIST, [
+      claim('block', CS_LIST, [{ functionId: CS_LIST, line: 26, snippet: 'ArgumentOutOfRangeException' }], {
+        object: '0'
+      })
+    ])
+    expect(block.status).toBe('declared')
+  })
+
+  it('C# 参数类型：int/string/List<User>/User/User[] 通过；参数名与完整参数声明失败', () => {
+    const csharpParamFn = mkFn('Services/Sample.cs::Sample::Run@abcdefabcdef', 'Run', {
+      className: 'Sample',
+      kind: 'method',
+      signature: 'Run(int page): User[]',
+      params: [
+        'int page',
+        'out string reason',
+        'List<User> users',
+        '(int Id, string Name) user',
+        '[FromBody] User user',
+        'params string[] args',
+        'int? max',
+        'ref readonly Span<int> span',
+        'int limit = 10'
+      ],
+      returnType: 'User[]',
+      visibility: 'public',
+      category: 'business'
+    })
+    const graph = buildGraph([
+      {
+        fileId: 'Services/Sample.cs',
+        path: 'Services/Sample.cs',
+        language: 'csharp',
+        functions: [csharpParamFn]
+      }
+    ])
+    const insight = baseInsightOf(graph)
+    const run = (object: string) =>
+      validateGuaranteeClaims(insight, graph, 'coreRoles', csharpParamFn.id, guaranteeOf([
+        claim('type', csharpParamFn.id, [{ functionId: csharpParamFn.id }], { object })
+      ]))
+
+    for (const object of [
+      'int',
+      'string',
+      'List<User>',
+      'User',
+      'User[]',
+      '(int Id, string Name)',
+      'string[]',
+      'int?',
+      'Span<int>'
+    ]) {
+      const result = run(object)
+      expect(result.claims[0].staticStatus, `应通过：${object}`).toBe('pass')
+      expect(result.status, `应通过：${object}`).toBe('declared')
+    }
+    for (const object of [
+      'page',
+      'out',
+      'int page',
+      'reason',
+      'users',
+      'user',
+      'args',
+      'max',
+      'span',
+      'limit',
+      '10',
+      'int? max',
+      'string[] args',
+      'ref readonly',
+      '(int Id, string Name) user'
+    ]) {
+      const result = run(object)
+      expect(result.claims[0].staticStatus, `应失败：${object}`).toBe('fail')
+      expect(result.status, `应失败：${object}`).toBe('unverified')
+    }
+  })
+
+  it('C# 接口成员隐式 public：Fetch 的 visibility=public 可 declared，private 失败', () => {
+    const fetch = CSHARP_GRAPH.nodes.get(CS_FETCH)!
+    expect(fetch.visibility).toBe('public')
+    const ok = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'coreRoles', CS_FETCH, [
+      claim('visibility', CS_FETCH, [{ functionId: CS_FETCH }], { object: 'public' })
+    ])
+    expect(ok.status).toBe('declared')
+    const bad = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'coreRoles', CS_FETCH, [
+      claim('visibility', CS_FETCH, [{ functionId: CS_FETCH }], { object: 'private' })
+    ])
+    expect(bad.claims[0].staticStatus).toBe('fail')
+  })
+
+  it('C# decorator 归一：[Obsolete] / ObsoleteAttribute / Obsolete 等价', () => {
+    for (const object of ['[Obsolete]', 'ObsoleteAttribute', 'Obsolete']) {
+      const result = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'coreRoles', CS_VALIDATE, [
+        claim('decorator', CS_VALIDATE, [{ functionId: CS_VALIDATE }], { object })
+      ])
+      expect(result.claims[0].staticStatus, `应命中：${object}`).toBe('pass')
+      expect(result.status, `应命中：${object}`).toBe('declared')
+    }
+    // 归一后仍须精确匹配：类级 [Description] 不落到 ListUsers
+    const missing = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'coreRoles', CS_LIST, [
+      claim('decorator', CS_LIST, [{ functionId: CS_LIST }], { object: '[Description]' })
+    ])
+    expect(missing.claims[0].staticStatus).toBe('fail')
+  })
+
+  it('包含 C# 函数的链路：narratives / order / role 可 declared', () => {
+    expect(CSHARP_GRAPH.chains.find((c) => c.id === CS_CHAIN)?.path).toEqual([CS_LIST, CS_FETCH])
+    const narrative = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'narratives', CS_CHAIN, [
+      claim('intent', CS_CHAIN, [{ chainId: CS_CHAIN, functionId: CS_LIST }], { text: 'C# 用户列表链路。' })
+    ])
+    expect(narrative.status).toBe('declared')
+
+    const order = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'narratives', CS_CHAIN, [
+      claim('order', CS_CHAIN, [{ chainId: CS_CHAIN }], {
+        object: `${CS_LIST}->${CS_FETCH}`,
+        text: 'C# 调用顺序。'
+      })
+    ])
+    expect(order.status).toBe('declared')
+
+    const role = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'coreRoles', CS_FETCH, [
+      claim('role', CS_FETCH, [{ functionId: CS_FETCH }, { chainId: CS_CHAIN }], { object: CS_CHAIN })
+    ])
+    expect(role.status).toBe('declared')
+  })
+
+  it('partition / flows：全 C# 项目可 declared；含 .py 时 unverified 且原因含「尚未接入」', () => {
+    const partition = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'partition', 'root', [
+      claim('intent', 'root', [{ moduleId: CS_MOD }], { text: 'C# 项目划分。' })
+    ])
+    expect(partition.status).toBe('declared')
+    const flows = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'flows', 'root', [
+      claim('intent', 'root', [{ chainId: CS_CHAIN }], { text: 'C# 项目脉络。' })
+    ])
+    expect(flows.status).toBe('declared')
+
+    const mixedMod = CSHARP_MIXED_GRAPH.modules[0].id
+    const mixedPartition = validateOn(CSHARP_MIXED_INSIGHT, CSHARP_MIXED_GRAPH, 'partition', 'root', [
+      claim('intent', 'root', [{ moduleId: mixedMod }], { text: '混合项目划分。' })
+    ])
+    expect(mixedPartition.status).toBe('unverified')
+    expect(mixedPartition.reason).toContain('项目级混合对象')
+    expect(mixedPartition.reason).toContain('尚未接入')
+    const mixedFlows = validateOn(CSHARP_MIXED_INSIGHT, CSHARP_MIXED_GRAPH, 'flows', 'root', [
+      claim('intent', 'root', [{ moduleId: mixedMod }], { text: '混合项目脉络。' })
+    ])
+    expect(mixedFlows.status).toBe('unverified')
+    expect(mixedFlows.reason).toContain('尚未接入')
+  })
+
+  it('changes scope 含 C# 函数可 declared；含 .py 函数时 unverified', () => {
+    const csValue: AgentSupplyChangesValue = {
+      narrative: { what: '调整 C# 用户列表。', why: '测试。', risks: [] },
+      changeRoles: { [CS_LIST]: '本次变更的 C# 入口。' }
+    }
+    const cs = validateChangesGuarantee(
+      CSHARP_INSIGHT,
+      CSHARP_GRAPH,
+      'commit:cs',
+      csValue,
+      guaranteeOf([claim('intent', CS_LIST, [{ functionId: CS_LIST }], { text: 'C# 变更意图。' })])
+    )
+    expect(cs.status).toBe('declared')
+
+    const pyValue: AgentSupplyChangesValue = {
+      narrative: { what: '调整 Python 脚本。', why: '测试。', risks: [] },
+      changeRoles: { [CS_PY]: '本次变更的 Python 函数。' }
+    }
+    const py = validateChangesGuarantee(
+      CSHARP_MIXED_INSIGHT,
+      CSHARP_MIXED_GRAPH,
+      'commit:py',
+      pyValue,
+      guaranteeOf([claim('intent', 'commit:py', [{ functionId: CS_PY }], { text: 'Python 变更意图。' })])
+    )
+    expect(py.status).toBe('unverified')
+    expect(py.reason).toContain('尚未接入')
+  })
+})
+
+/* ------------------------- 真实 C# 夹具（解析 → 担保） ------------------------- */
+
+describe('真实 C# 夹具解析 → 担保集成', () => {
+  it('真实解析的 attribute / 可见性 / 调用 / 注释块与源码一致', async () => {
+    const { fnByName } = await realCSharpFixture()
+    const list = fnByName.get('ListUsers')!
+    expect(list.params).toEqual(['int page'])
+    expect(list.returnType).toBe('User[]')
+    expect(list.decorators).toEqual([])
+    expect(list.codeBlocks.map((b) => [b.startLine, b.endLine])).toEqual([
+      [26, 27],
+      [28, 29]
+    ])
+    expect(list.calls.map((c) => c.calleeName)).toEqual(
+      expect.arrayContaining(['Fetch', 'nameof', 'ArgumentOutOfRangeException'])
+    )
+    const validate = fnByName.get('TryValidate')!
+    expect(validate.decorators).toEqual(['Obsolete'])
+    expect(validate.params).toEqual(['string name', 'out string reason'])
+    const fetch = fnByName.get('Fetch')!
+    expect(fetch.className).toBe('IRepository')
+    expect(fetch.visibility).toBe('public')
+    expect(fnByName.get('ComputeName')?.visibility).toBe('private')
+  })
+
+  it('[Obsolete] / ObsoleteAttribute 命中真实 TryValidate', async () => {
+    const { graph, insight, fnByName } = await realCSharpFixture()
+    const fn = fnByName.get('TryValidate')!
+    for (const object of ['[Obsolete]', 'ObsoleteAttribute']) {
+      const result = validateGuaranteeClaims(
+        insight,
+        graph,
+        'coreRoles',
+        fn.id,
+        guaranteeOf([claim('decorator', fn.id, [{ functionId: fn.id }], { object })])
+      )
+      expect(result.claims[0].staticStatus, `应命中：${object}`).toBe('pass')
+      expect(result.status, `应命中：${object}`).toBe('declared')
+    }
+    // 真实夹具没有类级 [Description] 落到方法上
+    const list = fnByName.get('ListUsers')!
+    const missing = validateGuaranteeClaims(
+      insight,
+      graph,
+      'coreRoles',
+      list.id,
+      guaranteeOf([claim('decorator', list.id, [{ functionId: list.id }], { object: '[Description]' })])
+    )
+    expect(missing.claims[0].staticStatus).toBe('fail')
+  })
+
+  it('真实 ListUsers：type int 通过，page / int page 失败', async () => {
+    const { graph, insight, fnByName } = await realCSharpFixture()
+    const fn = fnByName.get('ListUsers')!
+    const run = (object: string) =>
+      validateGuaranteeClaims(
+        insight,
+        graph,
+        'coreRoles',
+        fn.id,
+        guaranteeOf([claim('type', fn.id, [{ functionId: fn.id }], { object })])
+      )
+    expect(run('int').status).toBe('declared')
+    expect(run('User[]').status).toBe('declared')
+    for (const object of ['page', 'int page']) {
+      expect(run(object).claims[0].staticStatus, `应失败：${object}`).toBe('fail')
+    }
+  })
+
+  it('真实 IRepository.Fetch：visibility public 通过，private 失败', async () => {
+    const { graph, insight, fnByName } = await realCSharpFixture()
+    const fn = fnByName.get('Fetch')!
+    const run = (object: string) =>
+      validateGuaranteeClaims(
+        insight,
+        graph,
+        'coreRoles',
+        fn.id,
+        guaranteeOf([claim('visibility', fn.id, [{ functionId: fn.id }], { object })])
+      )
+    expect(run('public').status).toBe('declared')
+    expect(run('private').claims[0].staticStatus).toBe('fail')
+  })
+
+  it('真实注释块行号可作为 block claim 证据', async () => {
+    const { graph, insight, fnByName } = await realCSharpFixture()
+    const fn = fnByName.get('ListUsers')!
+    const block = fn.codeBlocks[0]
+    expect(block.startLine).toBe(26)
+    const ok = validateGuaranteeClaims(
+      insight,
+      graph,
+      'blocks',
+      fn.id,
+      guaranteeOf([
+        claim(
+          'block',
+          fn.id,
+          [{ functionId: fn.id, line: block.startLine, snippet: 'ArgumentOutOfRangeException' }],
+          { object: '0' }
+        )
+      ])
+    )
+    expect(ok.status).toBe('declared')
+    const bad = validateGuaranteeClaims(
+      insight,
+      graph,
+      'blocks',
+      fn.id,
+      guaranteeOf([claim('block', fn.id, [{ functionId: fn.id, line: 30 }], { object: '0' })])
+    )
+    expect(bad.claims[0].staticStatus).toBe('fail')
+  })
+
+  it('C# external 未接入：未解析调用 externalModule=null，externals 担保被拒', async () => {
+    const { graph, insight, fnByName } = await realCSharpFixture()
+    const fn = fnByName.get('ListUsers')!
+    const edge = fn.calls.find((c) => c.calleeName === 'ArgumentOutOfRangeException')!
+    expect(edge.calleeId).toBeNull()
+    expect(edge.externalModule ?? null).toBeNull()
+    const ext = validateGuaranteeClaims(
+      insight,
+      graph,
+      'externals',
+      'System::ArgumentOutOfRangeException',
+      guaranteeOf([
+        claim(
+          'external',
+          fn.id,
+          [{ functionId: fn.id, line: edge.line }],
+          { object: 'System::ArgumentOutOfRangeException' }
+        )
+      ])
+    )
+    expect(ext.status).toBe('unverified')
+    expect(ext.reason).toContain('不在当前图谱的外部符号集中')
   })
 })
 
@@ -1554,8 +2142,14 @@ describe('供给契约包含 guarantees 说明与示例', () => {
     expect(rulesText).toContain('### 4.10 `guarantees` — 语义担保')
     expect(rulesText).toContain('**示例 J：`coreRoles.qoder.json`（带 guarantees）**')
     expect(rulesText).toContain('guarantees 自检')
+    expect(rulesText).toContain('TypeScript / JavaScript 家族')
+    expect(rulesText).toContain('C#（`.cs`）')
+    expect(rulesText).toContain('C# 证据口径')
+    expect(rulesText).toContain('不接受参数名')
+    expect(rulesText).toContain('文件内可解析的内部调用')
+    expect(rulesText).toContain('external` claim 与 KEY externals pass 实际无法生成')
     expect(rulesText).toContain('该语言尚未接入语义担保')
-    expect(rulesText).toContain('TypeScript 轮次暂不支持 import 静态校验')
+    expect(rulesText).toContain('语义担保暂不支持 import 静态校验')
     expect(rulesText).toContain('guarantee 体积计入')
     expect(rulesText).toContain('subject 解析')
     expect(rulesText).toContain('必须解析到当前图谱/洞察里真实存在的对象')

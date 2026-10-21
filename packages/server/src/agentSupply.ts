@@ -289,7 +289,7 @@ const MAX_KEY_STEP_CALLEES = 200
 const MAX_GUARANTEE_CLAIMS = 50
 const MAX_GUARANTEE_EVIDENCE = 50
 /** SG1 契约：import 静态校验尚未接入（与 semanticGuarantee.ts 同口径） */
-const IMPORT_UNSUPPORTED_REASON = 'TypeScript 轮次暂不支持 import 静态校验'
+const IMPORT_UNSUPPORTED_REASON = '语义担保暂不支持 import 静态校验'
 
 const STEP_KINDS: InternalStep['kind'][] = ['step', 'banner', 'todo', 'deadcode']
 const CATEGORIES: Category[] = ['business', 'implementation', 'utility']
@@ -2560,9 +2560,15 @@ function buildRulesText(
       '最高仍是 `declared`，不会升级为 `verified`。'
   )
   L.push(
-    '- **语言范围（本轮）**：仅 TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）。' +
-      '`.vue` / `.cs` / `.cpp` / `.py` / `.java` / `.go` 等其它语言、以及包含非 TS 文件的项目级对象（partition / flows / 混合模块 / 混合链路）' +
+    '- **语言范围（本轮）**：TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）+ C#（`.cs`）。' +
+      '`.vue` / `.cpp` / `.py` / `.java` / `.go` 等其它语言、以及包含未接入语言文件的项目级对象（partition / flows / 混合模块 / 混合链路）' +
       '一律 `unverified`，原因「该语言尚未接入语义担保」。'
+  )
+  L.push(
+    '- **C# 证据口径**：`decorator` 对应 `[Attribute]`（`[Obsolete]` / `ObsoleteAttribute` / `Obsolete` 归一为同一名称），' +
+      '`type` 对「参数类型 / 返回类型」整体或完整类型 token（参数名、完整参数声明与整个签名都不算类型）；' +
+      '调用边、注释块、可见性与 TS 共用同一套锚点。C# 当前只支持**文件内可解析的内部调用**：`using` 不映射源文件，' +
+      '`import` claim 一律未证实；未解析调用的 `externalModule` 恒为 null，`external` claim 与 KEY externals pass 实际无法生成，跨文件 C# 调用也未解析。'
   )
   L.push(
     '- **对象覆盖**：`guarantees` 的键必须同时出现在同文件 `values` 中；claims 至少要引用该对象本身（subject / object / evidence 锚点任一），' +
@@ -2570,8 +2576,8 @@ function buildRulesText(
   )
   L.push(
     '- **subject 解析**：所有 claim 的 `subject` 必须解析到当前图谱/洞察里真实存在的对象（函数 / 链路 / 模块 / 文件 / 外部符号；' +
-      'partition / flows 额外允许 `root` 与本轮划分/树内对象），且引用到的函数必须全部属于 TypeScript / JavaScript 家族；' +
-      '不存在的 subject、非 TS subject 一律 `unverified`，不能进入 `declared`。'
+      'partition / flows 额外允许 `root` 与本轮划分/树内对象），且引用到的函数必须全部属于已接入语义担保的语言（TypeScript / JavaScript 家族或 C#）；' +
+      '不存在的 subject、未接入语言的 subject 一律 `unverified`，不能进入 `declared`。'
   )
   L.push(
     '- **证据底线**：`detail` / `snippet` 只是复核上下文，不能单独担保。intent 断言必须再给出指向 subject 的可定位锚点，' +
@@ -2614,8 +2620,8 @@ function buildRulesText(
   L.push('| call | subject=caller 函数 id，object=callee 函数 id 或 calleeName；必须是真实内部调用边（calleeId 非空），证据须含该边的 stepId，或 caller 的 functionId + 调用行号（只给 caller 不给行号不算） |')
   L.push('| order | subject=链路 id 时 object=`函数A->函数B`（按 chain.path 顺序）；subject=函数 id 时 object=`调用A->调用B`（按调用行号顺序） |')
   L.push('| containment | 函数↔模块 / 函数↔链路 / 模块↔链路 / 链路↔函数的成员关系；必须给出 moduleId / chainId 目标锚点并核对成员 |')
-  L.push('| type | subject=函数 id，object=类型文本；必须与该函数签名 / 参数 / 返回值的整体或完整类型 token 精确匹配（不做子串匹配） |')
-  L.push('| decorator | subject=函数 id，object=装饰器名（可带或不带 @） |')
+  L.push('| type | subject=函数 id，object=参数类型 / 返回类型整体或完整类型 token；不接受参数名、完整参数声明（含参数名）或整个签名；不做子串匹配 |')
+  L.push('| decorator | subject=函数 id，object=装饰器名（TS/JS 可带或不带 @；C# 可写 `[Obsolete]` / `ObsoleteAttribute` / `Obsolete`，系统归一） |')
   L.push('| visibility | subject=函数 id，object=public / private / protected / exported / module-local |')
   L.push('| category | subject=函数 id，object=business / implementation / utility；对照合并后的当前分类 |')
   L.push('| core | subject=函数 id，object=true / false（或 core / not-core）；对照合并后的当前核心判定 |')
@@ -3057,7 +3063,7 @@ function buildRulesText(
   L.push(
     '- **guarantees 自检（建议每条语义对象都做）**：键必须同时出现在本文件 `values` 中；claims 1..50、每条 evidence 1..50；' +
       '硬事实（call / order / containment / type / decorator / visibility / category / core / role / external / block）必须有可解析、' +
-      '与图谱一致的锚点；意图类用 kind=intent 并交给 review；只有 TS/JS 家族参与静态校验，' +
+      '与图谱一致的锚点；意图类用 kind=intent 并交给 review；只有已接入语义担保的语言参与静态校验，' +
       '所有硬事实通过且 `review.verdict=pass` 才会是 declared，缺省/失败一律未证实。'
   )
   L.push(

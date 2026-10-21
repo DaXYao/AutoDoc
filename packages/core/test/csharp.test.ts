@@ -51,6 +51,49 @@ describe('C# 解析器', () => {
     expect(tryValidate?.visibility).toBe('private')
     expect(tryValidate?.exported).toBe(false)
     expect(tryValidate?.params).toEqual(['string name', 'out string reason'])
+
+    const computeName = functions.find((f) => f.name === 'ComputeName')
+    expect(computeName?.visibility).toBe('private')
+    expect(computeName?.exported).toBe(false)
+  })
+
+  it('接口成员无显式修饰符时按 C# 语义输出 public（IRepository.Fetch）', async () => {
+    const functions = await parseFixture('Services/UserService.cs')
+    const fetch = functions.find((f) => f.name === 'Fetch')
+    expect(fetch?.className).toBe('IRepository')
+    expect(fetch?.kind).toBe('method')
+    expect(fetch?.visibility).toBe('public')
+    expect(fetch?.exported).toBe(true)
+  })
+
+  it('接口成员的显式可见性优先，static/abstract 等修饰符不影响默认 public', async () => {
+    const source = [
+      'public interface IProbe',
+      '{',
+      '    void Default();',
+      '    public void Explicit();',
+      '    static void Helper() { }',
+      '    abstract void Abstract();',
+      '    virtual void Virtual() { }',
+      '    string Name => "probe";',
+      '    private void Hidden() { }',
+      '    protected void Proto() { }',
+      '    internal void Inner() { }',
+      '}'
+    ].join('\n')
+    const parser = parserRegistry.forFile('IProbe.cs')
+    const functions = (await parser!.parse(source)).functions
+    const visibilityOf = (name: string): string | undefined =>
+      functions.find((f) => f.name === name)?.visibility
+    expect(visibilityOf('Default')).toBe('public')
+    expect(visibilityOf('Explicit')).toBe('public')
+    expect(visibilityOf('Helper')).toBe('public')
+    expect(visibilityOf('Abstract')).toBe('public')
+    expect(visibilityOf('Virtual')).toBe('public')
+    expect(visibilityOf('Name')).toBe('public')
+    expect(visibilityOf('Hidden')).toBe('private')
+    expect(visibilityOf('Proto')).toBe('protected')
+    expect(visibilityOf('Inner')).toBe('module-local')
   })
 
   it('attribute 映射到 decorators（含类级 attribute 不影响方法）', async () => {

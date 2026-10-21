@@ -16,7 +16,12 @@ import type {
 import { asChatReply, deepseekChat, extractJson, type ChatMessage } from './ai.js'
 import type { AiCache } from './aiCache.js'
 import type { ProjectGraph } from './graph.js'
-import { fileIdOfFunctionId, isTsFamilyFile, validateGuaranteeClaims } from './semanticGuarantee.js'
+import {
+  fileIdOfFunctionId,
+  functionTypeTexts,
+  isGuaranteeLanguageFile,
+  validateGuaranteeClaims
+} from './semanticGuarantee.js'
 
 /**
  * SG2：KEY（本地 DeepSeek API）语义产物的第二遍 LLM 复核。
@@ -31,7 +36,7 @@ import { fileIdOfFunctionId, isTsFamilyFile, validateGuaranteeClaims } from './s
  *   一律视为未证实；整次回复畸形则重试，耗尽后 unverified，不写缓存。
  *
  * 约束：
- * - 只处理 TypeScript / JavaScript 家族；非 TS、Agent 已供给对象跳过，不覆盖 source==='agent' 的担保。
+ * - 只处理已接入语义担保的语言（TypeScript / JavaScript / TSX、C#）；未接入语言、Agent 已供给对象跳过，不覆盖 source==='agent' 的担保。
  * - 证据包只由当前图谱/洞察的结构化数据组成，不把其它生成式自由文本当证据，
  *   也不携带任何分类/核心判定值（分类值只出现在待复核对象文本中）。
  * - 复核结果写入 AiCache 全局键 `guarantee:<pass>:<sha256(...)>`；刷新时写入，读取路径只回放缓存。
@@ -154,22 +159,22 @@ function fileOfFunction(graph: ProjectGraph, functionId: string): string | null 
   return graph.fileOf.get(functionId) ?? fileIdOfFunctionId(functionId)
 }
 
-function isTsFunction(graph: ProjectGraph, functionId: string): boolean {
+function isGuaranteeFunction(graph: ProjectGraph, functionId: string): boolean {
   const file = fileOfFunction(graph, functionId)
-  return file !== null && isTsFamilyFile(file)
+  return file !== null && isGuaranteeLanguageFile(file)
 }
 
-function isTsFileSet(files: Iterable<string>): boolean {
+function isGuaranteeFileSet(files: Iterable<string>): boolean {
   let any = false
   for (const f of files) {
     any = true
-    if (!isTsFamilyFile(f)) return false
+    if (!isGuaranteeLanguageFile(f)) return false
   }
   return any
 }
 
-function allGraphFilesTs(graph: ProjectGraph): boolean {
-  return isTsFileSet(graph.fileOf.values())
+function allGraphFilesGuaranteed(graph: ProjectGraph): boolean {
+  return isGuaranteeFileSet(graph.fileOf.values())
 }
 
 function callsByLine(fn: FunctionDoc): CallEdge[] {
@@ -539,8 +544,8 @@ interface KeyObjectRef {
 }
 
 /**
- * 枚举当前洞察里由 KEY 生成、且属于 TS/JS 家族的语义对象。
- * Agent 已供给对象、非 TS 对象不在这里返回（由调用方统计跳过数）。
+ * 枚举当前洞察里由 KEY 生成、且属于已接入语义担保语言的语义对象。
+ * Agent 已供给对象、未接入语言的对象不在这里返回（由调用方统计跳过数）。
  */
 function keyObjectRefs(insight: ProjectInsight, graph: ProjectGraph): KeyObjectRef[] {
   const out: KeyObjectRef[] = []
@@ -549,13 +554,13 @@ function keyObjectRefs(insight: ProjectInsight, graph: ProjectGraph): KeyObjectR
     out.push({ pass, objectId, intent })
   }
 
-  if (insight.partitionSource === 'ai' && graph.modules.length > 0 && allGraphFilesTs(graph)) {
+  if (insight.partitionSource === 'ai' && graph.modules.length > 0 && allGraphFilesGuaranteed(graph)) {
     push('partition', 'root', typeof insight.summary === 'string' && insight.summary.trim().length > 0)
   }
 
   const flowNodes = collectFlowNodes(insight.flows)
   const flowsAi = flowNodes.some((x) => x.node.source === 'ai')
-  if (flowNodes.length > 0 && flowsAi && allGraphFilesTs(graph)) {
+  if (flowNodes.length > 0 && flowsAi && allGraphFilesGuaranteed(graph)) {
     push('flows', 'root', flowNodes.some((x) => hasFlowText(x.node)))
   }
 
@@ -565,7 +570,7 @@ function keyObjectRefs(insight: ProjectInsight, graph: ProjectGraph): KeyObjectR
       const hasDescription =
         typeof mod.description === 'string' && mod.description.trim().length > 0
       if (!hasName && !hasDescription) continue
-      if (!isTsFileSet(mod.fileIds)) continue
+      if (!isGuaranteeFileSet(mod.fileIds)) continue
       push('modules', mod.id, true)
     }
   }
@@ -576,19 +581,19 @@ function keyObjectRefs(insight: ProjectInsight, graph: ProjectGraph): KeyObjectR
     const hasText = Boolean(narrative.trim()) || Object.keys(stepRoles).length > 0
     if (!hasText) continue
     const files = chain.path.map((id) => fileOfFunction(graph, id)).filter((x): x is string => x !== null)
-    if (!isTsFileSet(files)) continue
+    if (!isGuaranteeFileSet(files)) continue
     push('narratives', chain.id, true)
   }
 
   for (const [fnId, f] of Object.entries(insight.functions)) {
-    if (!graph.nodes.has(fnId) || !isTsFunction(graph, fnId)) continue
+    if (!graph.nodes.has(fnId) || !isGuaranteeFunction(graph, fnId)) continue
     if (f.aiCategory) push('categories', fnId, true)
     if (f.coreSource === 'ai') push('coreJudgment', fnId, true)
     if (typeof f.systemRole === 'string' && f.systemRole.trim()) push('coreRoles', fnId, true)
   }
 
   for (const fn of graph.nodes.values()) {
-    if (!isTsFunction(graph, fn.id)) continue
+    if (!isGuaranteeFunction(graph, fn.id)) continue
     const f = insight.functions[fn.id]
     if (!f) continue
     // 持久化洞察可能被外部改坏：逐元素过滤，避免一个畸形 internalStep 让整个项目本轮不生成担保
@@ -614,8 +619,8 @@ function keyObjectRefs(insight: ProjectInsight, graph: ProjectGraph): KeyObjectR
       const objectId = externalIdOf(module, symbol)
       const refs = externalCallsOf(graph, module, symbol)
       if (refs.length === 0) continue
-      const allTs = refs.every((r) => isTsFunction(graph, r.callerId))
-      if (!allTs) continue
+      const allGuaranteed = refs.every((r) => isGuaranteeFunction(graph, r.callerId))
+      if (!allGuaranteed) continue
       push('externals', objectId, true)
     }
   }
@@ -654,7 +659,7 @@ function skippedCounts(insight: ProjectInsight, graph: ProjectGraph): SkippedSta
     agent++
   }
   for (const fn of graph.nodes.keys()) {
-    if (!isTsFunction(graph, fn)) nonTs++
+    if (!isGuaranteeFunction(graph, fn)) nonTs++
   }
   return { agent, nonTs }
 }
@@ -690,16 +695,19 @@ export function buildFunctionFactClaims(
   // 生成到「超过总预算」才停：由调用方按 static + intent 总数判 unverified，绝不静默截断后放行
   const full = (): boolean => out.length > MAX_FUNCTION_FACTS
 
-  const signature = fn.signature.trim()
-  if (signature && signature.length <= MAX_OBJECT_TEXT) {
+  // 静态类型事实：参数类型 + 返回类型（完整签名/参数名不算类型，与 SG1 的 type 口径一致）
+  const typeTexts = [...new Set(functionTypeTexts(fn))]
+  for (let i = 0; i < typeTexts.length && !full(); i++) {
+    const text = typeTexts[i]
+    if (text.length > MAX_OBJECT_TEXT) continue
     out.push(
       claimOf(
-        `${prefix}-signature`,
+        `${prefix}-type-${i + 1}`,
         'type',
         functionId,
-        `函数签名为 ${signature}。`,
+        `函数参数或返回类型为 ${text}。`,
         [{ kind: 'signature', functionId }],
-        signature
+        text
       )
     )
   }
@@ -2422,13 +2430,13 @@ function finalizeKeyGuarantees(
 export type AttachKeyGuaranteesOptions = VerifyIntentOptions
 
 export interface KeyGuaranteeStats {
-  /** 实际处理的 TS 语义对象数 */
+  /** 实际处理的已接入语言语义对象数 */
   objects: number
   verified: number
   unverified: number
   /** Agent 已供给而跳过的对象键数（来源口径统计） */
   skippedAgent: number
-  /** 非 TS 函数数（仅作可观测，不代表对象数） */
+  /** 未接入语言函数数（仅作可观测，不代表对象数） */
   skippedNonTs: number
   /** 实际发起 LLM 复核的对象数（命中缓存的不计；重试不单独计数） */
   llmReviews: number
@@ -2437,7 +2445,7 @@ export interface KeyGuaranteeStats {
 }
 
 /**
- * 在 KEY 语义全部套用之后，为 TS/JS 家族对象生成/刷新语义担保。
+ * 在 KEY 语义全部套用之后，为已接入语义担保的语言（TS/JS/TSX、C#）对象生成/刷新语义担保。
  * - 硬事实一律由服务端确定性生成；意图片段逐条调用第二遍 LLM（或命中缓存）；
  * - Agent 已供给对象跳过，不覆盖 source==='agent' 的担保；
  * - 单对象失败只写 unverified，绝不抛出（不阻塞刷新/保存快照）。

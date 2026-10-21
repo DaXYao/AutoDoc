@@ -1985,7 +1985,7 @@ export async function refreshInsightAI(
     // partition 已在本函数最前面应用；overlay 只登记来源与状态（aiStatus.partition='ok'、aiSource='agent'），不重复改写结构。
     applySupplyOverlay(insight, graph, cache, { skipPartition: agentPartitionApplied })
   }
-  // SG2：本地语义与 Agent overlay 全部套用后，为 TS/JS 家族对象生成语义担保。
+  // SG2：本地语义与 Agent overlay 全部套用后，为已接入语义担保的语言对象生成语义担保。
   // 硬事实走静态校验；意图类走 KEY 第二遍 LLM（命中 guarantee:* 缓存则不重复请求）。
   // attachKeyGuarantees 内部逐对象 try/catch，失败只写 unverified，不得拖垮刷新/快照。
   try {
