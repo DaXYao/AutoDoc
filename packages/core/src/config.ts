@@ -1,6 +1,8 @@
 import { cosmiconfig } from 'cosmiconfig'
 import AjvImport from 'ajv'
-import type { AutodocConfig, DefaultExpandConfig } from '@autodoc/shared-types'
+import { readFileSync, realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import type { AutodocConfig, DefaultExpandConfig, TeamConfig } from '@autodoc/shared-types'
 import { DEFAULT_EXCLUDE, DEFAULT_INCLUDE } from './files.js'
 
 interface SchemaValidator {
@@ -16,6 +18,9 @@ const AjvClass =
   (AjvImport as unknown as { default?: typeof AjvCtor }).default ?? AjvCtor
 
 export const MODULE_NAME = 'autodoc'
+
+/** team.projectKey 的安全字符集：只允许字母、数字、点、下划线、连字符（与团队文件名同口径） */
+const SAFE_PROJECT_KEY_PATTERN = /^[A-Za-z0-9._-]+$/
 
 /** 历史 AI 洞察快照列表默认返回的最近份数（insight.history.showRecent 缺省值） */
 export const DEFAULT_SHOW_RECENT = 10
@@ -108,6 +113,19 @@ const configSchema = {
         path: { type: 'string' }
       }
     },
+    // 团队协作（docs/TEAM_COLLABORATION.md 第 3 节）：repoPath 必填非空；
+    // 「不得位于项目根内」属路径语义校验，AJV 之外在 loadConfig 里做（见 validateTeamConfig）。
+    // projectKey 显式配置时只接受安全字符（空白/路径分隔符等直接拒绝，不静默清洗）。
+    team: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['repoPath'],
+      properties: {
+        repoPath: { type: 'string', minLength: 1 },
+        remote: { type: 'string' },
+        projectKey: { type: 'string', minLength: 1, pattern: SAFE_PROJECT_KEY_PATTERN.source }
+      }
+    },
     editor: {
       type: 'object',
       additionalProperties: false,
@@ -175,6 +193,143 @@ export interface NormalizedConfig {
 }
 
 /**
+ * 尽最大努力取真实路径（解析符号链接 + Windows 大小写/短名归一）：
+ * 目标可以尚不存在（团队仓库首次启用时允许），此时逐级向上找最近存在的祖先做 realpath，
+ * 再把不存在的尾段拼回去；连盘符都不存在时回落 resolve 结果。
+ */
+function realpathBestEffort(target: string): string {
+  const absolute = resolve(target)
+  const tail: string[] = []
+  let current = absolute
+  for (;;) {
+    try {
+      const real = realpathSync.native(current)
+      return tail.length > 0 ? join(real, ...tail.reverse()) : real
+    } catch {
+      const parent = dirname(current)
+      // 已到根（盘符/`/`）仍失败：无法 realpath，按字面 resolve 结果比较
+      if (parent === current) return absolute
+      tail.push(basename(current))
+      current = parent
+    }
+  }
+}
+
+/** Windows 路径大小写不敏感：比较前统一小写，避免 `E:\Repo` 与 `e:\repo` 被当成两个目录 */
+function comparablePath(target: string): string {
+  const real = realpathBestEffort(target)
+  return process.platform === 'win32' ? real.toLowerCase() : real
+}
+
+/** target 是否等于 root 或位于 root 之内（含符号链接归一后的比较） */
+function isSameOrInside(root: string, target: string): boolean {
+  const rootPath = comparablePath(root)
+  const targetPath = comparablePath(target)
+  if (targetPath === rootPath) return true
+  const rel = relative(rootPath, targetPath)
+  // 只有 rel === '..' 或 rel 以 '../'（Windows 为 '..\'）开头才是真正的上级目录；
+  // 不能直接用 startsWith('..')，否则 `..team` 这种位于 root 内的目录会被误判为外部。
+  return rel.length > 0 && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
+}
+
+/** 本机数据目录：显式 storage.path 取所在目录（相对项目根解析），否则默认 `<root>/.autodoc` */
+function resolveLocalDataDir(rootDir: string, storage: { path?: string } | undefined): string {
+  if (!storage?.path) return join(rootDir, '.autodoc')
+  const dataPath = isAbsolute(storage.path) ? storage.path : resolve(rootDir, storage.path)
+  return dirname(dataPath)
+}
+
+/**
+ * 团队配置的路径语义校验（AJV 只能校验形状）：
+ * - repoPath 必填非空（trim 后非空，拒绝纯空白）；
+ * - 相对路径按项目根解析；
+ * - 不得位于被分析源码根目录内（含等于根目录），也不得是源码根的祖先（否则团队仓库会包住源码）；
+ * - 不得与本机数据目录（storage.path 所在目录或默认 `.autodoc`）互相包含；
+ * - 目录不存在允许（初始化时创建），但解析后的位置仍必须满足以上约束。
+ */
+function validateTeamConfig(
+  rootDir: string,
+  team: TeamConfig,
+  storage: { path?: string } | undefined,
+  sourcePath: string | null
+): void {
+  const fail = (field: 'repoPath' | 'projectKey', detail: string): never => {
+    throw new Error(
+      `autodoc 配置校验失败（${sourcePath ?? '默认配置'}）：team.${field} ${detail}`
+    )
+  }
+  if (typeof team.repoPath !== 'string' || team.repoPath.trim().length === 0) {
+    fail('repoPath', '不能为空')
+  }
+  if (
+    team.projectKey !== undefined &&
+    (team.projectKey.trim().length === 0 || !SAFE_PROJECT_KEY_PATTERN.test(team.projectKey))
+  ) {
+    fail('projectKey', '必须是仅含字母、数字、点、下划线或连字符的非空字符串')
+  }
+  const target = resolve(rootDir, team.repoPath)
+  if (isSameOrInside(rootDir, target)) {
+    fail('repoPath', `不得位于被分析源码根目录内（解析为 ${target}），请选择项目根之外的目录`)
+  }
+  if (isSameOrInside(target, rootDir)) {
+    fail('repoPath', `不得是被分析源码根目录的祖先（解析为 ${target}），请选择与项目根平级的目录`)
+  }
+  const localDataDir = resolveLocalDataDir(rootDir, storage)
+  if (isSameOrInside(localDataDir, target) || isSameOrInside(target, localDataDir)) {
+    fail(
+      'repoPath',
+      `不得与本机数据目录互相包含（解析为 ${target}，本机数据目录 ${localDataDir}）`
+    )
+  }
+}
+
+/** 读取项目根 package.json 的 name；不存在/损坏/非字符串时返回 null */
+function readPackageName(rootDir: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf-8'))
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      const name = (parsed as { name?: unknown }).name
+      return typeof name === 'string' ? name : null
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/** 把派生值清洗为安全 projectKey：trim + 非安全字符替换为 `-` + 去掉首尾分隔符 */
+function sanitizeProjectKey(value: string): string {
+  return value
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+}
+
+/**
+ * 解析团队项目标识（projectKey）：
+ * - 显式配置优先，必须是安全字符（空白/非法值直接抛错，不静默改写）；
+ * - 未配置时优先 package.json 的 name，其次项目根目录名；派生值会 trim 并把非安全字符替换为 `-`
+ *   （如 `@scope/name` → `scope-name`）；仍为空时回落 `autodoc`。
+ */
+export function resolveTeamProjectKey(rootDir: string, configured?: string): string {
+  if (configured !== undefined) {
+    const trimmed = configured.trim()
+    if (trimmed.length === 0 || !SAFE_PROJECT_KEY_PATTERN.test(trimmed)) {
+      throw new Error(
+        'team.projectKey 必须是仅含字母、数字、点、下划线或连字符的非空字符串'
+      )
+    }
+    return trimmed
+  }
+  for (const candidate of [readPackageName(rootDir), basename(resolve(rootDir))]) {
+    if (typeof candidate !== 'string') continue
+    const safe = sanitizeProjectKey(candidate)
+    if (safe.length > 0) return safe
+  }
+  return 'autodoc'
+}
+
+/**
  * 发现并校验 autodoc 配置（cosmiconfig：autodoc.config.{json,js,cjs,yaml} 等）。
  * 非法配置抛出带字段说明的错误，避免静默降级。
  * 传入 explicitPath 时直接加载指定文件（跳过搜索），用于将配置放在仓库外部。
@@ -197,12 +352,22 @@ export async function loadConfig(
   }
 
   const config = raw as AutodocConfig
+  // 形状通过后再做团队路径语义校验（repoPath 必须在项目根之外，且不得与本机数据目录互相包含）
+  if (config.team) {
+    validateTeamConfig(rootDir, config.team, config.storage, result?.filepath ?? null)
+  }
+  // repoPath 必须在 normalized 结果里就是绝对路径：否则调用方（TeamStorage/server）在 cwd≠root 时
+  // 用 resolve(repoPath) 会以 cwd 为基准，绕过「源码根之外」的校验。
+  const normalized: NormalizedConfig['config'] = {
+    ...config,
+    include: config.include ?? DEFAULT_INCLUDE,
+    exclude: [...DEFAULT_EXCLUDE, ...(config.exclude ?? [])]
+  }
+  if (config.team) {
+    normalized.team = { ...config.team, repoPath: resolve(rootDir, config.team.repoPath) }
+  }
   return {
-    config: {
-      ...config,
-      include: config.include ?? DEFAULT_INCLUDE,
-      exclude: [...DEFAULT_EXCLUDE, ...(config.exclude ?? [])]
-    },
+    config: normalized,
     configPath: result?.filepath ?? null,
     defaultExpand: { ...DEFAULT_EXPAND, ...(config.ui?.defaultExpand ?? {}) }
   }

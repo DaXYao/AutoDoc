@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { addProject, appState, removeProject, switchProject } from '../store/app'
 import { pickFolder } from '../data/api'
+import { adBtnInkOverrides } from '../theme'
+import { TEAM_CONFIG_EXAMPLE, teamStatusPill } from '../utils/team'
 
 const router = useRouter()
 const message = useMessage()
@@ -13,6 +15,28 @@ const showAdd = ref(false)
 const form = ref({ name: '', root: '', config: '' })
 const submitting = ref(false)
 const browsing = ref(false)
+const copyingTeamConfig = ref(false)
+
+const team = computed(() => appState.teamStatus)
+const teamPill = computed(() => teamStatusPill(appState.teamStatus))
+
+function openTeamPanel(): void {
+  appState.teamPanelOpen = true
+}
+
+async function handleCopyTeamConfig(): Promise<void> {
+  if (copyingTeamConfig.value) return
+  copyingTeamConfig.value = true
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+    await navigator.clipboard.writeText(TEAM_CONFIG_EXAMPLE)
+    message.success('团队配置示例已复制')
+  } catch {
+    message.error('复制失败：浏览器未授权剪贴板写入，请手动选择复制')
+  } finally {
+    copyingTeamConfig.value = false
+  }
+}
 
 /** 调用系统原生文件夹选择对话框，把选中路径填入「项目根目录」 */
 async function handleBrowse(): Promise<void> {
@@ -122,6 +146,77 @@ async function handleRemove(id: string, name: string): Promise<void> {
         </div>
       </div>
     </n-card>
+
+    <!-- 团队数据仓库（只读）：不写用户配置文件，只展示配置示例或当前状态 -->
+    <section class="ad-card mb-4 px-4 py-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">团队数据仓库</h3>
+        <n-tag v-if="teamPill" size="tiny" :type="teamPill.type" :bordered="false">
+          {{ teamPill.label }}
+        </n-tag>
+        <span class="ml-auto text-[11px] text-[color:var(--ad-ink-3)]">
+          只读：AutoDoc 不会修改你的配置文件
+        </span>
+      </div>
+
+      <template v-if="team?.enabled">
+        <dl class="mt-2 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-2">
+          <div class="min-w-0 sm:col-span-2">
+            <dt class="text-[color:var(--ad-ink-3)]">仓库路径</dt>
+            <dd class="font-mono break-all text-[color:var(--ad-ink-2)]">{{ team.repoPath }}</dd>
+          </div>
+          <div class="min-w-0">
+            <dt class="text-[color:var(--ad-ink-3)]">远端</dt>
+            <dd class="font-mono break-all text-[color:var(--ad-ink-2)]">
+              {{ team.remote ?? '未配置（只做本地提交）' }}
+            </dd>
+          </div>
+          <div class="min-w-0">
+            <dt class="text-[color:var(--ad-ink-3)]">分支</dt>
+            <dd class="font-mono text-[color:var(--ad-ink-2)]">{{ team.branch ?? '未知' }}</dd>
+          </div>
+          <div class="text-[color:var(--ad-ink-2)] sm:col-span-2">
+            {{
+              team.dirty ? `团队目录有 ${team.dirtyCount} 项未提交改动` : '团队目录无未提交改动'
+            }} · 领先 {{ team.ahead }} / 落后 {{ team.behind }}
+            <template v-if="team.merging"> · 合并进行中</template>
+            <template v-if="team.dirtyOutsideTeam">
+              · 团队目录外有未提交改动（不会同步）
+            </template>
+          </div>
+        </dl>
+        <n-button
+          size="small"
+          class="ad-btn-ink mt-2"
+          :theme-overrides="adBtnInkOverrides"
+          @click="openTeamPanel"
+        >
+          打开团队面板
+        </n-button>
+      </template>
+
+      <template v-else>
+        <p class="mt-2 text-xs text-[color:var(--ad-ink-2)]">
+          当前活动项目未启用团队模式（或团队状态暂不可达）。在项目的 autodoc.config.json 中增加 team
+          段并重启本地服务即可启用：数据仓库必须是独立的 Git 仓库，repoPath 要放在源码根之外（不能与源码根或本机
+          .autodoc 目录互相包含）；remote 可选（不配置则只做本地提交）；团队仓库还需配置 git user.name /
+          user.email。
+        </p>
+        <pre
+          class="mt-2 max-h-64 overflow-auto whitespace-pre rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] p-3 font-mono text-xs text-[color:var(--ad-ink-2)]"
+          tabindex="0"
+          aria-label="团队配置示例"
+        >{{ TEAM_CONFIG_EXAMPLE }}</pre>
+        <div class="mt-2 flex items-center gap-2">
+          <n-button size="tiny" quaternary :aria-busy="copyingTeamConfig" @click="handleCopyTeamConfig">
+            复制配置示例
+          </n-button>
+          <span class="text-[11px] text-[color:var(--ad-ink-3)]">
+            修改配置后需重启本地服务才会生效。
+          </span>
+        </div>
+      </template>
+    </section>
 
     <n-spin :show="appState.loading">
       <n-empty

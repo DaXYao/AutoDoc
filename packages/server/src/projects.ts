@@ -147,7 +147,7 @@ export class ProjectManager {
       if (!existsSync(rootDir)) {
         throw new Error(`项目根目录不存在：${rootDir}`)
       }
-      managed.service = await createDocService(rootDir, this.warn, configPath)
+      managed.service = await createDocService(rootDir, this.warn, configPath, id)
       // createDocService 内部已在首次全量生成后调度 Git 回填
     } else {
       // 复用已加载服务：切回时增量拾取新提交（后台异步、并发去重）

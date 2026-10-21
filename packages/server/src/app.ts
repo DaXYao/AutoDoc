@@ -2,12 +2,23 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AgentSupplyResponse, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse } from '@autodoc/shared-types'
+import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AgentSupplyResponse, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse, TeamConflictChoice } from '@autodoc/shared-types'
 import { inspectParseCache, resolveShowRecent } from '@autodoc/core'
 import { regenerate, type DocService } from './context.js'
 import { pickFolder } from './pickFolder.js'
 import type { ProjectManager } from './projects.js'
 import { loadInsight, refreshInsightAI } from './insight.js'
+import {
+  abortTeamMerge,
+  continueTeamMerge,
+  getTeamStatus,
+  initTeamRepo,
+  previewTeamMigration,
+  resolveTeamConflict,
+  runTeamMigration,
+  syncTeam
+} from './teamSync.js'
+import { teamAnnotationAuthor, teamAnnotationFingerprints } from './teamAnnotations.js'
 import { diffInsightSnapshots } from './insightDiff.js'
 import {
   IMPACT_COMMITS_DEFAULT_LIMIT,
@@ -129,6 +140,130 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
     const path = await pickFolder()
     return { path }
+  })
+
+  /* ------------------------- 团队协作（同步 / 冲突 / 迁移） ------------------------- */
+
+  /** 所有团队路由只在当前项目配置了 team 时可用；否则 400 而不是假装成功 */
+  const activeTeamService = (reply: { code: (status: number) => { send: (body: unknown) => unknown } }) => {
+    const service = manager.getActive()
+    if (!service) {
+      reply.code(409).send({ error: 'no active project' })
+      return null
+    }
+    if (!service.team) {
+      reply.code(400).send({ error: '当前项目未启用团队模式（配置中缺少 team 段）' })
+      return null
+    }
+    return service
+  }
+
+  const teamFailure = (reply: { code: (status: number) => { send: (body: unknown) => unknown } }, error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error)
+    return reply.code(400).send({ error: message })
+  }
+
+  // 只读：团队状态；?fetch=1 时顺便 fetch（失败只放 error，不影响其它字段）
+  app.get('/api/team/status', async (req, reply) => {
+    const service = activeTeamService(reply)
+    if (!service) return
+    const { fetch } = req.query as { fetch?: string }
+    try {
+      return getTeamStatus(service, { fetch: fetch === '1' || fetch === 'true' })
+    } catch (error) {
+      return teamFailure(reply, error)
+    }
+  })
+
+  // 空目录/仅 AutoDoc 文件时 git init -b main；按配置添加 origin；不 commit
+  app.post('/api/team/init', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = activeTeamService(reply)
+    if (!service) return
+    try {
+      return initTeamRepo(service)
+    } catch (error) {
+      return teamFailure(reply, error)
+    }
+  })
+
+  // 同步状态机：本地提交 → fetch → merge → push
+  app.post('/api/team/sync', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = activeTeamService(reply)
+    if (!service) return
+    try {
+      return syncTeam(service)
+    } catch (error) {
+      return teamFailure(reply, error)
+    }
+  })
+
+  // 解决单个冲突：local / remote / both（both 仅批注，生成新 ID 冲突副本）
+  app.post('/api/team/conflicts/resolve', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = activeTeamService(reply)
+    if (!service) return
+    const body = (req.body ?? {}) as { file?: unknown; choice?: unknown }
+    if (
+      typeof body.file !== 'string' ||
+      body.file.length === 0 ||
+      (body.choice !== 'local' && body.choice !== 'remote' && body.choice !== 'both')
+    ) {
+      return reply.code(400).send({ error: "缺少 file / choice（choice 必须为 local、remote 或 both）" })
+    }
+    try {
+      return resolveTeamConflict(service, body.file, body.choice as TeamConflictChoice)
+    } catch (error) {
+      return teamFailure(reply, error)
+    }
+  })
+
+  // 放弃合并；本地预同步提交保留
+  app.post('/api/team/conflicts/abort', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = activeTeamService(reply)
+    if (!service) return
+    try {
+      return abortTeamMerge(service)
+    } catch (error) {
+      return teamFailure(reply, error)
+    }
+  })
+
+  // 冲突已全部解决（或外部手动解决）后继续合并并推送；无合并时幂等返回状态
+  app.post('/api/team/conflicts/continue', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = activeTeamService(reply)
+    if (!service) return
+    try {
+      return continueTeamMerge(service)
+    } catch (error) {
+      return teamFailure(reply, error)
+    }
+  })
+
+  // 迁移预览：本机/团队两侧批注、快照、供给数量 + 同名不同内容的供给冲突
+  app.get('/api/team/migration-preview', async (req, reply) => {
+    const service = activeTeamService(reply)
+    if (!service) return
+    try {
+      return previewTeamMigration(service)
+    } catch (error) {
+      return teamFailure(reply, error)
+    }
+  })
+
+  // 执行迁移：只复制缺失内容，不覆盖、不删除本机数据
+  app.post('/api/team/migrate', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = activeTeamService(reply)
+    if (!service) return
+    try {
+      return runTeamMigration(service)
+    } catch (error) {
+      return teamFailure(reply, error)
+    }
   })
 
   /* ------------------------- 项目洞察 / 代码图谱 ------------------------- */
@@ -380,20 +515,34 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       !TARGET_TYPES.includes(body.targetType as AnnotationTargetType) ||
       typeof body.targetId !== 'string' ||
       body.targetId.length === 0 ||
-      typeof body.author !== 'string' ||
-      body.author.trim().length === 0 ||
       typeof body.content !== 'string' ||
       body.content.trim().length === 0 ||
       (body.kind !== undefined && body.kind !== 'annotation' && body.kind !== 'followup')
     ) {
       return reply.code(400).send({ error: 'invalid annotation payload' })
     }
+    // 团队模式：作者一律取团队仓库 git user.name（忽略前端 author）；非团队保持原有自由输入
+    let author: string
+    if (service.team) {
+      const resolved = teamAnnotationAuthor(service)
+      if (!resolved.ok) return reply.code(400).send({ error: resolved.error })
+      author = resolved.author
+    } else {
+      if (typeof body.author !== 'string' || body.author.trim().length === 0) {
+        return reply.code(400).send({ error: 'invalid annotation payload' })
+      }
+      author = body.author.trim()
+    }
+    const targetType = body.targetType as AnnotationTargetType
     const created = service.storage.addAnnotation({
-      targetType: body.targetType as AnnotationTargetType,
+      targetType,
       targetId: body.targetId,
-      author: body.author.trim(),
+      author,
       content: body.content,
-      kind: (body.kind as AnnotationKind | undefined) ?? 'annotation'
+      kind: (body.kind as AnnotationKind | undefined) ?? 'annotation',
+      ...(service.team
+        ? teamAnnotationFingerprints(service, targetType, body.targetId)
+        : {})
     })
     return reply.code(201).send(created)
   })
@@ -408,7 +557,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     if (typeof body.content === 'string' && body.content.trim().length > 0) {
       patch.content = body.content
     }
-    if (typeof body.author === 'string' && body.author.trim().length > 0) {
+    // 团队模式作者由 Git 身份决定，更新不允许改作者（只留 Git 提交记录编辑者）
+    if (!service.team && typeof body.author === 'string' && body.author.trim().length > 0) {
       patch.author = body.author.trim()
     }
     if (Object.keys(patch).length === 0) {
@@ -546,13 +696,14 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         suggestions: ctx.suggestions,
         projectId,
         dir: ctx.dir,
+        indexPath: ctx.indexPath,
         baseline: ctx.baseline,
         changes: ctx.changes
       })
       // 索引是附加产物：写盘失败（只读目录、磁盘满）不得连累契约文本；后续导出/GET 会重新生成
       if (!readOnly) {
         try {
-          writeSupplyIndexFile(ctx.dir, buildSupplyIndexFile(ctx.graph, projectId))
+          writeSupplyIndexFile(ctx.dir, buildSupplyIndexFile(ctx.graph, projectId), ctx.indexPath)
         } catch (e) {
           console.warn(`[autodoc] 写供给索引失败（已忽略，契约文本照常返回）：${e instanceof Error ? e.message : String(e)}`)
         }

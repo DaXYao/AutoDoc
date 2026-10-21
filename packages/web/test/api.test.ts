@@ -2,10 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
   addAnnotation,
+  continueTeamMerge,
   exportAgentSupplyRules,
   fetchAgentSupply,
   fetchAgentSupplyRules,
   fetchMeta,
+  fetchTeamStatus,
   getMode,
   initDataSource,
   isHubEnabled,
@@ -13,7 +15,9 @@ import {
   mergeAgentSupply,
   requestInsightAI,
   requestInsightPartition,
-  setNoActiveProjectHandler
+  resolveTeamConflict,
+  setNoActiveProjectHandler,
+  syncTeamRepo
 } from '../src/data/api'
 
 const SERVER_META = {
@@ -29,6 +33,23 @@ const SERVER_META = {
 
 const EXPORT_DATA = { meta: SERVER_META, files: [], summaries: [], functionIndex: [] }
 
+const TEAM_STATUS = {
+  enabled: true,
+  repoPath: 'E:/autodoc-team-data',
+  projectKey: 'autodoc',
+  remote: 'git@github.com:org/autodoc-team-data.git',
+  branch: 'main',
+  gitAvailable: true,
+  gitUser: { name: 'Alice', email: 'alice@example.com' },
+  initialized: true,
+  dirty: false,
+  ahead: 0,
+  behind: 0,
+  conflicts: [],
+  lastCommitAt: '2026-10-21T10:00:00.000Z',
+  supplyDir: 'E:/autodoc-team-data/supply/insight'
+}
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status })
 }
@@ -38,15 +59,15 @@ function noActiveProject(): Response {
 }
 
 /** 按 URL 精确路由（本项目所有请求都是同源相对路径），未登记的 URL 一律 404 */
-function stubRoutes(routes: Record<string, () => Response>): string[] {
+function stubRoutes(routes: Record<string, (init?: RequestInit) => Response>): string[] {
   const urls: string[] = []
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       urls.push(url)
       const hit = routes[url]
-      return hit ? hit() : json({ error: 'not found' }, 404)
+      return hit ? hit(init) : json({ error: 'not found' }, 404)
     })
   )
   return urls
@@ -281,5 +302,96 @@ describe('洞察 AI 接口的 409/非 409 口径', () => {
     await expect(requestInsightAI(true)).resolves.toBeNull()
     await expect(requestInsightPartition('建议')).resolves.toBeNull()
     expect(hooked()).toBe(0)
+  })
+})
+
+describe('团队接口的错误口径', () => {
+  it('fetchTeamStatus 成功；fetch=1 走检查更新 URL', async () => {
+    await enterHubMode()
+    const urls = stubRoutes({ '/api/team/status?fetch=1': () => json(TEAM_STATUS) })
+
+    const status = await fetchTeamStatus(true)
+
+    expect(urls).toEqual(['/api/team/status?fetch=1'])
+    expect(status.repoPath).toBe('E:/autodoc-team-data')
+    expect(status.behind).toBe(0)
+  })
+
+  it('fetchTeamStatus 400（非团队项目）保留后端文案，且不触发 409 自愈', async () => {
+    await enterHubMode()
+    const hooked = countingHandler()
+    stubRoutes({
+      '/api/team/status': () =>
+        json({ error: '当前项目未启用团队模式（配置中缺少 team 段）' }, 400)
+    })
+
+    const error = await fetchTeamStatus().catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(400)
+    expect((error as Error).message).toBe('当前项目未启用团队模式（配置中缺少 team 段）')
+    expect(hooked()).toBe(0)
+  })
+
+  it('resolveTeamConflict 的 409 不吞：抛 ApiError 并触发恢复', async () => {
+    await enterHubMode()
+    const hooked = countingHandler()
+    stubRoutes({ '/api/team/conflicts/resolve': noActiveProject })
+
+    const error = await resolveTeamConflict('annotations/a.json', 'local').catch(
+      (e: unknown) => e
+    )
+
+    expect(isNoActiveProjectError(error)).toBe(true)
+    expect((error as Error).message).toBe('no active project')
+    expect(hooked()).toBe(1)
+  })
+
+  it('syncTeamRepo 400 保留后端失败原因（如未初始化/无 Git 用户）', async () => {
+    await enterHubMode()
+    const hooked = countingHandler()
+    stubRoutes({
+      '/api/team/sync': () =>
+        json({ error: '团队数据仓库尚未初始化，请先调用 POST /api/team/init' }, 400)
+    })
+
+    const error = await syncTeamRepo().catch((e: unknown) => e)
+
+    expect((error as ApiError).status).toBe(400)
+    expect((error as Error).message).toBe(
+      '团队数据仓库尚未初始化，请先调用 POST /api/team/init'
+    )
+    expect(hooked()).toBe(0)
+  })
+
+  it('continueTeamMerge POST 并在 400 时保留后端原因（仍有冲突/无 Git 用户）', async () => {
+    await enterHubMode()
+    const methods: string[] = []
+    stubRoutes({
+      '/api/team/conflicts/continue': (init) => {
+        methods.push(init?.method ?? 'GET')
+        return json({ error: '仍有未解决的冲突文件，不能继续合并' }, 400)
+      }
+    })
+
+    const error = await continueTeamMerge().catch((e: unknown) => e)
+
+    expect(methods).toEqual(['POST'])
+    expect((error as ApiError).status).toBe(400)
+    expect((error as Error).message).toBe('仍有未解决的冲突文件，不能继续合并')
+  })
+
+  it('静态模式团队接口直接抛错且不发请求（团队模式仅本地服务可用）', async () => {
+    stubRoutes({
+      '/api/projects': () => json({ error: 'not found' }, 404),
+      '/api/meta': () => json({ error: 'not found' }, 404),
+      'autodoc-data.json': () => json(EXPORT_DATA)
+    })
+    await initDataSource()
+    expect(getMode()).toBe('static')
+
+    const urls = stubRoutes({})
+    await expect(fetchTeamStatus()).rejects.toThrow('团队状态仅本地服务可用')
+    expect(urls).toEqual([])
   })
 })

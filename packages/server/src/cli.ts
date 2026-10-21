@@ -9,7 +9,7 @@ import picomatch from 'picomatch'
 import { buildApp } from './app.js'
 import { createDocService, regenerate, type DocService } from './context.js'
 import { loadEnv } from './env.js'
-import { exportStaticSite } from './export.js'
+import { exportProject } from './export.js'
 import { ProjectManager } from './projects.js'
 
 const DEFAULT_PORT = 7788
@@ -214,9 +214,9 @@ program
     const rootDir = resolveRoot(options.root)
     const configPath = options.config ? resolve(process.cwd(), options.config) : undefined
     const outDir = resolve(process.cwd(), options.out)
-    const service = await createDocService(rootDir, warn, configPath)
-    const data = exportStaticSite(service, outDir, WEB_DIST)
-    service.storage.close()
+    // exportProject 内部先 loadConfig 检查 team 段，再创建 service；
+    // 团队配置必须在 TeamStorage.init() 写团队仓库之前被拒绝。
+    const data = await exportProject(rootDir, configPath, outDir, WEB_DIST, warn)
     console.log(
       `[autodoc] 静态站点已导出到 ${outDir}（${data.files.length} 个文件，只读模式）`
     )

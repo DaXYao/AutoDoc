@@ -1,6 +1,9 @@
 /**
  * AutoDoc 前后端共享领域类型。
  * 约束（见 AGENTS.md）：前后端禁止各自重复定义这些类型。
+ *
+ * 团队协作模式（team）下：批注与洞察快照写入团队数据仓库、跨人共享；
+ * 变更记录 / 文件快照 / Git 水位线 / 解析缓存 / AI 缓存 / activeInsightSnapshotId 仍是本机数据。
  */
 
 /** 三类方法角色 */
@@ -33,6 +36,19 @@ export interface Annotation {
    * 缺省（旧数据无此字段）视为 'annotation'。
    */
   kind?: AnnotationKind
+  /**
+   * 团队模式：创建批注时的目标版本指纹（函数为目标时取函数体指纹，其它目标取当时的图谱指纹）。
+   * 读取时与当前函数/图谱指纹对比，不一致则展示「基于旧版本」。
+   * 缺省（旧数据无此字段）= 版本未知，前端不得伪造/回填。
+   */
+  targetFingerprint?: string
+  /** 团队模式：创建批注时的图谱指纹（用于非函数目标与整体版本对照）；缺省=版本未知 */
+  graphFingerprint?: string
+  /**
+   * 团队模式：本条是冲突副本时指向原批注 ID（「都保留」场景：本地版本保留原 ID，
+   * 另一版本写成新 ID 的副本）。缺省=普通批注。
+   */
+  conflictCopyOf?: string
 }
 
 /** 注释块：方法体内「注释 + 紧随代码块」成对提取 */
@@ -261,6 +277,130 @@ export interface StorageConfig {
   path?: string
 }
 
+/**
+ * 团队协作配置（autodoc.config.json 的 team 段）。
+ * 团队数据仓库是一个独立的 Git 仓库：批注 / 洞察快照 / Agent 供给共享，
+ * 变更记录 / 文件快照 / Git 水位线 / 解析缓存 / activeId 仍留在本机存储。
+ */
+export interface TeamConfig {
+  /**
+   * 团队数据仓库本地克隆/初始化目录；相对路径按项目根解析。
+   * 不得位于被分析源码根目录内（避免嵌套仓库误提交）；目录不存在允许，初始化时创建。
+   */
+  repoPath: string
+  /** 可选远程地址；为空则只做本地提交（AutoDoc 不自动创建/修改 remote） */
+  remote?: string
+  /**
+   * 可选项目标识，用于防止把数据仓库误接到另一个项目；
+   * 缺省由项目根目录名/包名生成，写入仓库 manifest 后以 manifest 为准。
+   */
+  projectKey?: string
+}
+
+/* ------------------------- 团队协作 API 类型 ------------------------- */
+
+/** 团队数据仓库的 Git 作者身份（取 `git config user.name` / `user.email`） */
+export interface TeamGitUser {
+  name: string
+  email: string
+}
+
+/** 冲突文件类型（决定可选处理方式：只有批注允许「都保留」） */
+export type TeamConflictKind = 'annotation' | 'snapshot' | 'supply' | 'manifest' | 'other'
+
+/** 冲突处理选择：保留本地 / 保留远端；批注额外支持 both（生成冲突副本） */
+export type TeamConflictChoice = 'local' | 'remote' | 'both'
+
+/** 单个冲突文件的状态（本地/远端版本是否存在 + 摘要） */
+export interface TeamConflict {
+  /** 团队仓库相对路径（POSIX） */
+  file: string
+  kind: TeamConflictKind
+  /** 仅批注且两侧都存在时为 true */
+  canKeepBoth: boolean
+  localExists: boolean
+  remoteExists: boolean
+  localSummary?: string
+  remoteSummary?: string
+}
+
+/** GET /api/team/status（只读；`?fetch=1` 时顺便 fetch 更新 ahead/behind） */
+export interface TeamStatus {
+  enabled: boolean
+  repoPath: string
+  projectKey: string
+  /** 实际生效的远程 URL（配置值或已存在的 origin）；本地-only 为 null */
+  remote: string | null
+  branch: string | null
+  gitAvailable: boolean
+  gitUser: TeamGitUser | null
+  initialized: boolean
+  /** 是否只统计团队托管路径（manifest / annotations / insightHistory / supply）的未提交改动 */
+  dirty: boolean
+  /** 团队托管路径下未提交的条目数（dirty=false 时为 0） */
+  dirtyCount: number
+  /** 团队托管路径之外存在未提交改动（不会随同步提交，仅提示用户） */
+  dirtyOutsideTeam: boolean
+  /** 正在合并（`.git/MERGE_HEAD` 存在） */
+  merging: boolean
+  /** fetch 之后相对上游的领先/落后提交数 */
+  ahead: number
+  behind: number
+  conflicts: TeamConflict[]
+  lastCommitAt: string | null
+  /** 团队供给目录（`<repo>/supply/insight`），供 UI 提示 */
+  supplyDir: string
+  error?: string
+}
+
+/** POST /api/team/sync 结果：提交 → fetch → merge → push 各步显式状态 */
+export interface TeamSyncResult {
+  ok: boolean
+  status: TeamStatus
+  committed: boolean
+  commitHash: string | null
+  fetched: boolean
+  merged: boolean
+  pushed: boolean
+  /** 无远程仓库：只完成本地提交 */
+  localOnly: boolean
+  /** 发生冲突时的文件清单（与 status.conflicts 同源） */
+  conflicts?: TeamConflict[]
+  warning?: string
+  error?: string
+}
+
+/** 迁移数量（本机 / 团队仓库两侧） */
+export interface TeamMigrationCounts {
+  annotations: number
+  snapshots: number
+  insightSupply: number
+  changesSupply: number
+}
+
+/** GET /api/team/migration-preview */
+export interface TeamMigrationPreview {
+  local: TeamMigrationCounts
+  team: TeamMigrationCounts
+  /** 同名但内容不同、迁移时不会覆盖的供给文件（团队仓库相对路径） */
+  supplyConflicts: string[]
+}
+
+/** 单类数据的迁移结果（批注 / 快照 / 团队供给文件） */
+export interface TeamMigrationCategoryResult {
+  copied: number
+  skipped: number
+  /** 内容不同、未覆盖的条目（批注/快照为 ID，供给为仓库相对路径） */
+  conflicts: string[]
+}
+
+/** POST /api/team/migrate */
+export interface TeamMigrationRunResult {
+  annotations: TeamMigrationCategoryResult
+  snapshots: TeamMigrationCategoryResult
+  supply: TeamMigrationCategoryResult
+}
+
 export interface EditorConfig {
   /** 源码跳转链接模板，占位符 {file}、{line}，如 vscode://file/{file}:{line} */
   linkTemplate?: string
@@ -304,6 +444,8 @@ export interface AutodocConfig {
     defaultExpand?: DefaultExpandConfig
   }
   storage?: StorageConfig
+  /** 团队协作：启用后批注/洞察快照读写团队数据仓库（见 docs/TEAM_COLLABORATION.md） */
+  team?: TeamConfig
   editor?: EditorConfig
   git?: GitConfig
   insight?: InsightConfig
@@ -1333,4 +1475,6 @@ export interface AgentSupplyExportResponse {
   path: string
   overwritten: boolean
   supplyDir: string
+  /** 完整机器可读索引的落盘位置（团队模式为本机 team-supply-index.json） */
+  indexPath: string
 }

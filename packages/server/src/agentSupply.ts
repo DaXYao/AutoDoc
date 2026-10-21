@@ -45,6 +45,7 @@ import { flowsBasis } from './flow.js'
 import type { ProjectGraph } from './graph.js'
 import { loadInsight } from './insight.js'
 import { applyPartitionPreservingCores } from './supplyPartition.js'
+import { SUPPLY_PASSES } from './supplyPasses.js'
 import { AGENT_FLOW_LIMITS, buildAgentFlowTree, validateAgentFlowShape } from './supplyFlows.js'
 import { collectChangesSupply, buildChangesRulesSection, type ChangesSupplyContext } from './agentSupplyChanges.js'
 
@@ -83,20 +84,11 @@ import { collectChangesSupply, buildChangesRulesSection, type ChangesSupplyConte
  * 本地 AI 的 externals pass 保持原样，Agent 供给按符号字段级合并。
  */
 
-/** 洞察侧十个语义 pass + 变更侧 changes（顺序即契约文本与建议清单的呈现顺序；partition 是结构层，必须最先应用） */
-export const SUPPLY_PASSES: AgentSupplyPass[] = [
-  'partition',
-  'flows',
-  'modules',
-  'narratives',
-  'categories',
-  'coreJudgment',
-  'coreRoles',
-  'blocks',
-  'keySteps',
-  'externals',
-  'changes'
-]
+/**
+ * 洞察侧十个语义 pass + 变更侧 changes（顺序即契约文本与建议清单的呈现顺序；partition 是结构层，必须最先应用）。
+ * 常量本身在 supplyPasses.ts（打破 supplyCache 的循环依赖），此处转出保持既有导入路径可用。
+ */
+export { SUPPLY_PASSES } from './supplyPasses.js'
 
 interface PassMeta {
   /** 语义类别中文名 */
@@ -373,8 +365,13 @@ export function safeProjectSegment(projectId: string): string {
   return cleaned === '.' || cleaned === '..' || cleaned.length === 0 ? '-' : cleaned
 }
 
-/** 供给目录：`<dirname(storage.dataPath)>/supply/<projectId>/insight`（与 ai-cache.json 同侧，均在 AutoDoc 仓） */
-export function supplyDirOf(dataPath: string, projectId: string): string {
+/**
+ * 供给目录：
+ * - 非团队：`<dirname(storage.dataPath)>/supply/<projectId>/insight`（与 ai-cache.json 同侧，均在 AutoDoc 仓）；
+ * - 团队：`<teamRoot>/supply/insight`（单项目一仓，无 projectId 段；与批注/快照同仓库共享）。
+ */
+export function supplyDirOf(dataPath: string, projectId: string, teamRoot?: string): string {
+  if (teamRoot) return join(teamRoot, 'supply', 'insight')
   return join(dirname(dataPath), 'supply', safeProjectSegment(projectId), 'insight')
 }
 
@@ -2036,6 +2033,18 @@ export function supplyIndexPathOf(dir: string): string {
   return join(dirname(dir), 'index.json')
 }
 
+/**
+ * 完整索引的落盘位置：
+ * - 非团队：沿用 `supply/<projectId>/index.json`；
+ * - 团队：索引是按本机图谱自动生成的派生文件，写进团队仓库会人人冲突，
+ *   故落到本机 `<dirname(storage.dataPath)>/team-supply-index.json`。
+ */
+export function supplyIndexPathFor(service: DocService, dir: string): string {
+  return service.team
+    ? join(dirname(service.storage.dataPath), 'team-supply-index.json')
+    : supplyIndexPathOf(dir)
+}
+
 /** 从**应用 partition 之后**的实时图谱生成完整索引（collectAgentSupply 的 graph 即此视图） */
 export function buildSupplyIndexFile(graph: ProjectGraph, projectId: string): SupplyIndexFile {
   return {
@@ -2088,9 +2097,16 @@ export function buildSupplyIndexFile(graph: ProjectGraph, projectId: string): Su
   }
 }
 
-/** 写完整索引（GET 规则 与 POST 导出都调用；AutoDoc 自身生成物，可直接覆盖） */
-export function writeSupplyIndexFile(dir: string, index: SupplyIndexFile): string {
-  const path = supplyIndexPathOf(dir)
+/**
+ * 写完整索引（GET 规则 与 POST 导出都调用；AutoDoc 自身生成物，可直接覆盖）。
+ * targetPath 用于团队模式：索引写到本机 `team-supply-index.json`，不污染团队仓库。
+ */
+export function writeSupplyIndexFile(
+  dir: string,
+  index: SupplyIndexFile,
+  targetPath?: string
+): string {
+  const path = targetPath ?? supplyIndexPathOf(dir)
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, `${JSON.stringify(index, null, 2)}\n`, 'utf-8')
   return path
@@ -3122,6 +3138,8 @@ export interface SupplyRulesInput {
   suggestions: AgentSupplySuggestion[]
   projectId: string
   dir: string
+  /** 完整索引落盘位置；缺省 `supplyIndexPathOf(dir)`（团队模式由调用方指向本机） */
+  indexPath?: string
   baseline: AgentSupplyBaseline
   /** G5：变更侧上下文（缺省时不生成变更章节） */
   changes?: ChangesSupplyContext
@@ -3134,7 +3152,7 @@ export interface SupplyRulesInput {
 export function generateSupplyRulesText(input: SupplyRulesInput): AgentSupplyRulesResult {
   const { graph, scan, suggestions, projectId, dir, baseline, changes } = input
   const index = buildSupplyIndex(graph, suggestions)
-  const indexPath = supplyIndexPathOf(dir)
+  const indexPath = input.indexPath ?? supplyIndexPathOf(dir)
   const generatedAt = new Date().toISOString()
   let rulesText = buildRulesText(
     graph,
@@ -3200,6 +3218,8 @@ function twoRoundSection(): string[] {
 export interface AgentSupplyContext {
   graph: ProjectGraph
   dir: string
+  /** 完整索引的落盘位置（团队模式指向本机，不进团队仓库） */
+  indexPath: string
   scan: AgentSupplyScanResult
   suggestions: AgentSupplySuggestion[]
   baseline: AgentSupplyBaseline
@@ -3240,7 +3260,8 @@ export function collectAgentSupply(service: DocService, projectId: string): Agen
     supplyOverlay: false,
     guarantees: false
   })
-  const dir = supplyDirOf(service.storage.dataPath, projectId)
+  const dir = supplyDirOf(service.storage.dataPath, projectId, service.team?.root)
+  const indexPath = supplyIndexPathFor(service, dir)
   const classification = service.normalized.config.classification
   // 两阶段扫描：partition 先校验并应用到 graph，其余 pass 再按新划分校验（graph 只在本请求内可见）。
   const insightScan = scanAgentSupply({ dir, graph, classification })
@@ -3282,6 +3303,7 @@ export function collectAgentSupply(service: DocService, projectId: string): Agen
   return {
     graph,
     dir,
+    indexPath,
     scan,
     suggestions: allSuggestions,
     baseline: supplyBaselineOf(service, graph),
@@ -3305,17 +3327,18 @@ export function exportAgentSupplyRules(
     suggestions: ctx.suggestions,
     projectId,
     dir: ctx.dir,
+    indexPath: ctx.indexPath,
     baseline: ctx.baseline,
     changes: ctx.changes
   })
   mkdirSync(ctx.dir, { recursive: true })
   mkdirSync(ctx.changes.dir, { recursive: true })
-  // 完整机器可读索引（`supply/<projectId>/index.json`，AutoDoc 自身生成物；绝不写进目标仓）
-  writeSupplyIndexFile(ctx.dir, buildSupplyIndexFile(ctx.graph, projectId))
+  // 完整机器可读索引（非团队 `supply/<projectId>/index.json`；团队写本机 team-supply-index.json）
+  writeSupplyIndexFile(ctx.dir, buildSupplyIndexFile(ctx.graph, projectId), ctx.indexPath)
   const targetDir = join(service.rootDir, '.autodoc')
   mkdirSync(targetDir, { recursive: true })
   const path = join(targetDir, 'AGENT_RULES.md')
   const overwritten = existsSync(path)
   writeFileSync(path, `${rules.rulesText}\n`, 'utf-8')
-  return { ok: true, path, overwritten, supplyDir: ctx.dir }
+  return { ok: true, path, overwritten, supplyDir: ctx.dir, indexPath: ctx.indexPath }
 }

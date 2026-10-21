@@ -790,6 +790,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
           target-type="function"
           :target-id="fn.id"
           :annotations="fn.annotations"
+          :current-fingerprint="fn.fingerprint"
           @changed="emit('changed')"
         />
       </div>

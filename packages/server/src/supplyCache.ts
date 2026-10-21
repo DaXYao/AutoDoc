@@ -21,7 +21,8 @@ import { rebuildModuleCores, syncModuleCores, type ProjectGraph } from './graph.
 import { isCategoryCandidate, markClassified } from './categoryCandidates.js'
 import { applyAgentPartitionToInsight } from './supplyPartition.js'
 import { applyAgentFlowsToInsight, validateAgentFlowShape } from './supplyFlows.js'
-import { collectGraphExternalSymbols, SUPPLY_PASSES } from './agentSupply.js'
+import { collectGraphExternalSymbols } from './agentSupply.js'
+import { SUPPLY_PASSES } from './supplyPasses.js'
 import { applyAgentGuaranteesToInsight } from './semanticGuarantee.js'
 
 /* ------------------------- 供给缓存命名空间 ------------------------- */

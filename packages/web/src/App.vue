@@ -8,9 +8,11 @@ import { appState, bootstrap, regenerateActive, switchProject } from './store/ap
 import { formatDate } from './utils/format'
 import { adSelectLabel as vAdSelectLabel } from './utils/a11y'
 import { formatIncrementalSummary } from './utils/incremental'
+import { teamStatusPill } from './utils/team'
 import { toast } from './utils/toast'
 import { themeOverrides, adBtnInkOverrides, adBtnOutlineOverrides } from './theme'
 import SearchBar from './components/SearchBar.vue'
+import TeamPanel from './components/TeamPanel.vue'
 
 const router = useRouter()
 
@@ -24,6 +26,13 @@ onMounted(async () => {
 
 const readOnly = computed(() => appState.meta?.readOnly ?? false)
 const isStatic = computed(() => getMode() === 'static')
+
+/** 团队状态胶囊（非团队项目/未加载为 null，顶栏不显示团队入口） */
+const teamPill = computed(() => teamStatusPill(appState.teamStatus))
+
+function openTeamPanel(): void {
+  appState.teamPanelOpen = true
+}
 
 /**
  * 顶部项目切换下拉的选项。
@@ -123,6 +132,32 @@ async function handleRefresh(): Promise<void> {
             <n-tag v-if="readOnly" size="small" type="warning" class="shrink-0">
               只读
             </n-tag>
+            <!-- 团队入口：状态胶囊本身可点开面板；非团队项目 teamPill 为 null，整块不渲染 -->
+            <n-tag
+              v-if="teamPill"
+              size="small"
+              :type="teamPill.type"
+              :bordered="false"
+              class="shrink-0 cursor-pointer"
+              role="button"
+              tabindex="0"
+              :title="teamPill.title"
+              :aria-label="`团队状态：${teamPill.label}，打开团队面板`"
+              @click="openTeamPanel"
+              @keydown.enter.prevent="openTeamPanel"
+              @keydown.space.prevent="openTeamPanel"
+            >
+              {{ teamPill.label }}
+            </n-tag>
+            <n-button
+              v-if="teamPill"
+              size="small"
+              class="ad-btn-outline shrink-0"
+              :theme-overrides="adBtnOutlineOverrides"
+              @click="openTeamPanel"
+            >
+              团队
+            </n-button>
             <n-button
               v-if="appState.hubEnabled"
               size="small"
@@ -148,6 +183,10 @@ async function handleRefresh(): Promise<void> {
           <router-view />
         </main>
       </n-layout>
+      <TeamPanel
+        :show="appState.teamPanelOpen"
+        @update:show="appState.teamPanelOpen = $event"
+      />
     </n-message-provider>
   </n-config-provider>
 </template>

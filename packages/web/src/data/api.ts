@@ -22,7 +22,12 @@ import type {
   ProjectInfo,
   ProjectsResponse,
   RefreshCheckResponse,
-  ServerMeta
+  ServerMeta,
+  TeamConflictChoice,
+  TeamMigrationPreview,
+  TeamMigrationRunResult,
+  TeamStatus,
+  TeamSyncResult
 } from '@autodoc/shared-types'
 /**
  * 数据访问层：serve 模式走 REST API；静态导出模式回退读取 autodoc-data.json（只读）。
@@ -508,4 +513,82 @@ export async function exportAgentSupplyRules(): Promise<AgentSupplyExportRespons
   const res = await fetch('/api/agent-supply-rules/export', { method: 'POST' })
   if (!res.ok) throw await errorFromResponse(res, '导出供给契约失败')
   return (await res.json()) as AgentSupplyExportResponse
+}
+
+/* ------------------------- 团队协作（team） ------------------------- */
+
+/**
+ * 团队数据仓库状态（只读）。仅配置了 team 的项目可用：未启用时后端 400。
+ * fetchRemote=true 时服务端先 fetch 再计算 ahead/behind（fetch 失败只写 status.error）。
+ * 400/409 不吞：errorFromResponse 保留后端可读文案，409 仍触发无活动项目观察者。
+ */
+export async function fetchTeamStatus(fetchRemote = false): Promise<TeamStatus> {
+  if (mode !== 'api') throw new Error('团队状态仅本地服务可用')
+  const qs = fetchRemote ? '?fetch=1' : ''
+  const res = await fetch(`/api/team/status${qs}`)
+  if (!res.ok) throw await errorFromResponse(res, '加载团队状态失败')
+  return (await res.json()) as TeamStatus
+}
+
+/** 初始化团队数据仓库（git init -b main + 按配置添加 origin，不 commit） */
+export async function initTeamRepo(): Promise<TeamStatus> {
+  if (mode !== 'api') throw new Error('团队仓库初始化仅本地服务可用')
+  const res = await fetch('/api/team/init', { method: 'POST' })
+  if (!res.ok) throw await errorFromResponse(res, '初始化团队仓库失败')
+  return (await res.json()) as TeamStatus
+}
+
+/** 手动同步：本地提交 → fetch → merge → push；冲突/推送失败以显式结果返回 */
+export async function syncTeamRepo(): Promise<TeamSyncResult> {
+  if (mode !== 'api') throw new Error('团队同步仅本地服务可用')
+  const res = await fetch('/api/team/sync', { method: 'POST' })
+  if (!res.ok) throw await errorFromResponse(res, '同步团队仓库失败')
+  return (await res.json()) as TeamSyncResult
+}
+
+/** 解决单个冲突文件：local/remote 写回对应版本；both 仅批注，生成冲突副本 */
+export async function resolveTeamConflict(
+  file: string,
+  choice: TeamConflictChoice
+): Promise<TeamStatus> {
+  if (mode !== 'api') throw new Error('冲突处理仅本地服务可用')
+  const res = await fetch('/api/team/conflicts/resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file, choice })
+  })
+  if (!res.ok) throw await errorFromResponse(res, '解决冲突失败')
+  return (await res.json()) as TeamStatus
+}
+
+/** 继续合并：冲突已全部解决但 MERGE_HEAD 仍存在时，提交合并并尝试 push */
+export async function continueTeamMerge(): Promise<TeamStatus> {
+  if (mode !== 'api') throw new Error('继续合并仅本地服务可用')
+  const res = await fetch('/api/team/conflicts/continue', { method: 'POST' })
+  if (!res.ok) throw await errorFromResponse(res, '继续合并失败')
+  return (await res.json()) as TeamStatus
+}
+
+/** 放弃本次合并（git merge --abort；本地预同步提交保留） */
+export async function abortTeamMerge(): Promise<TeamStatus> {
+  if (mode !== 'api') throw new Error('放弃合并仅本地服务可用')
+  const res = await fetch('/api/team/conflicts/abort', { method: 'POST' })
+  if (!res.ok) throw await errorFromResponse(res, '放弃合并失败')
+  return (await res.json()) as TeamStatus
+}
+
+/** 迁移预览：本机/团队两侧的批注、快照、供给数量与同名不同内容的供给文件 */
+export async function fetchTeamMigrationPreview(): Promise<TeamMigrationPreview> {
+  if (mode !== 'api') throw new Error('团队迁移预览仅本地服务可用')
+  const res = await fetch('/api/team/migration-preview')
+  if (!res.ok) throw await errorFromResponse(res, '加载迁移预览失败')
+  return (await res.json()) as TeamMigrationPreview
+}
+
+/** 执行迁移：复制本机批注/快照/供给到团队仓库，只复制缺失内容，不覆盖不删除本机 */
+export async function migrateTeamData(): Promise<TeamMigrationRunResult> {
+  if (mode !== 'api') throw new Error('团队迁移仅本地服务可用')
+  const res = await fetch('/api/team/migrate', { method: 'POST' })
+  if (!res.ok) throw await errorFromResponse(res, '迁移团队数据失败')
+  return (await res.json()) as TeamMigrationRunResult
 }

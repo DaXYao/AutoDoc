@@ -8,6 +8,8 @@
 - 记录标准：这个做法确实解决了问题、且以后可能再次用到。
 
 ## 经验索引（快速扫描）
+- [ ] **团队 Git 数据仓库同步**：独立 TeamGitClient（execFile 参数数组、显式 ok/error）+ 只提交已知路径（commit pathspec 取已暂存具体文件）+ fetch/merge/push 状态机 + 冲突两阶段版本（`:2:`/`:3:`/both 生成副本）+ 真实 bare remote 双 clone 测试（见 2026-10-21 条）。
+- [ ] **团队仓库安全加固**：`rev-parse --show-toplevel` realpath 必须等于 teamRoot（父仓库/bare 拒绝）+ 清 `GIT_DIR` 等环境变量并设 `GIT_CEILING_DIRECTORIES` + 托管目录 lstat/realpath containment + 冲突 stage 三态（ls-files 失败≠删除）+ 同目录临时文件 `wx`+rename + 每客户端缓存根校验（见 2026-10-22 条）。
 - [ ] 注释块提取：用 tree-sitter Query 把注释节点与紧随语句配对。
 - [ ] 变更检测：用函数体 AST 哈希做函数级变更对比。
 - [ ] 前端双数据源：先探测 /api/meta，失败回退静态 autodoc-data.json，一套代码兼容 serve/export 双模式。
@@ -48,6 +50,17 @@
 ---
 
 ## 成功经验条目
+
+### 2026-10-22 · 团队 Git 仓库安全加固：根校验、环境隔离、链接 containment、三态冲突读取
+- **场景**：AutoDoc 团队数据仓库（用户可配置 repoPath）后端初审 P0/P1。**适用条件**：任何把用户配置目录当作「独立 Git 工作树」读写、并与一个更大的源码仓库共存的功能。
+- **做法**：
+  1. **根校验**：有 `.git` 时 `git rev-parse --show-toplevel` 的 realpath 必须等于配置目录；无 `.git` 时从最近存在祖先探测，发现父工作树即拒绝；bare 仓库拒绝；再比较源码项目工作树顶层，拒绝嵌套（即使团队目录自带 `.git`）。
+  2. **环境隔离**：所有 git 子进程清除 `GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_OBJECT_DIRECTORY/GIT_ALTERNATE_OBJECT_DIRECTORIES`，并设 `GIT_CEILING_DIRECTORIES` 为仓库父级，防 hook/父进程环境改写目标。
+  3. **链接 containment**：teamRoot 与托管目录用 lstat（Windows junction 也是 symlink）+ realpath 双重检查；文件读写前父目录 realpath 必须在 teamRoot realpath 内、目标不是链接；写文件用同目录临时文件 `flag:'wx'` + rename。
+  4. **冲突读取三态**：用 `git ls-files -u` 判断 stage 2/3 是否存在；「命令失败」与「该侧不存在」必须分开，`git show` 失败返回 ok:false，绝不退化成 `git rm`。
+  5. **状态显式化**：冲突列表返回 `{ok,files,error}`；dirty 只统计托管路径并另给 dirtyCount/dirtyOutsideTeam/merging；continue 路由只提交已暂存团队路径、无 user 400、无合并幂等。
+  6. **性能**：根校验按 TeamGitClient 实例缓存（生产一次 HTTP 请求一个实例），嵌套调用不重复 spawn；真实 git 测试按场景拆分文件避免 worker RPC 超时。
+- **收益**：monorepo 子目录/父仓库/bare/链接穿透/读取失败误删这五类数据安全问题均有显式拒绝与真实 git 回归测试，嵌套调用的重复 git 探测也明显减少。
 
 ### 2026-10-21 · 语义担保接入新语言：扩闸门 + 复用证据包，合成节点只担保真实存在的对象级 claim
 - **场景**：语义担保已有 TS/JS 与 C#，要接入一个「脚本语言与现有解析器同族、但另有合成入口」的语言（本轮 Vue SFC）。**适用条件**：解析器已产出稳定 ID、签名/参数/返回类型/可见性/装饰器/调用边/注释块的通用 `FunctionDoc`；不需要新增证据类型。

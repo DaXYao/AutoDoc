@@ -30,28 +30,32 @@ export function toFileSummary(file: FileDoc): FileSummary {
 }
 
 export function toFileDocView(service: DocService, file: FileDoc): FileDocView {
-  // 调用步骤级批注/追问记录：一次性取出全部 call 级批注并按 targetId(stepId) 分组，
-  // 再按各函数的 edge.stepId 命中回填，避免逐 edge 查询的 N+1
-  const callAnnosByTarget = new Map<string, Annotation[]>()
-  for (const annotation of service.storage.listAnnotations()) {
-    if (annotation.targetType !== 'call') continue
-    const list = callAnnosByTarget.get(annotation.targetId) ?? []
+  // 文件页只需一次 listAnnotations()：团队模式下每个团队批注是一条文件读取，
+  // 逐函数/逐调用查询会退化成 N+1。这里一次性取出并按 targetId 分组，
+  // 函数级、文件级与 call 级（stepId）都从同一映射复用。
+  const allAnnotations = service.storage.listAnnotations()
+  const annotationsByTarget = new Map<string, Annotation[]>()
+  for (const annotation of allAnnotations) {
+    const list = annotationsByTarget.get(annotation.targetId) ?? []
     list.push(annotation)
-    callAnnosByTarget.set(annotation.targetId, list)
+    annotationsByTarget.set(annotation.targetId, list)
   }
   const functions: FunctionDocView[] = file.functions.map((fn) => {
     const changes = service.storage.listChanges(fn.id)
     const callAnnotations: Record<string, Annotation[]> = {}
     for (const call of fn.calls) {
-      const list = callAnnosByTarget.get(call.stepId)
-      if (list && list.length > 0) callAnnotations[call.stepId] = list
+      const list = annotationsByTarget.get(call.stepId)
+      // 只回填 call 级记录（同一映射也含 function/file 级，不能把非 call 记录塞进 callAnnotations）
+      if (list && list.some((annotation) => annotation.targetType === 'call')) {
+        callAnnotations[call.stepId] = list.filter(
+          (annotation) => annotation.targetType === 'call'
+        )
+      }
     }
-    // listAnnotations(fn.id) 只返回 targetId===fn.id 的 function 级记录
-    //（call 级 targetId 为 stepId，不会混入）；按 kind 拆分普通批注与追问记录，分离展示
-    const all = service.storage.listAnnotations(fn.id)
+    // 按 kind 拆分普通批注与追问记录，批注与自动生成内容分离下发
+    const all = annotationsByTarget.get(fn.id) ?? []
     return {
       ...fn,
-      // 批注与自动生成内容分离下发
       annotations: all.filter((a) => a.kind !== 'followup'),
       followups: all.filter((a) => a.kind === 'followup'),
       callAnnotations,
@@ -61,7 +65,7 @@ export function toFileDocView(service: DocService, file: FileDoc): FileDocView {
   })
   return {
     file,
-    annotations: service.storage.listAnnotations(file.fileId),
+    annotations: annotationsByTarget.get(file.fileId) ?? [],
     functions
   }
 }

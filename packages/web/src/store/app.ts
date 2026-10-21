@@ -10,11 +10,16 @@ import type {
   NewProjectInput,
   ProjectInfo,
   ProjectsResponse,
-  ServerMeta
+  ServerMeta,
+  TeamConflictChoice,
+  TeamMigrationRunResult,
+  TeamStatus,
+  TeamSyncResult
 } from '@autodoc/shared-types'
 import {
   activateProject,
   addProject as apiAddProject,
+  abortTeamMerge,
   fetchAgentSupply,
   fetchChangeset,
   fetchFileView,
@@ -23,17 +28,23 @@ import {
   fetchMeta,
   fetchProjects,
   fetchSummaries,
+  fetchTeamStatus,
+  continueTeamMerge as apiContinueTeamMerge,
   getMode,
   initDataSource,
+  initTeamRepo,
   isHubEnabled,
   isNoActiveProjectError,
   mergeAgentSupply,
+  migrateTeamData,
   refreshDocs,
   removeProject as apiRemoveProject,
   requestInsightAI,
   requestInsightPartition,
+  resolveTeamConflict,
   scanAgentSupply,
   setNoActiveProjectHandler,
+  syncTeamRepo,
   type AgentSupplyMergeResponse
 } from '../data/api'
 import { buildWinnerIndex } from '../utils/agentSupply'
@@ -77,6 +88,19 @@ export interface AppState {
   agentSupply: AgentSupplyResponse | null
   /** 最近一次自动/手动合并的结果（面板「本次合并明细」用）；未合并过为 null */
   agentSupplyMerge: AgentSupplyMergeResponse | null
+  /**
+   * 团队协作：活动项目的数据仓库状态。非团队项目/静态模式恒为 null（顶栏不显示团队入口）。
+   * 随活动项目数据并行拉取，失败静默 null，不阻塞页面。
+   */
+  teamStatus: TeamStatus | null
+  /** 最近一次团队同步结果（面板同步提示用）；未同步过为 null */
+  teamSync: TeamSyncResult | null
+  /** 团队动作/状态检查在途（按钮 loading 与防重复提交） */
+  teamLoading: boolean
+  /** 团队动作失败的可读原因（自动状态拉取失败不写这里，避免页面噪声） */
+  teamError: string | null
+  /** 团队面板开关：顶栏状态胶囊与 ProjectHub 共用 */
+  teamPanelOpen: boolean
   /** fileId → 视图（serve 模式下按需拉取） */
   fileViews: Map<string, FileDocView>
 }
@@ -96,6 +120,11 @@ export const appState = reactive<AppState>({
   workspaceChangeset: null,
   agentSupply: null,
   agentSupplyMerge: null,
+  teamStatus: null,
+  teamSync: null,
+  teamLoading: false,
+  teamError: null,
+  teamPanelOpen: false,
   fileViews: new Map()
 })
 
@@ -188,6 +217,20 @@ function clearActiveScopedState(): void {
   appState.workspaceChangeset = null
   appState.agentSupply = null
   appState.agentSupplyMerge = null
+  clearTeamState()
+}
+
+/**
+ * 清空团队作用域状态（切项目/收回激活时调用）。
+ * 独立于 clearActiveScopedState：团队动作后刷新文档数据不能顺手清掉本次同步结果，
+ * 故只在「活动项目真正变化」的入口显式清一次。
+ */
+function clearTeamState(): void {
+  appState.teamStatus = null
+  appState.teamSync = null
+  appState.teamError = null
+  appState.teamLoading = false
+  appState.teamPanelOpen = false
 }
 
 /**
@@ -337,6 +380,22 @@ export async function mergeAgentSupplyIfNeeded(): Promise<void> {
   }
 }
 
+/**
+ * 活动项目的团队状态（自动加载口径）：失败静默置 null，不拖垮 loadActiveDocs 的 Promise.all。
+ * 非团队项目后端返回 400，同样落到 null（顶栏据此不显示团队入口）。
+ * 手动「检查更新」走导出的 refreshTeamStatus，错误会写 teamError 供面板展示。
+ */
+async function loadTeamStatus(token: number): Promise<void> {
+  try {
+    const status = await fetchTeamStatus()
+    if (token !== loadToken) return
+    appState.teamStatus = status
+  } catch {
+    if (token !== loadToken) return
+    appState.teamStatus = null
+  }
+}
+
 /** 加载当前活动项目的文档数据（meta/summaries/index）；无活动项目时清空 */
 async function loadActiveDocs(): Promise<void> {
   // 代际推进：此后任何更晚的 loadActiveDocs 进入都会使本次在途响应过期（写回前逐梯队校验）
@@ -363,7 +422,9 @@ async function loadActiveDocs(): Promise<void> {
   const [insight] = await Promise.all([
     fetchInsight(),
     loadWorkspaceChangeset(token),
-    applyAgentSupply(fetchAgentSupply, token)
+    applyAgentSupply(fetchAgentSupply, token),
+    // 团队状态与文档数据并行拉取；失败/非团队项目静默 null，不拖垮页面
+    loadTeamStatus(token)
   ])
   if (token !== loadToken) return
   appState.insight = insight
@@ -403,6 +464,150 @@ export async function refreshInsight(): Promise<void> {
   // G3：回滚 / 回到实时 / 删除当前回滚快照都会改变供给的合并基线（rolledBack 与拒绝原因），
   // 不一起刷新，状态条与抽屉会一直挂着过期的「回滚视图 · 合并被拒」
   await applyAgentSupply(fetchAgentSupply, token)
+}
+
+/* ------------------------- 团队协作（team） ------------------------- */
+
+function teamErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * 团队动作成功后的数据刷新：清文件视图缓存 → 重拉活动项目数据（含团队状态与供给）。
+ * 刷新失败不反向覆盖动作结果（同步/迁移本身已成功），页面保留现有数据，后续可手动重新生成。
+ */
+async function refreshDocsAfterTeamAction(): Promise<void> {
+  appState.fileViews.clear()
+  try {
+    await loadActiveDocs()
+  } catch {
+    // 动作已完成；刷新失败不把动作报成失败
+  }
+}
+
+/**
+ * 手动检查/刷新团队状态（面板「检查更新」与打开面板）。
+ * fetchRemote=true 时服务端先 fetch 再算 ahead/behind；失败写 teamError 并返回 null，
+ * 不向调用方抛（面板据 teamError 或 status.error 统一提示）。
+ */
+export async function refreshTeamStatus(fetchRemote = false): Promise<TeamStatus | null> {
+  appState.teamLoading = true
+  appState.teamError = null
+  try {
+    const status = await fetchTeamStatus(fetchRemote)
+    appState.teamStatus = status
+    return status
+  } catch (error) {
+    appState.teamError = teamErrorMessage(error)
+    return null
+  } finally {
+    appState.teamLoading = false
+  }
+}
+
+/** 手动同步：本地提交 → fetch → merge → push；结果（含冲突/推送失败）写回 teamSync 与 teamStatus */
+export async function syncTeamNow(): Promise<TeamSyncResult> {
+  appState.teamLoading = true
+  appState.teamError = null
+  try {
+    const result = await syncTeamRepo()
+    appState.teamSync = result
+    appState.teamStatus = result.status
+    await refreshDocsAfterTeamAction()
+    return result
+  } catch (error) {
+    appState.teamError = teamErrorMessage(error)
+    throw error instanceof Error ? error : new Error(teamErrorMessage(error))
+  } finally {
+    appState.teamLoading = false
+  }
+}
+
+/** 初始化团队数据仓库（git init + origin；不 commit） */
+export async function initTeam(): Promise<TeamStatus> {
+  appState.teamLoading = true
+  appState.teamError = null
+  try {
+    const status = await initTeamRepo()
+    appState.teamStatus = status
+    await refreshDocsAfterTeamAction()
+    return status
+  } catch (error) {
+    appState.teamError = teamErrorMessage(error)
+    throw error instanceof Error ? error : new Error(teamErrorMessage(error))
+  } finally {
+    appState.teamLoading = false
+  }
+}
+
+/** 解决单个冲突；全部解决时服务端会继续 merge 并尝试 push，返回最新状态 */
+export async function resolveConflict(
+  file: string,
+  choice: TeamConflictChoice
+): Promise<TeamStatus> {
+  appState.teamLoading = true
+  appState.teamError = null
+  try {
+    const status = await resolveTeamConflict(file, choice)
+    appState.teamStatus = status
+    await refreshDocsAfterTeamAction()
+    return status
+  } catch (error) {
+    appState.teamError = teamErrorMessage(error)
+    throw error instanceof Error ? error : new Error(teamErrorMessage(error))
+  } finally {
+    appState.teamLoading = false
+  }
+}
+
+/** 放弃本次合并（本地预同步提交保留） */
+export async function abortMerge(): Promise<TeamStatus> {
+  appState.teamLoading = true
+  appState.teamError = null
+  try {
+    const status = await abortTeamMerge()
+    appState.teamStatus = status
+    await refreshDocsAfterTeamAction()
+    return status
+  } catch (error) {
+    appState.teamError = teamErrorMessage(error)
+    throw error instanceof Error ? error : new Error(teamErrorMessage(error))
+  } finally {
+    appState.teamLoading = false
+  }
+}
+
+/** 冲突全部解决后继续合并（提交 merge + 尝试 push） */
+export async function continueMerge(): Promise<TeamStatus> {
+  appState.teamLoading = true
+  appState.teamError = null
+  try {
+    const status = await apiContinueTeamMerge()
+    appState.teamStatus = status
+    await refreshDocsAfterTeamAction()
+    return status
+  } catch (error) {
+    appState.teamError = teamErrorMessage(error)
+    throw error instanceof Error ? error : new Error(teamErrorMessage(error))
+  } finally {
+    appState.teamLoading = false
+  }
+}
+
+/** 把本机批注/快照/供给复制到团队仓库（只复制缺失内容，不覆盖不删除本机） */
+export async function migrateTeam(): Promise<TeamMigrationRunResult> {
+  appState.teamLoading = true
+  appState.teamError = null
+  try {
+    const result = await migrateTeamData()
+    await refreshDocsAfterTeamAction()
+    return result
+  } catch (error) {
+    appState.teamError = teamErrorMessage(error)
+    throw error instanceof Error ? error : new Error(teamErrorMessage(error))
+  } finally {
+    appState.teamLoading = false
+  }
 }
 
 export async function bootstrap(): Promise<void> {
@@ -569,6 +774,7 @@ export async function switchProject(id: string): Promise<void> {
   try {
     await activateProject(id)
     appState.fileViews.clear()
+    clearTeamState()
     appState.activeProjectId = id
     markActiveProject(id)
     for (const p of appState.projects) p.active = p.id === id
@@ -597,6 +803,7 @@ export async function addProject(input: NewProjectInput): Promise<ProjectInfo> {
   try {
     const info = await apiAddProject(input)
     appState.fileViews.clear()
+    clearTeamState()
     const resp = await fetchProjects()
     if (resp) {
       appState.projects = resp.projects
@@ -617,6 +824,7 @@ export async function addProject(input: NewProjectInput): Promise<ProjectInfo> {
 export async function removeProject(id: string): Promise<void> {
   await apiRemoveProject(id)
   appState.fileViews.clear()
+  clearTeamState()
   const resp = await fetchProjects()
   if (resp) {
     appState.projects = resp.projects

@@ -28,3 +28,17 @@ export type {
 } from './StorageAdapter.js'
 export { JsonStorage, pruneBackups } from './JsonStorage.js'
 export { SqliteStorage } from './SqliteStorage.js'
+export {
+  TeamStorage,
+  TEAM_MANIFEST_FILE,
+  TEAM_MANIFEST_SCHEMA_VERSION,
+  MAX_TEAM_BACKUPS,
+  isSafeTeamFileId,
+  isAnnotationRecord
+} from './TeamStorage.js'
+export type {
+  TeamManifest,
+  TeamMigrationResult,
+  TeamMigrationSummary,
+  TeamStorageOptions
+} from './TeamStorage.js'

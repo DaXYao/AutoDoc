@@ -8,6 +8,19 @@ export interface NewAnnotationInput {
   content: string
   /** 批注种类；缺省 'annotation'；'followup'=就地追问记录 */
   kind?: AnnotationKind
+  /**
+   * 团队模式：创建时的目标版本指纹（函数为目标取函数体指纹，其它目标取当时的图谱指纹）。
+   * 仅 TeamStorage 落盘；本机 SQLite/JSON 适配器暂不持久化这两个团队字段（团队模式默认由
+   * TeamStorage 组合本机存储使用），缺省 undefined 表示「版本未知」。
+   */
+  targetFingerprint?: string
+  /** 团队模式：创建时的图谱指纹；语义同上 */
+  graphFingerprint?: string
+  /**
+   * 团队模式：本条是冲突副本时指向原批注 ID（「都保留」场景）。
+   * 仅 TeamStorage 落盘；本机适配器忽略该字段。
+   */
+  conflictCopyOf?: string
 }
 
 export interface AnnotationPatch {
@@ -102,6 +115,9 @@ export interface ListChangeRecordsOptions {
  * - 批注与变更历史通过稳定 ID 关联；
  * - 任何写操作前必须先备份（由实现内部保证）；唯一例外：增量解析缓存属可再生数据，写前不备份；
  * - 变更历史全量保留（归档不删除）。
+ *
+ * 团队模式由 TeamStorage 组合本机适配器实现：批注 / 洞察快照读写团队数据仓库，
+ * 变更记录 / 文件快照 / Git 水位线 / 解析缓存 / activeId 委托本机适配器（本机数据不共享）。
  */
 export interface StorageAdapter {
   readonly kind: 'sqlite' | 'json'

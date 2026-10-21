@@ -2,6 +2,70 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-22 · 团队协作收尾（#205）：继续合并前端 + 双 clone 实跑 + 文档边界 · web+docs
+
+- **继续合并前端**：`data/api.ts` 新增 `continueTeamMerge()`（POST `/api/team/conflicts/continue`）；store 新增 `continueMerge()`，动作后写回状态并复用 `loadActiveDocs` 刷新；`TeamPanel.vue` 在 `merging && conflicts.length === 0`（上次提交中断或外部手动解决）时显示「继续合并」卡片与状态卡按钮，同时提供「放弃本次合并」；成功提示区分是否配置远端（推送失败由 `status.error` 原文提示）。`utils/team.ts` 的胶囊新增「合并待完成」档位（冲突计数仍优先），避免合并中断被误显示为普通未同步。
+- **测试**：`web/test/team.utils.test.ts` 增加合并待完成/冲突优先 2 项；`web/test/api.test.ts` 增加 continue 的 POST 与 400 原文保留 1 项，并让 `stubRoutes` 透传 `RequestInit`。web 318→321，`pnpm --filter @autodoc/web typecheck/build` 通过。
+- **双 clone 实跑**：临时 bare remote + Alice/Bob 两个 clone（不同本机 storage），AutoDoc `serve` 两实例分别指向各自 clone。验证：Alice 新建文件批注 → 同步提交并推送；Bob `status?fetch=1` 看到 behind=1、同步后读到同一条批注；Alice/Bob 依次离线改同一批注 → Bob 同步返回 1 个可「都保留」的冲突且不推送 → `both` 生成带 `conflictCopyOf` 的新 ID 副本并推送 → Alice 同步拉到两条。浏览器验证团队面板状态/路径/用户/同步按钮、批注作者与「冲突副本」、源码变更后「基于旧版本」徽标（刷新后取新图谱指纹）。临时数据已清理。
+- **文档**：`docs/TEAM_COLLABORATION.md` 状态改为团队地基已落地；补「首次建立数据仓库」流程（先在空目录初始化并推送 manifest，其他人再 clone；非空且无 manifest 会被拒绝接管）；UI 章节按实际落地更新（状态胶囊/团队按钮、继续合并、复制仓库路径，不再写未实现的「打开数据仓库/复制配置片段」）。
+- **边界**：团队同步仍是同步阻塞 Git 命令、无跨进程锁；首次启用若远端已有 README 等文件但无 manifest，AutoDoc 会拒绝接管，需要按文档从空仓库建立。
+- **验收**：全仓待跑 `pnpm test`/`pnpm lint`；未改 README、未引入依赖。
+- **关联 commit**：随团队批次一并提交。
+
+## 2026-10-22 · 团队协作后端初审 P0/P1 加固 · server+core+shared-types+web+docs
+
+- **P0-1 仓库根与 Git 环境隔离**：`teamGit.ts` 新增 `checkTeamRepoRoot`/`assertTeamRepoRoot`——已有 `.git` 时 `rev-parse --show-toplevel` realpath 必须等于团队目录；没有 `.git` 时若最近存在祖先能发现父工作树则拒绝；bare 仓库拒绝。`TeamGitClient` 每个实例操作前校验（按客户端缓存，一次 HTTP 请求/同步等价一次校验），并新增 `assertTeamOutsideSourceWorktree` 拒绝「团队仓库位于源码 Git 工作树内（即使自带 .git）」。所有 git 子进程清除 `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE`/`GIT_OBJECT_DIRECTORY`/`GIT_ALTERNATE_OBJECT_DIRECTORIES`，并设 `GIT_CEILING_DIRECTORIES` 为团队目录父级。`createDocService` 在 `new TeamStorage().init()` 之前校验；`docgen export` 改为 `exportProject`：先 `loadConfig` 拒绝 team 配置，再创建 service，避免导出前先写团队仓库。
+- **P0-2 符号链接/junction containment**：`TeamStorage.init` 用 lstat/realpath 拒绝 teamRoot 与 annotations/insightHistory/supply 的链接；所有团队文件读写/删除前要求父目录 realpath 在 teamRoot realpath 内、目标 lstat 非链接；写入改为同目录临时文件（`wx` 独占创建）+ rename，mkdir 前先检查最近存在祖先。`TeamGitClient.writeResolvedFile` 同样做词法 + realpath + 目标 lstat 校验并临时文件写回。`normalizeTeamRepoPath` 增拒 ADS 冒号、尾随点/空格、控制/保留字符、Windows 设备名（CON/PRN/NUL/COM1..9/LPT1..9 含扩展名）。
+- **P0-3 showVersion**：改用 `git ls-files -u` 判断 stage 2/3 是否存在；命令失败与该侧不存在分离，存在但 `git show` 失败（maxBuffer/timeout/对象损坏）返回 `ok:false + error`，`resolve` 明确报错、绝不 `git rm`；`listConflicts` 两侧摘要同样基于 stage 判定。新增可注入的 `AUTODOC_TEAM_SHOW_MAX_BUFFER` / `TeamGitClientOptions.maxBuffer` 用于构造读取失败测试。
+- **P1**：`listConflictFiles` 改为显式 `{ok,files,error}`，`status()` 记录 `conflictReadError`，`commitKnownPaths`/`continueMerge`/`mergeRemote` 在冲突状态无法确认时失败；`TeamStatus` 新增 `merging`/`dirtyCount`/`dirtyOutsideTeam`，`dirty` 只统计 manifest+annotations+insightHistory+supply，前端团队面板/中枢卡/胶囊 tooltip 展示；新增 `POST /api/team/conflicts/continue`（无 user/仍有冲突/暂存团队路径外文件→400，无合并时幂等；提交后 push），resolve/continue 前检查 git user；`both` 复用导出的 `isAnnotationRecord` 完整校验形状，非法 400 且不落盘；`views.toFileDocView` 只调用一次 `listAnnotations()` 并按 targetId 复用；`exportStaticSite` 内部拒绝 team service；`push` 仅在无 upstream 时 `-u`，已有 upstream 时推 origin 且不改写跟踪配置。
+- **测试**：core 新增 4 项链接/junction containment（teamStorage.test.ts）；server 新增 `teamGitHardening.test.ts`（16 项：根校验/环境隔离/链接写回/show 失败/冲突读取失败/detached/无 user/远端新分支/未知顶层文件/modify-delete 双向/push hook 失败/仅 ahead-behind）与 teamRoutes 10 项（continue 幂等/暂存外文件/无 user/both 形状非法/dirtyOutsideTeam/init 400/N+1 一次读取/导出拒绝），并把真实 git 用例拆到共享 `teamGitTestUtils.ts` 以控制单文件时长；web 增补 dirtyCount/合并态展示 1 项。core 423→427、server 635→661、web 317→318，全仓 1406 项通过；`pnpm lint` 全绿。未引入依赖、未改 README、未提交 git。
+- **未修/边界**：`continue` 重复调用在「上次已提交但 push 失败」时只返回状态、不自动重试 push（可再点同步重试）；`ls-files -u` 自身失败时列表摘要无法展示两侧内容，但 resolve 会明确报错而不会删除。
+
+## 2026-10-22 · 团队协作前端（#204）：状态胶囊/面板/同步/冲突/迁移/旧版徽标 · web
+
+- **API 层（web/src/data/api.ts）**：新增 `fetchTeamStatus(fetchRemote?)`、`initTeamRepo`、`syncTeamRepo`、`resolveTeamConflict(file, choice)`、`abortTeamMerge`、`fetchTeamMigrationPreview`、`migrateTeamData`；类型复用 shared-types，非 2xx 走 `errorFromResponse` 保留后端可读文案（400/409 不吞，409 照常触发无活动项目自愈），静态模式直接抛「仅本地服务可用」。
+- **Store（web/src/store/app.ts）**：`appState` 新增 `teamStatus` / `teamSync` / `teamLoading` / `teamError` / `teamPanelOpen`；`loadActiveDocs` 与洞察/变更集/供给并行拉取团队状态，失败静默 null、不拖垮页面；新增 `refreshTeamStatus` / `syncTeamNow` / `initTeam` / `resolveConflict` / `abortMerge` / `migrateTeam`，动作后写回状态并复用 `loadActiveDocs` 刷新文档与供给；切项目/增删项目/收回激活时清空团队作用域状态，非团队路径不变。
+- **顶栏（App.vue）**：团队启用时显示可点击的状态胶囊（冲突红 / 本地未同步琥珀 / 远端更新蓝 / 已同步绿 / 未初始化灰 / 无 Git 警告）与「团队」按钮，打开全局 `TeamPanel` 抽屉；非团队项目整块不渲染。
+- **TeamPanel.vue（新增）**：状态卡（仓库路径/remote/分支/Git 用户/最后提交/本地改动与领先落后/错误）；检查更新（`status?fetch=1`）、同步、未初始化时初始化、复制仓库路径（clipboard 失败提示）、关闭；无 Git / 无 user 的配置提示（只展示 `git -C <repo> config ...` 命令，不自动改 git config）；首次迁移预览（本机有数据且团队仓库为空时）与「复制到团队仓库 / 稍后」；冲突逐文件显示类型/两侧是否存在/摘要，按 `canKeepBoth` 提供保留本地/远端/都保留，全部解决后继续合并推送，可放弃本次合并；同步结果明确区分冲突未上传、本地已提交但推送失败、warning/error 原文，拉取合并后提示去 Agent 供给面板重新扫描/合并；常驻边界文案（私有仓库、不自动 push/force、冲突未解决不上传）。
+- **AnnotationPanel / FunctionCard**：团队模式隐藏作者输入、显示「作者：<git user>」；无 git user 禁用添加并提示。按 `targetFingerprint`（function/call，由 FunctionCard 传当前函数指纹）与 `graphFingerprint`（file/module，取当前洞察图谱指纹）判定「基于旧版本」，旧数据无指纹显示「版本未知」，`conflictCopyOf` 显示「冲突副本」；不新增后端字段。
+- **InsightHistory**：快照 `graphFingerprint` 与当前 `appState.insight.graphFingerprint` 不一致时，历史列表与回滚态横幅均显示「基于旧版本」。
+- **ProjectHub**：新增只读「团队数据仓库」卡片；未启用时展示可复制的 `autodoc.config.json` 示例与 repoPath/remote/git user 说明，已启用时展示状态摘要与打开团队面板按钮；不写用户配置文件。
+- **工具与测试**：新增 `web/src/utils/team.ts`（胶囊状态与颜色、冲突类型/选项文案、批注与快照旧版判定、同步结果摘要、迁移入口/摘要、配置示例与 Git 用户命令，纯函数）；新增 `web/test/team.utils.test.ts` 33 项，`api.test.ts` 增补 5 项团队接口 400/409/静态模式口径。web 279→317 通过（+38）、typecheck/build 通过，`pnpm lint` 全绿；未引入依赖、未改后端协议/README、未提交 git。
+- **已知取舍**：`TeamStatus` 没有本地未同步文件计数，胶囊只表达「有未提交改动」；供给更新提示无法精确判断 supply 是否变化，成功 fetch+merge 后统一提示去供给面板复查；面板动作后的文档刷新失败不反向报错，保留现有页面数据。
+
+## 2026-10-21 · 团队协作接入与 Git 同步（#202 + #203 后端）· server+shared-types+docs
+
+- **服务接入**：`createDocService` 读到 `normalized.config.team` 后创建 `TeamStorage`（`projectKeyExplicit` 依配置是否显式）并以它作为 `service.storage`；本机适配器保留为 `localStorage`。`DocService` 新增 `projectId` / `team{storage,root,projectKey,gitUser,gitAvailable}`，`ProjectManager.activate` 传项目 id。团队初始化失败（manifest 不匹配/目录非空/manifest 损坏）带仓库路径抛错，不降级；`scheduleGitBackfill` 并发键显式取本机 `localStorage.dataPath`。`docgen export` 遇团队配置直接报错，不把团队数据写进导出站。
+- **TeamGitClient（server/src/teamGit.ts）**：独立客户端，全部 `git -C` + 参数数组、`GIT_TERMINAL_PROMPT=0`；实现 isAvailable/status/initRepo/commitKnownPaths/fetch/mergeRemote/push/listConflicts/showVersion/addPaths/removePath/continueMerge/abortMerge/currentBranch/remoteInfo/gitUser。提交只 `git add` manifest、annotations/、insightHistory/、supply/，commit pathspec 仅取已暂存的具体团队文件（不使用 -A、不带 --no-verify）；同步 fetch+merge，不 rebase/force；remote 配置与已有 origin 不一致报错不覆盖，无 origin 时按配置添加；无 user/remote/网络/凭据均显式失败。冲突路径限制在团队数据目录内，拒绝绝对路径/盘符/`..`。
+- **同步服务与路由（server/src/teamSync.ts + app.ts）**：新增 GET `/api/team/status`（`?fetch=1`）、POST `/api/team/init`、`/sync`、`/conflicts/resolve`、`/conflicts/abort`、GET `/api/team/migration-preview`、POST `/api/team/migrate`；仅 team 项目可用（否则 400），readOnly 写操作 403，异常统一可读 `{error}`。状态机为本地提交 → fetch → merge → push；无 remote 只本地提交；冲突不 push；push 失败明确 warning 且本地提交保留。`both` 仅批注：原文件写本地版本，远端版本经 TeamStorage.addAnnotation 生成新 ID、`conflictCopyOf=本地 id`；modify/delete 的删除方用 `git rm --ignore-unmatch`；全部解决后 continue merge 再 push。迁移复制本机批注/快照与 supply 文件，相同跳过、不同记冲突，不覆盖、不删本机。
+- **团队供给目录**：`supplyDirOf`/`changesSupplyDirOf` 增加 teamRoot，团队模式返回 `<teamRoot>/supply/{insight,changes}`（无 projectId 段）；collect/scan/export 全部接入。自动索引不进团队仓库，改写本机 `<dirname(storage.dataPath)>/team-supply-index.json`，`AgentSupplyRulesResult.indexPath` 与 `AgentSupplyExportResponse.indexPath` 指向本地；AI 缓存/解析缓存仍按本机 dataPath；AGENT_RULES.md 保持写目标 `.autodoc`。
+- **作者与版本指纹**：团队模式批注 POST 忽略前端 author，强制服务端 Git `user.name`，无 git user 返回 400；创建时写 `targetFingerprint`（function=目标函数指纹，call=caller 指纹，file/module=当前图谱指纹）与 `graphFingerprint`（恒为当前图谱指纹），用 buildGraph 静态计算；PUT 团队模式忽略 author。非团队行为不变。
+- **共享类型**：新增 TeamGitUser/TeamConflict/TeamStatus/TeamSyncResult/TeamMigrationPreview/TeamMigrationRunResult 等；`TeamSyncResult.conflicts`、`AgentSupplyExportResponse.indexPath` 随 API 下发。
+- **循环依赖修复**：`SUPPLY_PASSES` 抽到 `server/src/supplyPasses.ts`，agentSupply 转出保持旧导入路径；supplyCache 顶层改从新模块取值，消除「先加载 teamSync/agentSupply 时 supplyCache 读到 undefined」的隐式导入顺序依赖。
+- **测试**：新增 `teamGit.test.ts`（真实 bare remote + 双 clone：无冲突、批注 both/local/remote、快照/供给冲突、modify/delete、abort、本地-only、push 失败、路径穿越与 init 防护）、`teamRoutes.test.ts`（createDocService 团队接入/失败、400/403/状态/init/作者与指纹/无 git user/迁移计数/sync/冲突 both 路由）、`teamSupply.test.ts`（团队供给目录、本机索引、AI 缓存不落团队）。server 604→635（+31）、core 423、web 279，全仓 1337 项通过；`pnpm lint` 全绿。未引入依赖、未改 README、未改前端、未提交 git。
+- **未做（下一轮）**：前端团队面板/同步/冲突/迁移/旧版徽标；双 clone 真实演练由 UI 驱动；一键 Agent 任务包。
+
+## 2026-10-21 · 团队地基初审修复（#201）：稳定 ID 迁移/比较归一/路径与接管/Windows 防护 · core+docs
+
+- **P0-1 稳定 ID 迁移**：`TeamStorage.migrateTarget` 不再用 `isSafeTeamFileId(newId)` 校验函数稳定 ID（含 `/`、`::`、`@` 必被误拒）；oldId/newId 只做非空校验，仅写入 JSON 的 targetId，不参与路径拼接。测试改用真实稳定 ID，覆盖精确迁移与 `${oldId}>` 前缀迁移，删除「newId 含 ../ 抛错」错误用例。
+- **P0-2 迁移误报**：迁移比较前递归丢弃 undefined 对象键（SQLite `getInsightSnapshot` 固定带 label/note/source/agent），批注两侧 kind 缺省归一为 `annotation`；新增 SQLite delegate 迁移测试（首次 copied、第二次全 skipped、无 conflicts），JSON delegate 用例保留。
+- **P0-3 repoPath/projectKey**：`loadConfig` 把 `team.repoPath` 按项目根解析为绝对路径写回 normalized.config（schema 仍接受相对路径），避免 TeamStorage 以 cwd 为基准绕过校验；新增 `resolveTeamProjectKey(rootDir, configured?)`（显式配置安全字符校验；缺省优先 package.json name，其次根目录名并清洗）；`TeamStorageOptions.projectKeyExplicit` 控制严格比对，缺省时采用已有 manifest 的 projectKey；schema/校验层拒绝空白或含非法字符的显式 projectKey。补 cwd≠root 测试。
+- **P0-4 目录关系与接管**：路径校验拒绝团队目录位于/等于源码根、是源码根祖先，以及与 `storage.path` 所在目录或默认 `.autodoc` 互相包含；`isSameOrInside` 改为只认 `..` / `../` 前缀，修复 `..team` 误判。`TeamStorage.init` 在 manifest 缺失时只接管空目录（允许仅 `.git`），已有其它文件则抛错；补 `repoPath: '..'`、祖先、数据目录互含、非空无 manifest 用例。
+- **P1**：团队批注/快照读取、更新、删除核对文件内 id === 请求 id（防 Windows `ABC` 命中 `abc.json` 误读/误改/误删），快照同 ID 覆盖前校验内部 id；`isSafeTeamFileId` 拒绝 CON/PRN/AUX/NUL/COM1..9/LPT1..9（含扩展名）；`NewAnnotationInput.conflictCopyOf` 由 TeamStorage 落盘；`close()` 重置 initialized 可再次 init；临时文件写入失败也清理；备份序号零填充且取已有最大序号+1（避免轮转后复用最小序号导致新备份被立即删掉）。
+- **文档/注释**：`docs/TEAM_COLLABORATION.md` 第 5 节 `git add -A` 改为只 add manifest、`annotations/`、`insightHistory/`、`supply/` 已知路径；同步 repoPath 绝对化/祖先与数据目录限制、projectKey 采用规则、列表仅返回 meta（读取后剥离，不引入 meta 索引）与初始化接管规则。
+- **验收**：`pnpm --filter @autodoc/core test` 423 通过（+19）；`pnpm lint` 全绿；`pnpm test` core 423 / web 279 / server 604，全仓 1306 项通过。未引入依赖、未改 README、未提交 git。
+
+## 2026-10-21 · 团队协作地基（#201）：类型/team 配置/TeamStorage/迁移 · shared-types+core+docs
+
+- **共享类型**：新增 `TeamConfig`（`repoPath` 必填、`remote?`、`projectKey?`）与 `AutodocConfig.team?`；`Annotation` 新增可选 `targetFingerprint` / `graphFingerprint` / `conflictCopyOf`（缺省 undefined=版本未知，不伪造），并在 shared-types 头部注明「团队模式批注/快照共享，变更记录/缓存/activeId 本地」。`NewAnnotationInput` 增加可选指纹字段（仅 TeamStorage 落盘，本机适配器暂不持久化，已注释说明）。
+- **配置**：`configSchema` 顶层新增 `team`（additionalProperties:false，repoPath 非空必填，remote/projectKey 可选字符串）；`loadConfig` 追加路径语义校验——相对路径按项目根解析、trim 后不得为空、resolve + realpath（不存在路径取最近存在祖先再拼回尾段、Windows 统一小写）后不得等于或位于项目根内；不存在的目录允许（初始化时创建）。
+- **TeamStorage（packages/core/src/storage/TeamStorage.ts）**：组合存储实现 `StorageAdapter`，`kind`/`dataPath` 沿用本机适配器。`init()` 建 `annotations/`、`insightHistory/`、`supply/insight/`、`supply/changes/`，读写 `.autodoc-team.json`（schemaVersion=1/projectKey/createdAt/description）；已有 manifest 的 projectKey 不同、manifest 损坏或版本不支持均抛错且不覆盖。批注/快照一条（份）一个 `<id>.json`，写入走「同目录临时文件 + rename」原子替换；文件 ID 仅允许 UUID/字母数字与 `._-`（拒绝路径分隔符与点段）。更新/删除前先复制到 `dirname(local.dataPath)/team-backups/`（ISO 时间戳 + basename，轮转保留 20 份，备份失败直接抛错）；新增不备份。损坏/形状非法文件读取时 warn 并跳过，不覆盖、不抛。列表排序与 JsonStorage 同口径（批注 createdAt 升序、快照 savedAt 新→旧，批量仅给 meta）。`migrateTarget` 迁移团队注释并委托本机迁移变更记录；快照删除时若本机 activeId 指向它则清空。变更记录/文件快照/Git 水位线/解析缓存/activeId 全部委托本机。
+- **迁移**：`migrateFromLocal()` 从本机读取批注与快照，按 ID 复制：不存在→复制、内容完全相同→skipped、内容不同/文件损坏/ID 非法→不覆盖并列入 `conflicts`；不删除本机数据、不产生备份。
+- **导出**：`@autodoc/core` 导出 `TeamStorage`、`isSafeTeamFileId`、`TEAM_MANIFEST_FILE`、`TEAM_MANIFEST_SCHEMA_VERSION`、`MAX_TEAM_BACKUPS` 及 `TeamManifest`/`TeamMigration*` 类型。
+- **测试**：新增 `packages/core/test/teamStorage.test.ts`（初始化/manifest 三态、批注 CRUD/kind 归一/排序/损坏跳过/安全 ID/迁移/备份轮转、快照 CRUD/meta/activeId 联动/同 ID 覆盖、本地委托与原子写、SQLite delegate、本机迁移复制/跳过/冲突）；`config.test.ts` 新增合法/非法 team、未知字段、根内相对/绝对路径、符号链接 realpath、Windows 大小写用例。core 404（+36）、web 279、server 604，全仓 1287 项通过；`pnpm lint` 全绿。
+- **未做（后续任务）**：Git 命令/同步路由/冲突解析、供给目录重定向、服务端 service 创建接入 TeamStorage、前端面板与旧版徽标、迁移 UI；本轮未引入依赖、未改 README、未提交 git。
+- **关联 commit**：未提交（待本批次统一提交）。
+
 ## 2026-10-21 · 语义担保第七轮：Go（.go）接入，当前所有已接入语言完成 · server+shared-types+docs
 
 - **语言闸门**：`GUARANTEE_LANGUAGE_EXTENSIONS` 加入 `go`；`isGuaranteeLanguageFile` 与 KEY 的 `isGuaranteeFunction` / `isGuaranteeFileSet` / `allGraphFilesGuaranteed` 直接覆盖 Go。变更侧 scope 同步接受 `.go`。至此当前接入的 TS/JS/TSX、C#、Vue SFC、C++、Python、Java、Go 全部支持语义担保；测试中的未接入语言夹具统一改为 `.rs`。

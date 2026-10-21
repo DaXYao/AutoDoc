@@ -85,7 +85,17 @@ const WORKSPACE_BATCH_WINDOW_MS = 60_000
 
 /* ------------------------- 目录 ------------------------- */
 
-export function changesSupplyDirOf(dataPath: string, projectId: string): string {
+/**
+ * 变更侧供给目录：
+ * - 非团队：`<dirname(storage.dataPath)>/supply/<projectId>/changes`；
+ * - 团队：`<teamRoot>/supply/changes`（单项目一仓，无 projectId 段）。
+ */
+export function changesSupplyDirOf(
+  dataPath: string,
+  projectId: string,
+  teamRoot?: string
+): string {
+  if (teamRoot) return join(teamRoot, 'supply', 'changes')
   return join(dirname(dataPath), 'supply', safeProjectSegment(projectId), 'changes')
 }
 
@@ -817,7 +827,7 @@ export function collectChangesSupply(
   projectId: string,
   graph: ProjectGraph
 ): ChangesSupplyContext {
-  const dir = changesSupplyDirOf(service.storage.dataPath, projectId)
+  const dir = changesSupplyDirOf(service.storage.dataPath, projectId, service.team?.root)
   const gitRecords = service.storage.listChangeRecords({ source: 'git' })
   const snapshotRecords = service.storage.listChangeRecords({ source: 'snapshot' })
 
@@ -843,7 +853,7 @@ export function collectChangesSupplyLight(
   graph: ProjectGraph,
   snapshotRecords: FunctionChangeRecord[]
 ): { winners: AgentSupplyWinner[]; entries: ChangesEntry[] } | null {
-  const dir = changesSupplyDirOf(service.storage.dataPath, projectId)
+  const dir = changesSupplyDirOf(service.storage.dataPath, projectId, service.team?.root)
   if (!existsSync(dir)) return null
   let dirents: Dirent[]
   try {

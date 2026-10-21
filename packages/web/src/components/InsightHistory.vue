@@ -22,6 +22,7 @@ import {
   summarizeDiff
 } from '../utils/insightHistory'
 import { snapshotSourceTag } from '../utils/agentSupply'
+import { snapshotVersionState } from '../utils/team'
 import { adAgentTagSkin } from '../theme'
 
 /**
@@ -73,6 +74,16 @@ const canCompare = computed(() => selectedIds.value.length === 2)
 const sourceTags = computed(
   () => new Map(snapshots.value.map((s) => [s.id, snapshotSourceTag(s)]))
 )
+
+/** 生成时图谱指纹与当前图谱不一致的快照 id（列表与回滚态横幅共用） */
+const staleSnapshotIds = computed(() => {
+  const current = appState.insight?.graphFingerprint ?? null
+  return new Set(
+    snapshots.value
+      .filter((s) => snapshotVersionState(s.graphFingerprint, current) === 'stale')
+      .map((s) => s.id)
+  )
+})
 
 /**
  * 历史版本列表默认收起（渐进披露），展开态持久化到 store/expand.ts（按项目区分命名空间）。
@@ -230,6 +241,15 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
           当前展示 {{ activeSnapshot ? formatDate(activeSnapshot.savedAt) : '历史' }}
           的快照，非最新实时结果；重新生成 AI 会自动回到实时视图。
         </span>
+        <n-tag
+          v-if="activeSnapshot && staleSnapshotIds.has(activeSnapshot.id)"
+          size="tiny"
+          type="warning"
+          :bordered="false"
+          title="这份快照生成时的图谱指纹与当前图谱不一致"
+        >
+          基于旧版本
+        </n-tag>
         <n-button
           v-if="!readOnly"
           size="tiny"
@@ -344,6 +364,15 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
                     :type="snapshot.trigger === 'partition' ? 'info' : 'default'"
                   >
                     {{ snapshotTriggerLabel(snapshot.trigger) }}
+                  </n-tag>
+                  <n-tag
+                    v-if="staleSnapshotIds.has(snapshot.id)"
+                    size="tiny"
+                    type="warning"
+                    :bordered="false"
+                    title="生成时的图谱指纹与当前图谱不一致"
+                  >
+                    基于旧版本
                   </n-tag>
                   <!-- G3 快照级来源：这一版的语义是谁写的（本地 KEY API 不额外标注） -->
                   <n-tag

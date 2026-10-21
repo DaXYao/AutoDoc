@@ -9,6 +9,9 @@
 - 已被 AGENTS.md 沉淀为硬规则的教训，在本文件保留一条链接即可，不重复展开。
 
 ## 避坑清单（快速扫描）
+- [ ] 团队数据仓库首次建立必须先在空目录（允许只有 `.git`）跑 AutoDoc 初始化并同步 manifest，其他人再 clone；不要先塞 README/普通文件——`TeamStorage` 对「非空且无 manifest」会拒绝接管（实跑双 clone 时踩过）。测试/演练里可手工补 `.autodoc-team.json` 再启动，但不要把它当成用户流程。
+- [ ] `git commit -- <目录>` 不能用于空/未跟踪目录（报 `pathspec ... did not match`）；团队仓库应先 add 已知目录，再用 `git diff --cached --name-only` 得到的具体文件作 commit pathspec。
+- [ ] server 新增入口模块时先检查循环依赖：`agentSupply → insight → supplyCache → agentSupply` 若 supplyCache 顶层从 agentSupply 取常量，换入口加载会 TDZ undefined；共享常量抽到无依赖模块，禁止依赖 import 顺序。
 - [ ] 批注/变更必须用「稳定 ID + 指纹」关联，禁止按文件名关联。
 - [ ] 三分类规则必须走配置，禁止硬编码。
 - [ ] 解析不到的调用归「外部/未解析」，禁止强行猜测。
@@ -52,10 +55,28 @@
 - [ ] 严格契约缓存只存契约原样字段：派生字段（如按 allowed 算出的 `relevant`）回读时重算，不能一起落盘——否则严格解析会把自家缓存判成畸形，写路径还会把它删掉，表现为「每次刷新都重新请求、cacheHits 恒 0」（见 2026-10-21 SG2 条）。
 - [ ] 复核/自检的证据包必须与待复核对象文本**物理分离**：AI 判断值（分类/核心判定/理由）不得作为证据回喂，否则第二遍 LLM 退化为自洽检查；`fileId` 这类大范围锚点不能单独作为片段证据，allowed 必须按片段（步骤/块行）收紧；证据包、相关性 allowed、最终锚点校验必须**三处同源**，且证据包要覆盖待引用的 stepId（见 2026-10-21 SG2 条）。
 - [ ] Agent 供给文件名 `<pass>.<agent>.json` 的 `<agent>` 必须与信封 `agent` 逐字一致（`categories.vue.qoder.json` → `agent: "vue.qoder"`，不是 `qoder`）；`coreRoles.values` 是字符串而非 `{ systemRole }` 对象。实跑前先查 `/api/agent-supply` 的 `errors`，别把契约形状错误当成「担保没生效」。
+- [ ] 团队仓库：文件 ID（UUID）与函数稳定 ID（可含 `/`、`::`、`@`）是两套 ID，稳定 ID 只能写 targetId，禁止用文件名规则校验。
+- [ ] 「内容完全相同」比较前先递归丢弃 undefined 对象键：SQLite getInsightSnapshot 固定带可选 meta 字段，团队 JSON 没有这些键，否则二次迁移全部误报冲突。
+- [ ] 目录包含判断必须 `rel === '..' || rel.startsWith('..' + sep)`；备份轮转序号要取已有最大值+1，不能找第一个空位（刚被轮转删掉的最小序号会被新备份复用并立即删除）。
+- [ ] 单个 Vitest 文件里真实 git 子进程累计超过约 60s 时，会出现 `vitest-worker Timeout calling "onTaskUpdate"`：测试全过但进程 exit 1；按场景拆分测试文件并共享 fixture（`teamGitTestUtils.ts`），不要只调 `testTimeout`。
 
 ---
 
 ## 教训条目
+
+### 2026-10-22 · 团队 Git 测试单文件过长触发 Vitest worker RPC 超时（测试全绿却 exit 1）
+- **场景**：团队协作后端 P0/P1 加固，`teamGit.test.ts` 真实 bare remote + 双 clone 用例增至 29 项、单文件约 100s。
+- **现象**：所有用例通过，但 Vitest 末尾抛 `[vitest-worker]: Timeout calling "onTaskUpdate"`，命令退出码 1；单独跑某个测试或用例数少时无此问题。
+- **根因**：真实 git 子进程（Windows 每次 spawn 百毫秒级）让单文件总时长超过 worker RPC 心跳阈值；`testTimeout` 只约束单条用例，管不到文件级 RPC。
+- **正确做法**：把重集成用例按关注点拆成多个测试文件（原同步状态机 / P0-P1 加固），共享 `teamGitTestUtils.ts` 的临时目录、git、makeService、createPair 夹具；每文件控制在 60s 内，两个文件并行后总时长反而下降。
+- **预防措施**：新增真实 git/子进程测试先估算进程数；单文件接近 50s 就拆分；不要用提高 `testTimeout` 掩盖 RPC 超时。
+
+### 2026-10-21 · 团队仓库地基的四类「看起来等价」陷阱：稳定 ID/文件名、undefined 键、目录前缀、备份序号
+- **场景**：团队数据仓库 TeamStorage（#201）初审修复：函数重命名迁移、本机→团队迁移比较、repoPath 校验、写前备份轮转。
+- **现象**：①`migrateTarget` 把函数稳定 ID 当文件名校验，真实 ID 含 `/`、`::`、`@` 必然抛错；②SQLite 快照 meta 固定带 `label/note/source/agent: undefined`，团队 JSON 无这些键，`stableStringify` 把 undefined 序列化成 null，第二次迁移全部误报冲突；③`isSameOrInside` 用 `rel.startsWith('..')`，把 root 内的 `..team` 误判为外部；④备份名从 1 找第一个空位，轮转刚删掉最小序号后新备份复用该序号，随即被当作最旧删除，保留的永远是最早的 20 份。
+- **根因**：把「团队文件名 / 稳定业务 ID」「对象键缺失 / 键值为 undefined」「路径前缀 / 路径段」「备份序号连续 / 唯一」当成等价；测试只用了简化 ID 与真实时间戳，未触发边界。
+- **正确做法**：稳定 ID 只做非空校验并仅写 JSON targetId；比较前 `normalizeForCompare` 递归丢弃 undefined 对象键并归一 kind；目录关系用 `relative()` 的 `..` 段精确判断；备份序号取同 stamp 同文件已有最大序号+1并零填充，轮转按字典序。
+- **预防措施**：迁移类测试必须用真实形态 ID（含路径/`::`/`@`）并跑两遍；跨适配器（SQLite/JSON）各跑一次迁移；路径测试覆盖 `..team`、祖先、数据目录互含；备份测试用 fake timers 冻结同一毫秒并断言保留内容而不只是数量。
 
 ### 2026-10-21 · 证据包夹带 AI 判断值 / 三处锚点规则不同步，让 verified 失真或假 unverified
 - **场景**：SG2 第二遍 LLM 语义复核（FunctionPack + 逐片段 allowed + SG1 最终锚点校验）。
