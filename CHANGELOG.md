@@ -2,6 +2,17 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · 语义担保第七轮：Go（.go）接入，当前所有已接入语言完成 · server+shared-types+docs
+
+- **语言闸门**：`GUARANTEE_LANGUAGE_EXTENSIONS` 加入 `go`；`isGuaranteeLanguageFile` 与 KEY 的 `isGuaranteeFunction` / `isGuaranteeFileSet` / `allGraphFilesGuaranteed` 直接覆盖 Go。变更侧 scope 同步接受 `.go`。至此当前接入的 TS/JS/TSX、C#、Vue SFC、C++、Python、Java、Go 全部支持语义担保；测试中的未接入语言夹具统一改为 `.rs`。
+- **Go 参数类型（server 侧，不改 parser）**：`ParamTypeLanguage` 增加 `go`；`paramTypeText` 对 `.go` 在顶层找第一个空白，右侧为类型（Go 是 `name type`，类型可含空格）。例：`page int`→`int`、`ctx context.Context`→`context.Context`、`args ...string`→`...string`、`ch chan int`→`chan int`、`fn func(int) error`→`func(int) error`、`values map[string]int`→`map[string]int`；未命名参数（`int` / `chan int` / `[]byte`）整体作类型，参数名、完整声明与整签名不算类型。
+- **Go 证据口径**：`.go` 复用通用证据包——包/类型编码在 `className`（方法如 `pkg.Type`、接口方法如 `pkg.Interface`），包级函数为 null；导出性按首字母大写（public/module-local），方法接收者/接口/结构体/泛型按现有解析结果；docComment、注释块、调用边共用锚点；import 可解析内部调用，未解析调用的 `externalModule` 为 import 包名时可生成 `external` claim，`import` claim 仍未证实。
+- **契约/文档**：`agentSupply.ts` 4.10 语言范围改为当前全部已接入语言 + Go 证据口径；`agentSupplyChanges.ts` 9.1 同步；`semanticGuarantee.ts` / `semanticVerifier.ts` 头部、shared-types 担保字段注释同步；README/docs 标记所有已接入语言完成。
+- **测试**：语言判定（`.go=true`，`.rs=false`）；真实 Go 解析→建图→担保集成（参数 `int`/`...string`/`context.Context`/`chan int`/`func(int) error`/`map[string]int` 通过，参数名失败；public 可见性、`fmt.Println` external、内部 `Fetch` call、partition/flows/changes scope 均可 declared）；既有测试中作为未接入语言的 `.go` 夹具全部切到 `.rs`。server 604、core 368、web 279，全仓 1251 项通过；`pnpm lint` 全绿。
+- **实跑**：临时 2 文件 Go 项目（struct/方法/接口参数/`fmt` import/内部调用），config/storage 指向系统临时目录（不写用户 `.autodoc`），`serve --port 7816 --no-watch`；写 `supply/default/insight/categories.qoder.json` 与 `coreRoles.qoder.json`，`POST /api/agent-supply/merge` 后 `/api/insight` 返回 4 条 `source=agent,status=declared`（categories×2 + coreRoles×2；复杂类型与 `fmt::Println` external 均通过）。临时服务与数据已清理。
+- **已知边界**：dot/blank import、嵌入/提升方法、继承/接口实现、链式返回值、顶层 var func 值、build tags/cgo 仍按既有 Go parser 边界不建模；`import` claim 仍未接入；Agent 自审最高 `declared`，`verified` 仅由 KEY 第二遍复核产生。
+- **关联 commit**：随 Go 轮次一并提交。
+
 ## 2026-10-21 · 语义担保第六轮：Java（.java）接入语言闸门 · server+shared-types+docs
 
 - **语言闸门**：`GUARANTEE_LANGUAGE_EXTENSIONS` 加入 `java`；`isGuaranteeLanguageFile` 与 KEY 的 `isGuaranteeFunction` / `isGuaranteeFileSet` / `allGraphFilesGuaranteed` 直接覆盖 Java。变更侧 scope 同步接受 `.java`。`.go` 仍为 `unverified`（原因「该语言尚未接入语义担保」），项目级混合对象同样不回退。既有「以 .java 作为未接入语言」的测试夹具统一改为 `.go`。

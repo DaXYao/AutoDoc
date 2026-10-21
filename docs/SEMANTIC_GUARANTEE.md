@@ -1,6 +1,6 @@
 # 语义担保（Semantic Guarantee）
 
-> 状态：TypeScript / JavaScript / TSX 与 C#、Vue SFC、C++、Python、Java 已落地（SG1 静态证据、SG2 KEY 逐片段复核、SG3 洞察/变更 UI 与变更侧担保）。下一轮：Go。
+> 状态：当前所有已接入语言（TypeScript / JavaScript / TSX、C#、Vue SFC、C++、Python、Java、Go）的语义担保已落地（SG1 静态证据、SG2 KEY 逐片段复核、SG3 洞察/变更 UI 与变更侧担保）。
 
 ## 1. 现状与目标
 
@@ -123,6 +123,7 @@ Agent 供给与洞察合并目前只校验**结构、字段与引用**：id 存�
 4. **C++**（attributes→decorators、namespace/class 编码进 className、quoted include 跨文件调用、C++ 参数类型提取）— 已落地
 5. **Python**（decorators→decorators、类/嵌套作用域编码进 className、docstring/注释块、import 跨文件调用、Python 注解参数类型提取）— 已落地
 6. **Java**（annotations→decorators、包+类路径进 className、import 跨文件调用、Java 参数类型提取）— 已落地
+7. **Go**（包/类型进 className、导出性、import 跨文件调用、Go `name type` 参数类型提取）— 已落地
 7. **Go**
 
 每一轮「完成」需同时具备：

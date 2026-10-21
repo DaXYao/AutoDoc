@@ -2562,8 +2562,8 @@ function buildRulesText(
   L.push(
     '- **语言范围（本轮）**：TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）' +
       '+ C#（`.cs`）+ Vue SFC（`.vue`）+ C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`）' +
-      '+ Python（`.py`）+ Java（`.java`）。' +
-      '`.go` 等其它语言、以及包含未接入语言文件的项目级对象（partition / flows / 混合模块 / 混合链路）' +
+      '+ Python（`.py`）+ Java（`.java`）+ Go（`.go`）。' +
+      '其它语言、以及包含未接入语言文件的项目级对象（partition / flows / 混合模块 / 混合链路）' +
       '一律 `unverified`，原因「该语言尚未接入语义担保」。'
   )
   L.push(
@@ -2598,6 +2598,13 @@ function buildRulesText(
       '`final int page` → `int`、`@Nullable String name` → `String`、`String... args` → `String...`、' +
       '`Map<String, Integer> map` → `Map<String, Integer>`、`int[] values` → `int[]`；参数名、完整参数声明与整个签名都不算类型。' +
       'Java import 可解析为内部调用边；未解析调用的 `externalModule` 为 import 源时可生成 `external` claim，`import` claim 仍未证实。'
+  )
+  L.push(
+    '- **Go 证据口径**：`.go` 复用通用证据包——包名/类型编码在 `className`（方法如 `pkg.Type`、接口方法如 `pkg.Interface`），包级函数为 null；' +
+      '导出性按首字母大写（`public` / `module-local`），方法接收者/接口/结构体/泛型按现有解析结果；docComment、注释块、调用边共用锚点。' +
+      '`type` 只认参数类型/返回类型：`page int` → `int`、`ctx context.Context` → `context.Context`、`args ...string` → `...string`、' +
+      '`ch chan int` → `chan int`、`fn func(int) error` → `func(int) error`、`values map[string]int` → `map[string]int`；' +
+      '参数名、完整参数声明与整个签名都不算类型。Go import 可解析内部调用；未解析调用的 `externalModule` 为 import 包名时可生成 `external` claim，`import` claim 仍未证实。'
   )
   L.push(
     '- **Vue SFC 证据口径**：`.vue` 的 script 函数（含 `<script setup>` 与 Options API methods，`className` 可能是 `[component]` 或 null）' +

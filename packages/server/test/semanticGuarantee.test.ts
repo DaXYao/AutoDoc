@@ -69,15 +69,15 @@ const ALPHA = 'src/a.ts::-::alpha@aaaaaaaaaaaa'
 const BETA = 'src/a.ts::Svc::beta@bbbbbbbbbbbb'
 const GAMMA = 'src/util/c.ts::-::gamma@cccccccccccc'
 const EPSILON = 'src/util/e.ts::-::epsilon@eeeeeeeeeeee'
-const DELTA = 'go/foreign.go::-::delta@dddddddddddd'
+const DELTA = 'rs/foreign.rs::-::delta@dddddddddddd'
 const MIX_TS = 'src/mix/mix.ts::-::mixTs@111111111111'
-const MIX_GO = 'src/mix/mix.go::-::mixGo@222222222222'
+const MIX_RS = 'src/mix/mix.rs::-::mixRs@222222222222'
 const EXTERNAL_ID = 'node:fs::readFile'
 const CS_LIST = 'Services/UserService.cs::UserService::ListUsers@111111111111'
 const CS_FETCH = 'Services/UserService.cs::IRepository::Fetch@222222222222'
 const CS_NAME = 'Services/UserService.cs::UserService::ComputeName@333333333333'
 const CS_VALIDATE = 'Services/UserService.cs::UserService::TryValidate@444444444444'
-const CS_GO = 'scripts/cs-foreign.go::-::foreign@555555555555'
+const CS_RS = 'scripts/cs-foreign.rs::-::foreign@555555555555'
 
 function mkBlock(fnId: string, startLine: number, endLine: number, codeText = 'run()'): CodeBlock {
   return {
@@ -164,7 +164,7 @@ function fixtureFiles(): FileDoc[] {
   const epsilon = mkFn(EPSILON, 'epsilon', { category: 'utility' })
   const delta = mkFn(DELTA, 'delta', { category: 'utility' })
   const mixTs = mkFn(MIX_TS, 'mixTs', { category: 'utility' })
-  const mixGo = mkFn(MIX_GO, 'mixGo', { category: 'utility' })
+  const mixRs = mkFn(MIX_RS, 'mixRs', { category: 'utility' })
   return [
     {
       fileId: 'src/a.ts',
@@ -191,15 +191,15 @@ function fixtureFiles(): FileDoc[] {
       functions: [mixTs]
     },
     {
-      fileId: 'src/mix/mix.go',
-      path: 'src/mix/mix.go',
-      language: 'go',
-      functions: [mixGo]
+      fileId: 'src/mix/mix.rs',
+      path: 'src/mix/mix.rs',
+      language: 'rust',
+      functions: [mixRs]
     },
     {
-      fileId: 'go/foreign.go',
-      path: 'go/foreign.go',
-      language: 'go',
+      fileId: 'rs/foreign.rs',
+      path: 'rs/foreign.rs',
+      language: 'rust',
       functions: [delta]
     }
   ]
@@ -275,12 +275,12 @@ function csharpFiles(): FileDoc[] {
   ]
 }
 
-function goForeignFile(): FileDoc {
+function rsForeignFile(): FileDoc {
   return {
-    fileId: 'scripts/cs-foreign.go',
-    path: 'scripts/cs-foreign.go',
-    language: 'go',
-    functions: [mkFn(CS_GO, 'foreign', { category: 'utility' })]
+    fileId: 'scripts/cs-foreign.rs',
+    path: 'scripts/cs-foreign.rs',
+    language: 'rust',
+    functions: [mkFn(CS_RS, 'foreign', { category: 'utility' })]
   }
 }
 
@@ -290,7 +290,7 @@ const CPP_RUN = 'src/main.cpp::demo::runWidget@111111111111'
 const CPP_RENDER = 'include/widget.hpp::demo::Widget::render@222222222222'
 const CPP_ADD = 'include/widget.hpp::demo::addValues@333333333333'
 const CPP_PARAM = 'include/widget.hpp::demo::paramMatrix@444444444444'
-const CPP_GO = 'scripts/cpp-foreign.go::-::foreign@666666666666'
+const CPP_RS = 'scripts/cpp-foreign.rs::-::foreign@666666666666'
 
 /** C++ 夹具：命名空间内自由函数 + 类方法 + attribute/注释块/调用边（结构对齐真实解析输出） */
 function cppFiles(): FileDoc[] {
@@ -378,12 +378,12 @@ function cppFiles(): FileDoc[] {
   ]
 }
 
-function cppGoForeignFile(): FileDoc {
+function cppRsForeignFile(): FileDoc {
   return {
-    fileId: 'scripts/cpp-foreign.go',
-    path: 'scripts/cpp-foreign.go',
-    language: 'go',
-    functions: [mkFn(CPP_GO, 'foreign', { category: 'utility' })]
+    fileId: 'scripts/cpp-foreign.rs',
+    path: 'scripts/cpp-foreign.rs',
+    language: 'rust',
+    functions: [mkFn(CPP_RS, 'foreign', { category: 'utility' })]
   }
 }
 
@@ -730,13 +730,132 @@ async function realJavaFixture(): Promise<RealJavaFixture> {
   return realJavaCache
 }
 
+/* ------------------------- 真实 Go 夹具解析 ------------------------- */
+
+const GO_SOURCE = `package app
+
+import (
+    "context"
+    "fmt"
+)
+
+type UserService struct{}
+
+func (s *UserService) ListUsers(page int, names ...string) []string {
+    // 分页读取
+    fmt.Println(page)
+    return s.Fetch(page)
+}
+
+func (s *UserService) Fetch(page int) []string { return nil }
+
+func ParamMatrix(ctx context.Context, ch chan int, fn func(int) error, values map[string]int) {}
+`
+
+interface RealGoFixture {
+  graph: ProjectGraph
+  insight: ProjectInsight
+  fnByName: Map<string, FunctionDoc>
+  files: FileDoc[]
+}
+
+let realGoCache: RealGoFixture | null = null
+
+/** 用默认 Go 解析器解析内联源码，按 generate 管线同口径组装 FunctionDoc 与图谱 */
+async function realGoFixture(): Promise<RealGoFixture> {
+  if (realGoCache) return realGoCache
+  await ensureDefaultParsers()
+  const parser = parserRegistry.forFile('app/service.go')
+  if (!parser) throw new Error('未注册 Go 解析器')
+  const parsed = await parser.parse(GO_SOURCE)
+  const categories: Record<string, FunctionDoc['category']> = {
+    ListUsers: 'business',
+    Fetch: 'implementation',
+    ParamMatrix: 'utility'
+  }
+  const docs: FunctionDoc[] = parsed.functions.map((p) => {
+    const id = makeStableId('app/service.go', p.className, p.name, p.params)
+    return {
+      id,
+      name: p.name,
+      className: p.className,
+      kind: p.kind,
+      signature: p.signature,
+      params: [...p.params],
+      returnType: p.returnType,
+      visibility: p.visibility,
+      decorators: [...p.decorators],
+      exported: p.exported,
+      category: categories[p.name] ?? 'utility',
+      purpose: p.name,
+      docComment: p.docComment,
+      fingerprint: `fp-${p.name}`,
+      startLine: p.startLine,
+      endLine: p.endLine,
+      calls: [],
+      codeBlocks: p.codeBlocks.map((b) => ({ ...b, functionId: id }))
+    }
+  })
+  const byName = new Map<string, FunctionDoc[]>()
+  for (const fn of docs) {
+    const list = byName.get(fn.name) ?? []
+    list.push(fn)
+    byName.set(fn.name, list)
+  }
+  parsed.functions.forEach((p, index) => {
+    const fn = docs[index]
+    const seen = new Set<string>()
+    const calls: CallEdge[] = []
+    for (const site of [...p.callSites].sort((a, b) => a.line - b.line)) {
+      if (seen.has(site.name)) continue
+      seen.add(site.name)
+      const candidates = byName.get(site.name) ?? []
+      const target = candidates.find((c) => c.className === fn.className) ?? candidates[0] ?? null
+      calls.push({
+        callerId: fn.id,
+        calleeName: site.name,
+        stepId: `${fn.id}>${site.name}`,
+        calleeId: target?.id ?? null,
+        calleeCategory: target ? target.category : 'external',
+        role: site.role,
+        line: site.line,
+        calleePurpose: target ? target.purpose : null,
+        ...(target ? {} : { externalModule: site.name === 'Println' ? 'fmt' : null })
+      })
+    }
+    fn.calls = calls
+  })
+  const files: FileDoc[] = [
+    {
+      fileId: 'app/service.go',
+      path: 'app/service.go',
+      language: 'go',
+      functions: docs
+    }
+  ]
+  const graph = buildGraph(files)
+  const insight = baseInsightOf(graph)
+  const list = docs.find((fn) => fn.name === 'ListUsers')!
+  insight.functions[list.id] = {
+    ...insight.functions[list.id],
+    isCore: true,
+    coreSource: 'ai',
+    coreReason: '用户列表入口',
+    aiCategory: 'business',
+    aiCategoryReason: '对外业务接口',
+    systemRole: '用户列表服务入口'
+  }
+  realGoCache = { graph, insight, fnByName: new Map(docs.map((fn) => [fn.name, fn])), files }
+  return realGoCache
+}
+
 const CSHARP_GRAPH = buildGraph(csharpFiles())
-const CSHARP_MIXED_GRAPH = buildGraph([...csharpFiles(), goForeignFile()])
+const CSHARP_MIXED_GRAPH = buildGraph([...csharpFiles(), rsForeignFile()])
 const CS_MOD = CSHARP_GRAPH.modules.find((m) => m.name === 'Services')!.id
 const CS_CHAIN = CSHARP_GRAPH.chains.find((c) => c.entryId === CS_LIST)!.id
 
 const CPP_GRAPH = buildGraph(cppFiles())
-const CPP_MIXED_GRAPH = buildGraph([...cppFiles(), cppGoForeignFile()])
+const CPP_MIXED_GRAPH = buildGraph([...cppFiles(), cppRsForeignFile()])
 const CPP_MOD = CPP_GRAPH.modules.find((m) => m.name === 'include')!.id
 const CPP_CHAIN = CPP_GRAPH.chains.find((c) => c.entryId === CPP_RUN)!.id
 
@@ -888,18 +1007,19 @@ describe('语言判定', () => {
       'include/widget.inl',
       'app/service.py',
       'app/pkg/__init__.py',
-      'app/UserService.java'
+      'app/UserService.java',
+      'app/service.go'
     ]) {
       expect(isGuaranteeLanguageFile(f), f).toBe(true)
     }
-    for (const f of ['a.go', 'a.pyi', 'README']) {
+    for (const f of ['a.rs', 'a.pyi', 'README']) {
       expect(isGuaranteeLanguageFile(f), f).toBe(false)
     }
   })
 
   it('未接入语言对象 → unverified，原因「该语言尚未接入语义担保」', () => {
-    const res = validate('coreRoles', MIX_GO, [
-      claim('intent', MIX_GO, [{ detail: '对照用途。' }], { text: '这是外部脚本。' })
+    const res = validate('coreRoles', MIX_RS, [
+      claim('intent', MIX_RS, [{ detail: '对照用途。' }], { text: '这是外部脚本。' })
     ])
     expect(res.status).toBe('unverified')
     expect(res.reason).toContain('该语言尚未接入语义担保')
@@ -1152,8 +1272,8 @@ describe('变更侧担保（SG3：scope 证据）', () => {
       INSIGHT,
       GRAPH,
       'commit:abc',
-      changesValue({ functions: [MIX_GO] }),
-      guaranteeOf([claim('intent', 'commit:abc', [{ functionId: MIX_GO }], { text: 'Go 函数。' })])
+      changesValue({ functions: [MIX_RS] }),
+      guaranteeOf([claim('intent', 'commit:abc', [{ functionId: MIX_RS }], { text: 'Rust 函数。' })])
     )
     expect(res.status).toBe('unverified')
     expect(res.reason).toContain('尚未接入')
@@ -1265,7 +1385,7 @@ describe('claim / evidence 形状与锚点', () => {
 
   it('subject 引用未接入语言的函数 → unverified（即使 pass 对象是 TS）', () => {
     const res = validate('coreRoles', ALPHA, [
-      claim('intent', MIX_GO, [{ functionId: MIX_GO }], { text: '外部脚本入口。' })
+      claim('intent', MIX_RS, [{ functionId: MIX_RS }], { text: '外部脚本入口。' })
     ])
     expect(res.status).toBe('unverified')
     expect(res.claims[0].status).toBe('unverified')
@@ -1776,7 +1896,7 @@ describe('C# 硬事实静态校验', () => {
     expect(role.status).toBe('declared')
   })
 
-  it('partition / flows：全 C# 项目可 declared；含 .go 时 unverified 且原因含「尚未接入」', () => {
+  it('partition / flows：全 C# 项目可 declared；含 .rs 时 unverified 且原因含「尚未接入」', () => {
     const partition = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'partition', 'root', [
       claim('intent', 'root', [{ moduleId: CS_MOD }], { text: 'C# 项目划分。' })
     ])
@@ -1800,7 +1920,7 @@ describe('C# 硬事实静态校验', () => {
     expect(mixedFlows.reason).toContain('尚未接入')
   })
 
-  it('changes scope 含 C# 函数可 declared；含 .go 函数时 unverified', () => {
+  it('changes scope 含 C# 函数可 declared；含 .rs 函数时 unverified', () => {
     const csValue: AgentSupplyChangesValue = {
       narrative: { what: '调整 C# 用户列表。', why: '测试。', risks: [] },
       changeRoles: { [CS_LIST]: '本次变更的 C# 入口。' }
@@ -1815,15 +1935,15 @@ describe('C# 硬事实静态校验', () => {
     expect(cs.status).toBe('declared')
 
     const javaValue: AgentSupplyChangesValue = {
-      narrative: { what: '调整 Go 脚本。', why: '测试。', risks: [] },
-      changeRoles: { [CS_GO]: '本次变更的 Go 函数。' }
+      narrative: { what: '调整 Rust 脚本。', why: '测试。', risks: [] },
+      changeRoles: { [CS_RS]: '本次变更的 Rust 函数。' }
     }
     const java = validateChangesGuarantee(
       CSHARP_MIXED_INSIGHT,
       CSHARP_MIXED_GRAPH,
-      'commit:go',
+      'commit:rs',
       javaValue,
-      guaranteeOf([claim('intent', 'commit:go', [{ functionId: CS_GO }], { text: 'Go 变更意图。' })])
+      guaranteeOf([claim('intent', 'commit:rs', [{ functionId: CS_RS }], { text: 'Rust 变更意图。' })])
     )
     expect(java.status).toBe('unverified')
     expect(java.reason).toContain('尚未接入')
@@ -1994,7 +2114,7 @@ describe('C++ 硬事实静态校验', () => {
     expect(role.status).toBe('declared')
   })
 
-  it('partition / flows：全 C++ 与 TS+C++ 可 declared；含 .go 时 unverified', () => {
+  it('partition / flows：全 C++ 与 TS+C++ 可 declared；含 .rs 时 unverified', () => {
     const partition = validateOn(CPP_INSIGHT, CPP_GRAPH, 'partition', 'root', [
       claim('intent', 'root', [{ moduleId: CPP_MOD }], { text: 'C++ 项目划分。' })
     ])
@@ -2037,7 +2157,7 @@ describe('C++ 硬事实静态校验', () => {
     expect(mixedFlows.reason).toContain('尚未接入')
   })
 
-  it('changes scope 含 C++ 函数可 declared；含 .go 函数时 unverified', () => {
+  it('changes scope 含 C++ 函数可 declared；含 .rs 函数时 unverified', () => {
     const cppValue: AgentSupplyChangesValue = {
       narrative: { what: '调整 C++ 示例入口。', why: '测试。', risks: [] },
       changeRoles: { [CPP_RUN]: '本次变更的 C++ 入口。' }
@@ -2052,15 +2172,15 @@ describe('C++ 硬事实静态校验', () => {
     expect(cpp.status).toBe('declared')
 
     const javaValue: AgentSupplyChangesValue = {
-      narrative: { what: '调整 Go 脚本。', why: '测试。', risks: [] },
-      changeRoles: { [CPP_GO]: '本次变更的 Go 函数。' }
+      narrative: { what: '调整 Rust 脚本。', why: '测试。', risks: [] },
+      changeRoles: { [CPP_RS]: '本次变更的 Rust 函数。' }
     }
     const java = validateChangesGuarantee(
       CPP_MIXED_INSIGHT,
       CPP_MIXED_GRAPH,
-      'commit:go',
+      'commit:rs',
       javaValue,
-      guaranteeOf([claim('intent', 'commit:go', [{ functionId: CPP_GO }], { text: 'Go 变更意图。' })])
+      guaranteeOf([claim('intent', 'commit:rs', [{ functionId: CPP_RS }], { text: 'Rust 变更意图。' })])
     )
     expect(java.status).toBe('unverified')
     expect(java.reason).toContain('尚未接入')
@@ -2210,7 +2330,7 @@ describe('Python 硬事实静态校验', () => {
     expect(role.status).toBe('declared')
   })
 
-  it('partition / flows：全 Python 与 TS+Python 可 declared；含 .go 时 unverified', () => {
+  it('partition / flows：全 Python 与 TS+Python 可 declared；含 .rs 时 unverified', () => {
     const partition = validateOn(PY_INSIGHT, PY_GRAPH, 'partition', 'root', [
       claim('intent', 'root', [{ moduleId: PY_MOD }], { text: 'Python 项目划分。' })
     ])
@@ -2240,17 +2360,17 @@ describe('Python 硬事实静态校验', () => {
     ])
     expect(tsPyFlows.status).toBe('declared')
 
-    const withGo = buildGraph([...pyFiles(), goForeignFile()])
-    const withGoInsight = baseInsightOf(withGo)
-    const blocked = validateOn(withGoInsight, withGo, 'partition', 'root', [
-      claim('intent', 'root', [{ moduleId: withGo.modules[0].id }], { text: '混合项目划分。' })
+    const withRust = buildGraph([...pyFiles(), rsForeignFile()])
+    const withRustInsight = baseInsightOf(withRust)
+    const blocked = validateOn(withRustInsight, withRust, 'partition', 'root', [
+      claim('intent', 'root', [{ moduleId: withRust.modules[0].id }], { text: '混合项目划分。' })
     ])
     expect(blocked.status).toBe('unverified')
     expect(blocked.reason).toContain('项目级混合对象')
     expect(blocked.reason).toContain('尚未接入')
   })
 
-  it('changes scope 含 Python 函数可 declared；含 .go 仍 unverified', () => {
+  it('changes scope 含 Python 函数可 declared；含 .rs 仍 unverified', () => {
     const value: AgentSupplyChangesValue = {
       narrative: { what: '调整 Python 用户列表。', why: '测试。', risks: [] },
       changeRoles: { [PY_LIST]: '本次变更的 Python 方法。' }
@@ -2265,16 +2385,16 @@ describe('Python 硬事实静态校验', () => {
     expect(py.status).toBe('declared')
 
     const goValue: AgentSupplyChangesValue = {
-      narrative: { what: '调整 Go 脚本。', why: '测试。', risks: [] },
-      changeRoles: { [CS_GO]: '本次变更的 Go 函数。' }
+      narrative: { what: '调整 Rust 脚本。', why: '测试。', risks: [] },
+      changeRoles: { [CS_RS]: '本次变更的 Rust 函数。' }
     }
-    const mixed = buildGraph([...pyFiles(), goForeignFile()])
+    const mixed = buildGraph([...pyFiles(), rsForeignFile()])
     const go = validateChangesGuarantee(
       baseInsightOf(mixed),
       mixed,
-      'commit:go',
+      'commit:rs',
       goValue,
-      guaranteeOf([claim('intent', 'commit:go', [{ functionId: CS_GO }], { text: 'Go 变更意图。' })])
+      guaranteeOf([claim('intent', 'commit:rs', [{ functionId: CS_RS }], { text: 'Rust 变更意图。' })])
     )
     expect(go.status).toBe('unverified')
     expect(go.reason).toContain('尚未接入')
@@ -2282,6 +2402,104 @@ describe('Python 硬事实静态校验', () => {
 })
 
 /* ------------------------- 真实 C# 夹具（解析 → 担保） ------------------------- */
+
+describe('真实 Go 项目解析 → 建图 → 担保集成', () => {
+  it('参数/可见性/内部调用/外部 import 取自真实解析', async () => {
+    const { fnByName } = await realGoFixture()
+    const list = fnByName.get('ListUsers')!
+    expect(list.params).toEqual(['page int', 'names ...string'])
+    expect(list.visibility).toBe('public')
+    const fetch = fnByName.get('Fetch')!
+    expect(list.calls.find((c) => c.calleeName === 'Fetch')?.calleeId).toBe(fetch.id)
+    expect(list.calls.find((c) => c.calleeName === 'Println')?.externalModule).toBe('fmt')
+    expect(fnByName.get('ParamMatrix')!.params).toEqual([
+      'ctx context.Context',
+      'ch chan int',
+      'fn func(int) error',
+      'values map[string]int'
+    ])
+  })
+
+  it('Go type/visibility/category/call/external 可 declared；参数名失败', async () => {
+    const { graph, insight, fnByName } = await realGoFixture()
+    const list = fnByName.get('ListUsers')!
+    const matrix = fnByName.get('ParamMatrix')!
+    const run = (fn: FunctionDoc, kind: SemanticClaimKind, object: string) =>
+      validateOn(insight, graph, 'coreRoles', fn.id, [
+        claim(kind, fn.id, [{ functionId: fn.id }], { object })
+      ])
+    for (const object of ['int', '...string']) {
+      expect(run(list, 'type', object).status, `应通过：${object}`).toBe('declared')
+    }
+    for (const object of ['page', 'names', 'page int']) {
+      expect(run(list, 'type', object).claims[0].staticStatus, `应失败：${object}`).toBe('fail')
+    }
+    for (const object of ['context.Context', 'chan int', 'func(int) error', 'map[string]int']) {
+      expect(run(matrix, 'type', object).status, `应通过：${object}`).toBe('declared')
+    }
+    for (const object of ['ctx', 'ch', 'fn', 'values']) {
+      expect(run(matrix, 'type', object).claims[0].staticStatus, `应失败：${object}`).toBe('fail')
+    }
+    expect(run(list, 'visibility', 'public').status).toBe('declared')
+    const category = validateOn(insight, graph, 'categories', list.id, [
+      claim('category', list.id, [{ functionId: list.id }], { object: 'business' })
+    ])
+    expect(category.status).toBe('declared')
+    const fetch = fnByName.get('Fetch')!
+    const call = validateOn(insight, graph, 'coreRoles', list.id, [
+      claim('call', list.id, [{ stepId: `${list.id}>Fetch` }], { object: fetch.id })
+    ])
+    expect(call.status).toBe('declared')
+    const external = validateOn(insight, graph, 'coreRoles', list.id, [
+      claim('external', list.id, [{ stepId: `${list.id}>Println` }], { object: 'fmt::Println' })
+    ])
+    expect(external.status).toBe('declared')
+  })
+
+  it('Go 项目级对象与 changes scope 可 declared', async () => {
+    const { graph, insight, fnByName } = await realGoFixture()
+    const list = fnByName.get('ListUsers')!
+    const partition = validateOn(insight, graph, 'partition', 'root', [
+      claim('intent', 'root', [{ moduleId: graph.modules[0].id }], { text: 'Go 项目划分。' })
+    ])
+    expect(partition.status).toBe('declared')
+
+    const chain = graph.chains.find((c) => c.entryId === list.id)
+    if (chain) {
+      const flowNode: FlowNode = {
+        id: 'flow:0',
+        parentId: null,
+        label: 'Go 入口',
+        summary: '',
+        order: 0,
+        kind: 'leaf',
+        depth: 0,
+        relatedModuleIds: [],
+        relatedFunctionIds: [list.id],
+        relatedChainIds: [chain.id],
+        source: 'ai',
+        reason: '',
+        children: []
+      }
+      insight.flows = [flowNode]
+      const flows = validateOn(insight, graph, 'flows', 'root', [
+        claim('intent', 'root', [{ chainId: chain.id }], { text: 'Go 脉络。' })
+      ])
+      expect(flows.status).toBe('declared')
+    }
+
+    const changes = validateChangesGuarantee(
+      insight,
+      graph,
+      'commit:go',
+      { changeRoles: { [list.id]: 'Go 变更' } },
+      guaranteeOf([
+        claim('intent', 'commit:go', [{ functionId: list.id }], { text: 'Go 变更意图。' })
+      ])
+    )
+    expect(changes.status).toBe('declared')
+  })
+})
 
 describe('真实 Java 项目解析 → 建图 → 担保集成', () => {
   it('注解/final/泛型/可见性/调用边取自真实解析', async () => {
@@ -3182,12 +3400,12 @@ describe('Vue SFC 担保', () => {
     ])
     expect(flows.status).toBe('declared')
 
-    const withGo = buildGraph([...tsFiles, ...vue.files, goForeignFile()])
-    const withGoInsight = baseInsightOf(withGo)
-    const vueMod = withGo.modules.find((m) =>
+    const withRust = buildGraph([...tsFiles, ...vue.files, rsForeignFile()])
+    const withRustInsight = baseInsightOf(withRust)
+    const vueMod = withRust.modules.find((m) =>
       m.functionIds.some((id) => id.startsWith(VUE_SETUP_FILE))
     )!
-    const blocked = validateOn(withGoInsight, withGo, 'partition', 'root', [
+    const blocked = validateOn(withRustInsight, withRust, 'partition', 'root', [
       claim('containment', vueMod.id, [{ moduleId: vueMod.id }], {
         object: vueMod.functionIds.find((id) => id.startsWith(VUE_SETUP_FILE))!,
         text: '划分模块包含 Vue 函数。'

@@ -22,7 +22,7 @@ import type { ProjectGraph } from './graph.js'
 
 /**
  * SG1：语义担保的静态证据校验
- * （已接入语言：TypeScript / JavaScript / TSX / JSX、C#、Vue SFC、C++、Python、Java）。
+ * （已接入语言：TypeScript / JavaScript / TSX / JSX、C#、Vue SFC、C++、Python、Java、Go）。
  *
  * 本模块只依赖 shared-types 与 graph.js（禁止 import agentSupply / supplyCache）：
  * - agentSupply.ts 负责供给文件的结构/长度校验并挂载 guarantee；
@@ -31,7 +31,7 @@ import type { ProjectGraph } from './graph.js'
  * - 本模块不调用 LLM（KEY 第二遍复核见 semanticVerifier.ts），也不做前端展示。
  *
  * 已接入语言：.ts / .tsx / .js / .jsx / .mjs / .cjs / .cs / .vue /
- * .cpp / .cc / .cxx / .h / .hpp / .hh / .hxx / .inl / .py / .java。
+ * .cpp / .cc / .cxx / .h / .hpp / .hh / .hxx / .inl / .py / .java / .go。
  * Vue 的 script 函数复用 TS/JS 证据（签名/参数/返回类型/可见性/装饰器/调用/注释块）；
  * 合成 `[template]` 入口的调用边来自模板事件，`block` claim 不适用（模板节点没有函数体）。
  * C++ 复用通用证据包：attributes → decorators、命名空间/类编码在 className、quoted include
@@ -62,7 +62,8 @@ const GUARANTEE_LANGUAGE_EXTENSIONS = new Set([
   'hxx',
   'inl',
   'py',
-  'java'
+  'java',
+  'go'
 ])
 const UNSUPPORTED_LANGUAGE_REASON = '该语言尚未接入语义担保'
 const MIXED_PROJECT_REASON = '项目级混合对象包含尚未接入语义担保的文件'
@@ -139,7 +140,7 @@ export function fileIdOfFunctionId(functionId: string): string | null {
   return at > 0 ? functionId.slice(0, at) : null
 }
 
-/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C# + Vue SFC + C++ + Python + Java，按文件扩展名判定） */
+/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C# + Vue SFC + C++ + Python + Java + Go，按文件扩展名判定） */
 export function isGuaranteeLanguageFile(fileId: string): boolean {
   const lower = fileId.toLowerCase()
   const dot = lower.lastIndexOf('.')
@@ -148,7 +149,7 @@ export function isGuaranteeLanguageFile(fileId: string): boolean {
 }
 
 /** 按扩展名判定参数/类型口径的语言（仅影响参数类型提取；未知语言保持 TS 冒号口径） */
-type ParamTypeLanguage = 'js' | 'csharp' | 'cpp' | 'python' | 'java'
+type ParamTypeLanguage = 'js' | 'csharp' | 'cpp' | 'python' | 'java' | 'go'
 
 const CPP_TYPE_EXTENSIONS = new Set(['cpp', 'cc', 'cxx', 'h', 'hpp', 'hh', 'hxx', 'inl'])
 
@@ -161,6 +162,7 @@ function paramTypeLanguageOf(fileId: string | null): ParamTypeLanguage {
   if (ext === 'cs') return 'csharp'
   if (ext === 'py') return 'python'
   if (ext === 'java') return 'java'
+  if (ext === 'go') return 'go'
   if (CPP_TYPE_EXTENSIONS.has(ext)) return 'cpp'
   return 'js'
 }
@@ -1121,15 +1123,38 @@ function javaParamTypeText(param: string): string {
   return type.length > 0 ? type : text
 }
 
+/** Go 中不能作为参数名的类型关键字（用于区分 `name chan int` 与未命名 `chan int`） */
+const GO_TYPE_KEYWORDS = new Set(['chan', 'func', 'map', 'interface', 'struct'])
+
+/**
+ * Go 参数声明 → 参数类型：Go 是 `name type`，类型可在右侧包含空格
+ * （`chan int` / `func(int) error` / `map[string]int`），因此在顶层找**第一个**空白，右侧为类型。
+ * 未命名参数（`int` / `context.Context` / `chan int` / `[]byte`）没有「简单标识符 + 空白」形态，整体作类型。
+ * 例：`page int`→`int`；`ctx context.Context`→`context.Context`；`args ...string`→`...string`；
+ * `ch chan int`→`chan int`；`fn func(int) error`→`func(int) error`。
+ */
+function goParamTypeText(param: string): string {
+  const text = normalizeTypeText(param)
+  let firstSpace = -1
+  scanTopLevel(text, (i, ch) => {
+    if (firstSpace < 0 && /\s/.test(ch)) firstSpace = i
+  })
+  if (firstSpace < 0) return text
+  const head = text.slice(0, firstSpace)
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(head) || GO_TYPE_KEYWORDS.has(head)) return text
+  return text.slice(firstSpace + 1).trim()
+}
+
 /**
  * 取参数的类型段：TypeScript / JavaScript（含 Vue）保持冒号后类型；
- * C#（`.cs`）、C++（`.cpp/.h/...`）、Python（`.py`）与 Java（`.java`）按参数声明提取类型，参数名不会被当作类型。
+ * C#（`.cs`）、C++（`.cpp/.h/...`）、Python（`.py`）、Java（`.java`）与 Go（`.go`）按参数声明提取类型，参数名不会被当作类型。
  */
 function paramTypeText(param: string, language: ParamTypeLanguage): string {
   if (language === 'csharp') return csharpParamTypeText(param)
   if (language === 'cpp') return cppParamTypeText(param)
   if (language === 'python') return pythonParamTypeText(param)
   if (language === 'java') return javaParamTypeText(param)
+  if (language === 'go') return goParamTypeText(param)
   const at = param.indexOf(':')
   return at >= 0 ? param.slice(at + 1) : param
 }
