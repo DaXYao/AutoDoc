@@ -21,7 +21,8 @@ import type {
 import type { ProjectGraph } from './graph.js'
 
 /**
- * SG1：语义担保的静态证据校验（已接入语言：TypeScript / JavaScript / TSX、C#）。
+ * SG1：语义担保的静态证据校验
+ * （已接入语言：TypeScript / JavaScript / TSX / JSX、C#、Vue SFC）。
  *
  * 本模块只依赖 shared-types 与 graph.js（禁止 import agentSupply / supplyCache）：
  * - agentSupply.ts 负责供给文件的结构/长度校验并挂载 guarantee；
@@ -29,12 +30,14 @@ import type { ProjectGraph } from './graph.js'
  *   applyAgentGuaranteesToInsight，把担保结果写入 insight.semanticGuarantees；
  * - 本模块不调用 LLM（KEY 第二遍复核见 semanticVerifier.ts），也不做前端展示。
  *
- * 已接入语言：.ts / .tsx / .js / .jsx / .mjs / .cjs / .cs。
+ * 已接入语言：.ts / .tsx / .js / .jsx / .mjs / .cjs / .cs / .vue。
+ * Vue 的 script 函数复用 TS/JS 证据（签名/参数/返回类型/可见性/装饰器/调用/注释块）；
+ * 合成 `[template]` 入口的调用边来自模板事件，`block` claim 不适用（模板节点没有函数体）。
  * 未接入语言、项目级混合对象一律 unverified（原因「该语言尚未接入语义担保」），不阻塞合并。
  */
 
 /** 已接入语义担保的文件扩展名 */
-const GUARANTEE_LANGUAGE_EXTENSIONS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'cs'])
+const GUARANTEE_LANGUAGE_EXTENSIONS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'cs', 'vue'])
 const UNSUPPORTED_LANGUAGE_REASON = '该语言尚未接入语义担保'
 const MIXED_PROJECT_REASON = '项目级混合对象包含尚未接入语义担保的文件'
 /** import 静态校验（import 语句/模块解析）尚未接入：允许 claim，但只能停在未证实 */
@@ -110,7 +113,7 @@ export function fileIdOfFunctionId(functionId: string): string | null {
   return at > 0 ? functionId.slice(0, at) : null
 }
 
-/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C#，按文件扩展名判定） */
+/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C# + Vue SFC，按文件扩展名判定） */
 export function isGuaranteeLanguageFile(fileId: string): boolean {
   const lower = fileId.toLowerCase()
   const dot = lower.lastIndexOf('.')

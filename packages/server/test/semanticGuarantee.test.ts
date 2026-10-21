@@ -18,7 +18,14 @@ import type {
   SemanticEvidence
 } from '@autodoc/shared-types'
 import { buildGraph, type ProjectGraph } from '../src/graph.js'
-import { ensureDefaultParsers, makeStableId, parserRegistry } from '@autodoc/core'
+import {
+  createStorage,
+  ensureDefaultParsers,
+  generateDocs,
+  loadConfig,
+  makeStableId,
+  parserRegistry
+} from '@autodoc/core'
 import { flowsBasis } from '../src/flow.js'
 import { AiCache } from '../src/aiCache.js'
 // 注意 import 顺序：supplyCache 必须在 agentSupply 之前（agentSupply → insight → supplyCache 的循环里，
@@ -492,11 +499,21 @@ function validate(
 /* ------------------------- 基础语言判定 ------------------------- */
 
 describe('语言判定', () => {
-  it('按扩展名识别已接入语言（TS/JS/TSX、C#）与未接入语言', () => {
-    for (const f of ['a.ts', 'a.tsx', 'a.js', 'a.jsx', 'a.mjs', 'a.cjs', 'dir/b.d.ts', 'Services/UserService.cs']) {
+  it('按扩展名识别已接入语言（TS/JS/TSX、C#、Vue SFC）与未接入语言', () => {
+    for (const f of [
+      'a.ts',
+      'a.tsx',
+      'a.js',
+      'a.jsx',
+      'a.mjs',
+      'a.cjs',
+      'dir/b.d.ts',
+      'Services/UserService.cs',
+      'packages/web/src/components/SampleCard.vue'
+    ]) {
       expect(isGuaranteeLanguageFile(f), f).toBe(true)
     }
-    for (const f of ['a.vue', 'a.cpp', 'a.py', 'a.java', 'a.go', 'README']) {
+    for (const f of ['a.cpp', 'a.py', 'a.java', 'a.go', 'README']) {
       expect(isGuaranteeLanguageFile(f), f).toBe(false)
     }
   })
@@ -1570,6 +1587,240 @@ describe('真实 C# 夹具解析 → 担保集成', () => {
     )
     expect(ext.status).toBe('unverified')
     expect(ext.reason).toContain('不在当前图谱的外部符号集中')
+  })
+})
+
+/* ------------------------- 真实 Vue SFC 解析 ------------------------- */
+
+const VUE_SETUP_FILE = 'packages/web/src/components/SampleCard.vue'
+const VUE_OPTIONS_FILE = 'packages/web/src/components/OptionsForm.vue'
+
+const VUE_SETUP_SOURCE = `<script setup lang="ts">
+import { fetchUser } from './api'
+
+function handleClick(event: MouseEvent): void {
+  // 记录点击
+  event.stopPropagation()
+}
+
+const handleSave = async (): Promise<void> => {
+  await fetchUser(1)
+}
+</script>
+
+<template>
+  <button @click="handleClick">a</button>
+  <button @click="handleSave($event)">b</button>
+</template>
+`
+
+const VUE_OPTIONS_SOURCE = `<script lang="ts">
+export default {
+  methods: {
+    submit(): void {}
+  }
+}
+</script>
+
+<template>
+  <form @submit.prevent="submit"></form>
+</template>
+`
+
+interface RealVueFixture {
+  graph: ProjectGraph
+  insight: ProjectInsight
+  files: FileDoc[]
+  /** `${fileId}#${函数名}` → 函数（同一文件多个 `[template]` 不会互相覆盖） */
+  fnByKey: Map<string, FunctionDoc>
+}
+
+let realVueCache: RealVueFixture | null = null
+
+/**
+ * 用默认 Vue 解析器 + generate 管线解析真实 SFC（setup / Options API），
+ * 模板事件调用边、稳定 ID、`[component]` 类名全部来自真实解析结果。
+ */
+async function realVueFixture(): Promise<RealVueFixture> {
+  if (realVueCache) return realVueCache
+  const dir = freshDir('autodoc-sg1-vue-')
+  mkdirSync(join(dir, 'packages/web/src/components'), { recursive: true })
+  writeFileSync(join(dir, VUE_SETUP_FILE), VUE_SETUP_SOURCE, 'utf-8')
+  writeFileSync(join(dir, VUE_OPTIONS_FILE), VUE_OPTIONS_SOURCE, 'utf-8')
+  const configPath = join(dir, 'autodoc.config.json')
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      include: ['packages/web/src/**/*.vue'],
+      storage: { type: 'json', path: join(dir, 'autodoc.json') }
+    }),
+    'utf-8'
+  )
+  const normalized = await loadConfig(dir, configPath)
+  const storage = createStorage({ type: 'json', path: join(dir, 'autodoc.json') }, dir)
+  storage.init()
+  const { files } = await generateDocs({ rootDir: dir, normalized, storage })
+  storage.close()
+
+  const graph = buildGraph(files)
+  const insight = baseInsightOf(graph)
+  const fnByKey = new Map(
+    files.flatMap((file) => file.functions.map((fn) => [`${file.fileId}#${fn.name}`, fn] as const))
+  )
+  const click = fnByKey.get(`${VUE_SETUP_FILE}#handleClick`)!
+  const template = fnByKey.get(`${VUE_SETUP_FILE}#[template]`)!
+  const submit = fnByKey.get(`${VUE_OPTIONS_FILE}#submit`)!
+  insight.functions[click.id] = {
+    ...insight.functions[click.id],
+    aiCategory: 'business',
+    aiCategoryReason: '模板点击业务入口',
+    systemRole: '点击交互入口'
+  }
+  insight.functions[template.id] = {
+    ...insight.functions[template.id],
+    aiCategory: 'business',
+    aiCategoryReason: '模板事件分发入口',
+    systemRole: '模板事件分发'
+  }
+  insight.functions[submit.id] = {
+    ...insight.functions[submit.id],
+    aiCategory: 'implementation',
+    aiCategoryReason: '表单提交实现'
+  }
+  realVueCache = { graph, insight, files, fnByKey }
+  return realVueCache
+}
+
+/* ------------------------- Vue SFC 担保 ------------------------- */
+
+describe('Vue SFC 担保', () => {
+  it('模板事件调用边（[template] → script 函数）可作为 call claim 的 stepId 证据', async () => {
+    const { graph, insight, fnByKey } = await realVueFixture()
+    const template = fnByKey.get(`${VUE_SETUP_FILE}#[template]`)!
+    const click = fnByKey.get(`${VUE_SETUP_FILE}#handleClick`)!
+    const edge = template.calls.find((c) => c.calleeId === click.id)
+    expect(edge, '[template] 应解析出指向 handleClick 的模板调用边').toBeTruthy()
+    expect(edge!.stepId).toBe(`${template.id}>handleClick`)
+    expect(edge!.line).toBeGreaterThan(0)
+
+    const res = validateOn(insight, graph, 'categories', template.id, [
+      claim('call', template.id, [{ stepId: edge!.stepId }], {
+        object: click.id,
+        text: '模板点击事件调用 handleClick。'
+      })
+    ])
+    expect(res.status).toBe('declared')
+    expect(res.claims[0].staticStatus).toBe('pass')
+  })
+
+  it('script 函数与合成 [template] 的 categories / coreRoles 可 declared', async () => {
+    const { graph, insight, fnByKey } = await realVueFixture()
+    const click = fnByKey.get(`${VUE_SETUP_FILE}#handleClick`)!
+    const template = fnByKey.get(`${VUE_SETUP_FILE}#[template]`)!
+    const submit = fnByKey.get(`${VUE_OPTIONS_FILE}#submit`)!
+
+    // script setup 函数：category + 参数类型（MouseEvent 来自真实签名）
+    const clickGuarantee = validateOn(insight, graph, 'categories', click.id, [
+      claim('category', click.id, [{ functionId: click.id }], { object: 'business' }),
+      claim('type', click.id, [{ functionId: click.id }], { object: 'MouseEvent' })
+    ])
+    expect(clickGuarantee.status).toBe('declared')
+
+    // 合成 [template]：没有函数体，但对象级 category / role 仍可担保
+    const templateCategory = validateOn(insight, graph, 'categories', template.id, [
+      claim('category', template.id, [{ functionId: template.id }], { object: 'business' })
+    ])
+    expect(templateCategory.status).toBe('declared')
+    const chain = graph.chains.find((c) => c.path.includes(template.id))!
+    expect(chain).toBeTruthy()
+    const templateRole = validateOn(insight, graph, 'coreRoles', template.id, [
+      claim('role', template.id, [{ functionId: template.id }, { chainId: chain.id }], {
+        object: chain.id
+      }),
+      claim('intent', template.id, [{ functionId: template.id }], {
+        text: '模板事件分发入口。'
+      })
+    ])
+    expect(templateRole.status).toBe('declared')
+
+    // Options API methods：className 为 [component]，稳定 ID 不做特殊处理
+    expect(submit.className).toBe('[component]')
+    expect(submit.id).toContain('OptionsForm.vue::[component]::submit@')
+    const optionsGuarantee = validateOn(insight, graph, 'categories', submit.id, [
+      claim('category', submit.id, [{ functionId: submit.id }], { object: 'implementation' }),
+      claim('visibility', submit.id, [{ functionId: submit.id }], { object: submit.visibility })
+    ])
+    expect(optionsGuarantee.status).toBe('declared')
+  })
+
+  it('[template] 没有函数体：block claim 不适用（无注释块 → 未证实）', async () => {
+    const { graph, insight, fnByKey } = await realVueFixture()
+    const template = fnByKey.get(`${VUE_SETUP_FILE}#[template]`)!
+    expect(template.codeBlocks).toEqual([])
+    const res = validateOn(insight, graph, 'categories', template.id, [
+      claim('block', template.id, [{ functionId: template.id }], { object: '0' })
+    ])
+    expect(res.status).toBe('unverified')
+    expect(res.claims[0].staticStatus).toBe('fail')
+    expect(res.reason).toContain('没有注释块')
+  })
+
+  it('变更侧 scope 接受 .vue 函数', async () => {
+    const { graph, insight, fnByKey } = await realVueFixture()
+    const click = fnByKey.get(`${VUE_SETUP_FILE}#handleClick`)!
+    const scopeId = 'workspace:2026-10-21'
+    const value: AgentSupplyChangesValue = {
+      changeRoles: { [click.id]: '本次变更调整模板点击处理。' }
+    }
+    const res = validateChangesGuarantee(
+      insight,
+      graph,
+      scopeId,
+      value,
+      guaranteeOf([
+        claim('intent', scopeId, [{ functionId: click.id }], {
+          text: '本次变更调整模板点击处理。'
+        })
+      ])
+    )
+    expect(res.status).toBe('declared')
+    expect(res.claims[0].staticStatus).toBe('not-applicable')
+  })
+
+  it('混合 TS + Vue 项目：partition / flows 可 declared；加入 .py 仍 unverified', async () => {
+    const vue = await realVueFixture()
+    const tsFiles = fixtureFiles().filter((f) => isGuaranteeLanguageFile(f.fileId))
+    const mixed = buildGraph([...tsFiles, ...vue.files])
+    const mixedInsight = baseInsightOf(mixed)
+    const mod = mixed.modules.find((m) => m.functionIds.some((id) => id.startsWith(VUE_SETUP_FILE)))!
+    expect(mod).toBeTruthy()
+    const target = mod.functionIds.find((id) => id.startsWith(VUE_SETUP_FILE))!
+
+    const partition = validateOn(mixedInsight, mixed, 'partition', 'root', [
+      claim('containment', mod.id, [{ moduleId: mod.id }], {
+        object: target,
+        text: '划分模块包含 Vue 函数。'
+      })
+    ])
+    expect(partition.status).toBe('declared')
+    const flows = validateOn(mixedInsight, mixed, 'flows', 'root', [
+      claim('intent', mod.id, [{ moduleId: mod.id }], { text: '前端交互主线。' })
+    ])
+    expect(flows.status).toBe('declared')
+
+    const withPython = buildGraph([...tsFiles, ...vue.files, csharpPythonFile()])
+    const withPythonInsight = baseInsightOf(withPython)
+    const pythonMod = withPython.modules.find((m) =>
+      m.functionIds.some((id) => id.startsWith(VUE_SETUP_FILE))
+    )!
+    const blocked = validateOn(withPythonInsight, withPython, 'partition', 'root', [
+      claim('containment', pythonMod.id, [{ moduleId: pythonMod.id }], {
+        object: pythonMod.functionIds.find((id) => id.startsWith(VUE_SETUP_FILE))!,
+        text: '划分模块包含 Vue 函数。'
+      })
+    ])
+    expect(blocked.status).toBe('unverified')
+    expect(blocked.reason).toContain('尚未接入')
   })
 })
 

@@ -45,6 +45,9 @@ const DELTA = 'py/foreign.py::-::delta@dddddddddddd'
 const CS_LIST = 'Services/UserService.cs::UserService::ListUsers@111111111111'
 const CS_FETCH = 'Services/UserService.cs::IRepository::Fetch@222222222222'
 const CS_NAME = 'Services/UserService.cs::UserService::ComputeName@333333333333'
+const VUE_FILE = 'packages/web/src/components/SampleCard.vue'
+const VUE_CLICK = 'packages/web/src/components/SampleCard.vue::-::handleClick@vvvvvvvvvvvv'
+const VUE_TEMPLATE = 'packages/web/src/components/SampleCard.vue::-::[template]@tttttttttttt'
 const EXTERNAL_ID = 'node:fs::readFile'
 
 const workDirs: string[] = []
@@ -118,7 +121,7 @@ function mkFn(id: string, name: string, opts: Partial<FunctionDoc> = {}): Functi
   }
 }
 
-function fixtureFiles(includePython = false, includeCsharp = false): FileDoc[] {
+function fixtureFiles(includePython = false, includeCsharp = false, includeVue = false): FileDoc[] {
   const alpha = mkFn(ALPHA, 'alpha', {
     signature: 'alpha(req: Request): Promise<Result>',
     params: ['req: Request'],
@@ -198,6 +201,35 @@ function fixtureFiles(includePython = false, includeCsharp = false): FileDoc[] {
       path: 'Services/UserService.cs',
       language: 'csharp',
       functions: [listUsers, fetch, computeName]
+    })
+  }
+  if (includeVue) {
+    // .vue：script 函数复用 TS 证据；[template] 是模板事件调用边的合成入口（无函数体）
+    const template = mkFn(VUE_TEMPLATE, '[template]', {
+      signature: '[template]()',
+      visibility: 'module-local',
+      exported: false,
+      category: 'business',
+      startLine: 15,
+      endLine: 21,
+      calls: [mkCall(VUE_TEMPLATE, VUE_CLICK, 'handleClick', 17)]
+    })
+    const click = mkFn(VUE_CLICK, 'handleClick', {
+      signature: 'handleClick(event: MouseEvent): void',
+      params: ['event: MouseEvent'],
+      returnType: 'void',
+      visibility: 'module-local',
+      exported: false,
+      category: 'business',
+      startLine: 5,
+      endLine: 8,
+      codeBlocks: [mkBlock(VUE_CLICK, 6, 7, 'event.stopPropagation()')]
+    })
+    files.push({
+      fileId: VUE_FILE,
+      path: VUE_FILE,
+      language: 'vue',
+      functions: [click, template]
     })
   }
   return files
@@ -291,10 +323,13 @@ interface Fixture {
 function fullFixture(opts: {
   includePython?: boolean
   includeCsharp?: boolean
+  includeVue?: boolean
   withFlows?: boolean
   partitionSource?: 'ai' | 'dir'
 } = {}): Fixture {
-  const graph = buildGraph(fixtureFiles(opts.includePython === true, opts.includeCsharp === true))
+  const graph = buildGraph(
+    fixtureFiles(opts.includePython === true, opts.includeCsharp === true, opts.includeVue === true)
+  )
   // graph 的目录划分描述为空；模拟本地 AI 划分写入模块职责
   for (const mod of graph.modules) {
     mod.description = `模块 ${mod.name} 的职责`
@@ -352,6 +387,29 @@ function fullFixture(opts: {
       systemRole: '用户列表服务入口',
       keyCallIndexes: [0],
       internalSteps: []
+    }
+  }
+  if (functions[VUE_CLICK]) {
+    functions[VUE_CLICK] = {
+      ...functions[VUE_CLICK],
+      isCore: false,
+      coreSource: 'ai',
+      coreReason: '模板点击回调',
+      aiCategory: 'business',
+      aiCategoryReason: '点击交互入口',
+      systemRole: '点击交互入口',
+      internalSteps: []
+    }
+  }
+  if (functions[VUE_TEMPLATE]) {
+    functions[VUE_TEMPLATE] = {
+      ...functions[VUE_TEMPLATE],
+      isCore: false,
+      coreSource: 'ai',
+      coreReason: '模板事件分发',
+      aiCategory: 'business',
+      aiCategoryReason: '模板事件分发入口',
+      systemRole: '模板事件分发'
     }
   }
 
@@ -1805,6 +1863,36 @@ describe('SG2 跳过规则', () => {
     expect(insight.semanticGuarantees?.[`coreRoles:${CS_LIST}`]?.status).toBe('verified')
     expect(insight.semanticGuarantees?.[`categories:${DELTA}`]).toBeUndefined()
     expect(stats.skippedNonTs).toBe(1)
+  })
+
+  it('Vue SFC 对象参与担保：script 函数与合成 [template] 都能 verified；无 AI 内容不生成', async () => {
+    const { graph, insight } = fullFixture({ includeVue: true, withFlows: false })
+    mockAuto()
+    const stats = await attachKeyGuarantees(insight, graph, new AiCache(freshDir()))
+    expect(insight.semanticGuarantees?.[`categories:${VUE_CLICK}`]?.status).toBe('verified')
+    expect(insight.semanticGuarantees?.[`coreRoles:${VUE_CLICK}`]?.status).toBe('verified')
+    // [template] 没有函数体，但对象级 category / role 仍可由 KEY 生成担保
+    expect(insight.semanticGuarantees?.[`categories:${VUE_TEMPLATE}`]?.status).toBe('verified')
+    expect(insight.semanticGuarantees?.[`coreRoles:${VUE_TEMPLATE}`]?.status).toBe('verified')
+    expect(stats.skippedNonTs).toBe(0)
+
+    const empty = fullFixture({ includeVue: true, withFlows: false })
+    for (const id of [VUE_CLICK, VUE_TEMPLATE]) {
+      empty.insight.functions[id] = {
+        ...empty.insight.functions[id],
+        aiCategory: null,
+        aiCategoryReason: '',
+        coreSource: 'static',
+        coreReason: '',
+        systemRole: '',
+        internalSteps: undefined
+      }
+    }
+    mockAuto()
+    await attachKeyGuarantees(empty.insight, empty.graph, new AiCache(freshDir()))
+    expect(empty.insight.semanticGuarantees?.[`categories:${VUE_CLICK}`]).toBeUndefined()
+    expect(empty.insight.semanticGuarantees?.[`categories:${VUE_TEMPLATE}`]).toBeUndefined()
+    expect(empty.insight.semanticGuarantees?.[`coreRoles:${VUE_TEMPLATE}`]).toBeUndefined()
   })
 
   it('C# KEY 路径：TS+C# 项目生成 categories/modules/narratives/partition/flows 担保，不生成 C# externals', async () => {

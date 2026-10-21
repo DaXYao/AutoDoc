@@ -2,6 +2,16 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · 语义担保第三轮：Vue SFC（.vue）接入语言闸门 · server+docs
+
+- **语言闸门**：`GUARANTEE_LANGUAGE_EXTENSIONS` 加入 `vue`；`isGuaranteeLanguageFile` 与 KEY 的 `isGuaranteeFunction` / `isGuaranteeFileSet` / `allGraphFilesGuaranteed` 因此直接覆盖 `.vue`。变更侧 scope 同样接受 `.vue`。未接入语言仍为 `unverified`，原因「该语言尚未接入语义担保」；`.cpp` / `.py` / `.java` / `.go` 等不回退。
+- **Vue 证据（不改 parser）**：`.vue` script 函数复用 `FunctionDoc` 的签名/参数/返回类型/可见性/装饰器/调用边/注释块；Options API methods 的 `className=[component]`、script setup 的 `className=null` 均按现有稳定 ID 处理。合成 `[template]` 入口的 `call` claim 使用模板事件调用边的 `stepId`（或 caller `functionId` + 调用行）验证；`category` / `core` / `role` 等对象级 claim 仍可担保。模板节点没有真实函数体，`block` claim 不适用；Vue 的 `import` 静态校验尚未接入，`import` claim 仍一律未证实。
+- **契约/文案**：`agentSupply.ts` 4.10 语言范围改为 TS/JS 家族 + C# + Vue SFC，新增 Vue 证据口径（script 证据复用、`[template]` 调用边、无代码块、import 未接入）；`agentSupplyChanges.ts` 9.1 同步；`semanticGuarantee.ts` / `semanticVerifier.ts` 头部与 `attachKeyGuarantees` 注释、shared-types 的担保字段注释同步。
+- **测试**：`semanticGuarantee.test.ts` 语言列表翻转（`.vue=true`，`.cpp/.py/.java/.go=false`），新增真实 SFC 解析→建图集成用例：`<script setup>` + `<template @click>` 的模板调用边 stepId 可让 `call` claim declared；script 函数与 `[template]` 的 categories/coreRoles declared；Options API `[component]` 方法可用；`[template]` 无注释块时 block claim 失败；变更侧 scope 接受 `.vue` 函数；混合 TS+Vue 的 partition/flows declared，加入 `.py` 仍 unverified。`semanticVerifier.test.ts` 新增 Vue KEY 用例：script 函数与 `[template]` 的 categories/coreRoles verified，无 AI 内容时不生成。server 578（+6）、core 368、web 279，全仓 1225 项通过；`pnpm lint`（ESLint + 各包 typecheck）全绿。
+- **实跑**：以 AutoDoc 当前仓库为目标（仅扫描 `packages/web/src/**/*.vue`，配置/存储指向系统临时目录，不写用户 `.autodoc`），`serve --port 7812 --no-watch`；从 `/api/insight` 取 `SemanticGuaranteeBadge.vue` 的 `onKeydown` 与 `[template]` 函数 ID，写 `supply/default/insight/categories.vue.qoder.json`（两个函数）与 `coreRoles.vue.qoder.json`（onKeydown），调用 `/api/agent-supply/merge` 后 `/api/insight` 返回 3 条 `source=agent,status=declared` 的 Vue 担保（categories×2 + coreRoles×1，claim 含 category/role/intent）。临时服务与数据已清理。
+- **已知边界**：`[template]` 没有函数体与注释块，`block` claim 不可用；Vue 的 import 静态校验未接入；模板表达式仍是轻量词法扫描，未解析调用归「外部/未解析」；本轮未改 Vue parser、前端组件、C#/TS 行为，未引入依赖，未提交 git。
+- **关联 commit**：随 Vue SFC 轮次一并提交。
+
 ## 2026-10-21 · C# 语义担保初审修复：参数类型假阳性 / 接口隐式 public / 真实解析集成 · core+server+docs
 
 - **🔴1 参数类型假阳性**：`semanticGuarantee.ts` 的 `paramTypeText` 改为语言感知——TS/JS 保持冒号后类型；`.cs` 先去掉顶层默认值、参数属性（可多个 `[...]`）与修饰符（`ref`/`out`/`in`/`params`/`this`/`scoped`/`readonly`，可组合），再在顶层（忽略 `<> () []` 与字符串）从右往左找最后一个空白，左侧为类型。`matchesTypeText` 只保留参数类型与返回类型（不再收完整 `fn.params` 或整个 `fn.signature`），参数名/完整参数声明不再能通过 `type` claim；KEY 静态事实原先用整签名生成的 `type` claim 改为按去重后的参数类型/返回类型逐条生成（`functionTypeTexts` 共用同一口径）。

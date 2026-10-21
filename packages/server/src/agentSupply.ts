@@ -2560,8 +2560,9 @@ function buildRulesText(
       '最高仍是 `declared`，不会升级为 `verified`。'
   )
   L.push(
-    '- **语言范围（本轮）**：TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）+ C#（`.cs`）。' +
-      '`.vue` / `.cpp` / `.py` / `.java` / `.go` 等其它语言、以及包含未接入语言文件的项目级对象（partition / flows / 混合模块 / 混合链路）' +
+    '- **语言范围（本轮）**：TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）' +
+      '+ C#（`.cs`）+ Vue SFC（`.vue`）。' +
+      '`.cpp` / `.py` / `.java` / `.go` 等其它语言、以及包含未接入语言文件的项目级对象（partition / flows / 混合模块 / 混合链路）' +
       '一律 `unverified`，原因「该语言尚未接入语义担保」。'
   )
   L.push(
@@ -2571,12 +2572,19 @@ function buildRulesText(
       '`import` claim 一律未证实；未解析调用的 `externalModule` 恒为 null，`external` claim 与 KEY externals pass 实际无法生成，跨文件 C# 调用也未解析。'
   )
   L.push(
+    '- **Vue SFC 证据口径**：`.vue` 的 script 函数（含 `<script setup>` 与 Options API methods，`className` 可能是 `[component]` 或 null）' +
+      '复用 TS/JS 证据包：签名/参数/返回类型/可见性/装饰器/调用边/注释块；稳定 ID 由现有解析器生成，不做特殊处理。' +
+      '每个 `.vue` 另有一个合成 `[template]` 入口：其 `call` 证据来自模板事件（`@event` / `v-on:event`）产生的调用边，' +
+      '用该边的 `stepId`（或 caller 的 `functionId` + 调用行号）担保；`category` / `core` / `role` 等对象级 claim 同样可用。' +
+      '模板节点没有真实源码函数体，`block` claim 不适用（会因无注释块判未证实）；Vue 的 `import` 静态校验同样尚未接入。'
+  )
+  L.push(
     '- **对象覆盖**：`guarantees` 的键必须同时出现在同文件 `values` 中；claims 至少要引用该对象本身（subject / object / evidence 锚点任一），' +
       '否则担保无法挂载、判未证实。'
   )
   L.push(
     '- **subject 解析**：所有 claim 的 `subject` 必须解析到当前图谱/洞察里真实存在的对象（函数 / 链路 / 模块 / 文件 / 外部符号；' +
-      'partition / flows 额外允许 `root` 与本轮划分/树内对象），且引用到的函数必须全部属于已接入语义担保的语言（TypeScript / JavaScript 家族或 C#）；' +
+      'partition / flows 额外允许 `root` 与本轮划分/树内对象），且引用到的函数必须全部属于已接入语义担保的语言（TypeScript / JavaScript 家族、C# 或 Vue SFC）；' +
       '不存在的 subject、未接入语言的 subject 一律 `unverified`，不能进入 `declared`。'
   )
   L.push(

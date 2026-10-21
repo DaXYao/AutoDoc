@@ -43,10 +43,22 @@
 - [ ] **Java 零模型扩展**：包+类路径进 `className`、类型推断结果写 `::Type` receiver、类索引 + 普通/static/嵌套 import、无 receiver 先本类后 static import、去掉简单类名全局兜底（见 2026-10-21 J1 条）。
 - [ ] **Go 零模型扩展**：包+类型进 `className`、`::pkg`/`::pkg?`/`::Type`/`::?` receiver、词法作用域类型推断、包目录/go.mod import 解析、按 calleeId 去重、重复 init 合成名（见 2026-10-21 G1 条）。
 - [ ] **契约示例可执行**：从代码生成的契约文本里反抽示例 JSON，直接喂给同一校验器断言最高档状态，防止「照抄示例必失败」（见 2026-10-21 SG2 条）。
+- [ ] **语义担保接入新语言**：只扩语言闸门 + 复用 FunctionDoc 证据包，不改 parser；合成节点（Vue `[template]`）只担保对象级 claim，调用走模板事件 stepId；用真实解析夹具覆盖（见 2026-10-21 Vue 担保条）。
 
 ---
 
 ## 成功经验条目
+
+### 2026-10-21 · 语义担保接入新语言：扩闸门 + 复用证据包，合成节点只担保真实存在的对象级 claim
+- **场景**：语义担保已有 TS/JS 与 C#，要接入一个「脚本语言与现有解析器同族、但另有合成入口」的语言（本轮 Vue SFC）。**适用条件**：解析器已产出稳定 ID、签名/参数/返回类型/可见性/装饰器/调用边/注释块的通用 `FunctionDoc`；不需要新增证据类型。
+- **做法**：
+  1. **只改语言闸门**：`GUARANTEE_LANGUAGE_EXTENSIONS` 加扩展名，注释/契约/原因文案同步；静态校验与 KEY 对象枚举全部复用同一 `isGuaranteeLanguageFile`，不写语言特判。
+  2. **证据直接复用**：`.vue` script 函数用现有 FunctionDoc 字段；Options API 的 `[component]` 类名与 null 类名都不特殊处理。
+  3. **合成入口的边界写清**：`[template]` 的 `call` claim 用模板事件调用边的 `stepId`（或 caller + 调用行）；没有函数体 → 不承诺 `block`；未接入的 `import` 仍一律未证实。
+  4. **测试用真实解析管线**：临时目录写 `.vue`，走 `generateDocs` + `buildGraph`，断言模板 stepId、categories/coreRoles、混合项目 partition/flows 与 `.py` 阻断。
+- **收益**：零 parser 改动、零前端改动即完成第三轮语言；证据口径与 TS/C# 完全一致，边界（无代码块/无 import）在契约和测试中同时可见。
+- **验证清单**：语言列表翻转、真实 SFC 的 stepId 可 declared、`[template]` 无 block、混合语言项目级 gate、KEY 枚举与无 AI 内容不生成。
+- **关联**：packages/server/src/semanticGuarantee.ts、packages/server/test/semanticGuarantee.test.ts、docs/SEMANTIC_GUARANTEE.md。
 
 ### 2026-10-21 · 契约示例可执行：从生成文本反抽 JSON 跑同一校验器
 - **场景**：契约文本由代码生成，里面带「照抄即可」的 JSON 示例（如 Agent 供给 guarantees 的示例 J）。**适用条件**：示例中的 id 能取自同一测试夹具的索引，而不是占位符。
