@@ -303,6 +303,73 @@ function resolveCppModule(
   return null
 }
 
+/** Python 模块候选文件：包模块的 `__init__.py` 与普通模块的 `.py` */
+function pythonModuleFiles(modulePath: string): string[] {
+  return [`${modulePath}.py`, `${modulePath}/__init__.py`]
+}
+
+/**
+ * Python 模块的「唯一后缀」兜底：在已知文件里找以 `<modulePath>.py` 或
+ * `<modulePath>/__init__.py` 结尾的路径；零个或多个候选返回 null（不猜）。
+ */
+function resolvePyModuleByUniqueSuffix(
+  modulePath: string,
+  knownPaths: Set<string>
+): string | null {
+  const forms = pythonModuleFiles(modulePath)
+  let match: string | null = null
+  for (const relPath of knownPaths) {
+    if (!relPath.endsWith('.py')) continue
+    if (!forms.some((form) => relPath === form || relPath.endsWith(`/${form}`))) continue
+    if (match !== null) return null
+    match = relPath
+  }
+  return match
+}
+
+/**
+ * Python 模块解析（只认 `.py`，不走 JS/TS 的共享 resolveModule）：
+ * - 绝对点分 `foo.bar`：依次尝试 `foo/bar.py`、`foo/bar/__init__.py`，
+ *   再按已知文件中的唯一后缀定位（如 src 布局下的 `src/foo/bar.py`）；
+ * - 相对 `.mod` / `..pkg.mod`：前导点数 n 表示从 importer 所在目录上溯 n-1 层，
+ *   余下点分转斜杠后同样尝试 `.py` 与 `__init__.py`；
+ * 后缀命中必须唯一，零个/多个一律返回 null（不猜）。
+ */
+function resolvePyModule(
+  importerRel: string,
+  source: string,
+  knownPaths: Set<string>
+): string | null {
+  if (source.length === 0) return null
+  let leadingDots = 0
+  while (leadingDots < source.length && source[leadingDots] === '.') leadingDots++
+  let modulePath: string
+  if (leadingDots === 0) {
+    modulePath = source
+      .split('.')
+      .filter((part) => part.length > 0)
+      .join('/')
+  } else {
+    const parts = source
+      .slice(leadingDots)
+      .split('.')
+      .filter((part) => part.length > 0)
+    if (parts.length === 0) return null
+    const dirSegments = posix
+      .dirname(importerRel)
+      .split('/')
+      .filter((segment) => segment.length > 0 && segment !== '.')
+    // 上溯越过仓库根（根目录模块写 `from ..pkg import x`）不是合法相对导入
+    if (leadingDots - 1 > dirSegments.length) return null
+    const baseSegments = dirSegments.slice(0, dirSegments.length - (leadingDots - 1))
+    modulePath = [...baseSegments, ...parts].join('/')
+  }
+  if (modulePath.length === 0) return null
+  const direct = pythonModuleFiles(modulePath).find((candidate) => knownPaths.has(candidate))
+  if (direct) return direct
+  return resolvePyModuleByUniqueSuffix(modulePath, knownPaths)
+}
+
 /**
  * C++ include 兜底：按「唯一 basename/后缀」在已知文件里定位（如 `#include "widget.hpp"`）。
  * 仅接受纯相对说明符，且只匹配 C++ 源/头（防止 include 落到 .ts 等其它语言）；
@@ -415,9 +482,250 @@ function resolveCppCallee(
 }
 
 /**
+ * Python 建图上下文：当前文件同名索引 + 全局同名索引 + import 表。
+ * languageByFile 用于全局回退时只保留 Python 候选，避免误连同名 TS/JS/C++ 函数。
+ */
+interface PyCallContext {
+  /** 当前文件的函数（本文件同名优先） */
+  byName: Map<string, FunctionDoc[]>
+  allByName: Map<string, FunctionDoc[]>
+  languageByFile: Map<string, string>
+  importByName: Map<string, ParsedImport>
+  /** 本文件全部 import（namespace 匹配需要保留同 localName 的多条记录） */
+  imports: ParsedImport[]
+  knownPaths: Set<string>
+}
+
+interface PyResolution {
+  /** 是否命中某个来源；命中后不再回退其它路径 */
+  matched: boolean
+  target: FunctionDoc | null
+}
+
+/**
+ * 目标模块的模块级函数查询：文件匹配且 className === null。
+ * Python 的下划线只是约定，显式 `from lib import _private` 同样可解析；
+ * 同名多个（如条件分支重复定义）返回 null，不猜。
+ */
+function pyModuleFunction(
+  targetFile: string,
+  name: string,
+  allByName: Map<string, FunctionDoc[]>
+): FunctionDoc | null {
+  const matches = (allByName.get(name) ?? []).filter(
+    (candidate) =>
+      candidate.className === null &&
+      candidate.kind === 'function' &&
+      fileOfFunctionId(candidate.id) === targetFile
+  )
+  return matches.length === 1 ? matches[0] : null
+}
+
+/**
+ * 本文件同名候选优先：
+ * - 裸调用同作用域优先，其次模块级（Python 全局名查找）；唯一才连，多候选不猜；
+ * - 成员调用只认同作用域方法，本文件模块级同名函数不能当实例成员；
+ * - 没有可达候选时返回未命中，继续走 import/namespace/全局。
+ */
+function resolvePyLocalCall(
+  fn: FunctionDoc,
+  calledName: string,
+  receiver: string | undefined,
+  byName: Map<string, FunctionDoc[]>
+): PyResolution {
+  const candidates = byName.get(calledName) ?? []
+  if (candidates.length === 0) return { matched: false, target: null }
+  if (receiver !== undefined) {
+    if (fn.className === null) return { matched: false, target: null }
+    const sameScope = candidates.filter((candidate) => candidate.className === fn.className)
+    if (sameScope.length === 0) return { matched: false, target: null }
+    return { matched: true, target: sameScope.length === 1 ? sameScope[0] : null }
+  }
+  // 裸调用：同作用域优先，其次模块级（Python 全局名查找）；其它作用域的同名函数
+  // 与本次调用无关，不能用来阻断 import/namespace 解析。
+  const sameScope =
+    fn.className === null
+      ? []
+      : candidates.filter((candidate) => candidate.className === fn.className)
+  if (sameScope.length === 1) return { matched: true, target: sameScope[0] }
+  if (sameScope.length > 1) return { matched: true, target: null }
+  const moduleLevel = candidates.filter((candidate) => candidate.className === null)
+  if (moduleLevel.length === 0) return { matched: false, target: null }
+  return { matched: true, target: moduleLevel.length === 1 ? moduleLevel[0] : null }
+}
+
+/**
+ * namespace import 的绑定语义（每个 import 只产出一个目标模块 source）：
+ * - 非相对且 `localName === source 第一段`（unaliased `import a.b`）绑定的是顶层包，
+ *   目标 source 取 receiver 本身（`foo` → `foo`；`foo.bar` → `foo.bar`）；
+ * - 其余（`import a.b as x` / 相对 import）取 `source + receiver 去掉 localName 的后缀`，
+ *   receiver 等于 localName 时就是 import 源本身。
+ */
+function pyNamespaceSource(imp: ParsedImport, receiver: string): string {
+  const firstSegment = imp.source.split('.')[0]
+  if (!imp.source.startsWith('.') && imp.localName === firstSegment) return receiver
+  return `${imp.source}${receiver.slice(imp.localName.length)}`
+}
+
+/** 逐个解析候选模块并在其中查模块级函数：唯一命中才返回，零个/多个都不猜 */
+function resolvePyModuleSources(
+  sources: Set<string>,
+  calledName: string,
+  relPath: string,
+  context: PyCallContext
+): PyResolution {
+  if (sources.size === 0) return { matched: false, target: null }
+  const hits = new Set<FunctionDoc>()
+  const visitedFiles = new Set<string>()
+  for (const source of sources) {
+    const targetFile = resolvePyModule(relPath, source, context.knownPaths)
+    if (targetFile === null || visitedFiles.has(targetFile)) continue
+    visitedFiles.add(targetFile)
+    const target = pyModuleFunction(targetFile, calledName, context.allByName)
+    if (target) hits.add(target)
+  }
+  return { matched: true, target: hits.size === 1 ? [...hits][0] : null }
+}
+
+/**
+ * namespace import 的成员调用（`u.helper()` / `pkg.util.helper()` / `mod.helper()`）：
+ * receiver 命中 localName 或其点分前缀，按绑定语义生成唯一候选模块；
+ * 唯一命中才解析，多个命中不猜，命中但不确定时禁止再回退全局。
+ */
+function resolvePyNamespaceCall(
+  calledName: string,
+  receiver: string,
+  relPath: string,
+  context: PyCallContext
+): PyResolution {
+  const sources = new Set<string>()
+  for (const imp of context.imports) {
+    if (imp.kind !== 'namespace' || imp.localName.length === 0) continue
+    if (receiver !== imp.localName && !receiver.startsWith(`${imp.localName}.`)) continue
+    sources.add(pyNamespaceSource(imp, receiver))
+  }
+  return resolvePyModuleSources(sources, calledName, relPath, context)
+}
+
+/**
+ * 无 receiver 的裸调用：`from . import helper` 的 namespace source（`.helper`）
+ * 绑定到同目录 helper 模块，查找其中的同名模块级函数。
+ * 绝对 `import foo` 的裸调用是模块调用，不在此猜测函数。
+ */
+function resolvePyBareNamespaceCall(
+  calledName: string,
+  relPath: string,
+  context: PyCallContext
+): PyResolution {
+  const sources = new Set<string>()
+  for (const imp of context.imports) {
+    if (imp.kind !== 'namespace' || !imp.source.startsWith('.')) continue
+    if (imp.localName !== calledName) continue
+    sources.add(imp.source)
+  }
+  return resolvePyModuleSources(sources, calledName, relPath, context)
+}
+
+/**
+ * 命名 import：
+ * - 无 receiver：`from lib import save` 按 importedName 查目标模块；
+ * - 有 receiver：`from pkg import sub` + `sub.func()` 把 sub 当子模块（pkg.sub）解析；
+ * 目标模块能解析但函数查不到时返回 null（不回落全局）；模块本身解析不到才算未命中。
+ */
+function resolvePyNamedImport(
+  calledName: string,
+  receiver: string | undefined,
+  relPath: string,
+  context: PyCallContext
+): PyResolution {
+  if (receiver === undefined) {
+    const named = context.importByName.get(calledName)
+    if (!named || named.kind !== 'named') return { matched: false, target: null }
+    const targetFile = resolvePyModule(relPath, named.source, context.knownPaths)
+    if (targetFile === null) return { matched: false, target: null }
+    return {
+      matched: true,
+      target: pyModuleFunction(targetFile, named.importedName, context.allByName)
+    }
+  }
+  const named = context.importByName.get(receiver)
+  if (!named || named.kind !== 'named') return { matched: false, target: null }
+  const targetFile = resolvePyModule(
+    relPath,
+    `${named.source}.${named.importedName}`,
+    context.knownPaths
+  )
+  if (targetFile === null) return { matched: false, target: null }
+  return { matched: true, target: pyModuleFunction(targetFile, calledName, context.allByName) }
+}
+
+/**
+ * Python 调用解析（严格、不猜）：
+ * 1) 本文件同名候选优先（同作用域/唯一；多候选直接 null，不落到 import/全局）；
+ * 2) named import（无 receiver 查 importedName；有 receiver 按子模块解析）；
+ * 3) namespace import（receiver 成员；无 receiver 时仅相对 `from . import helper`）；
+ * 4) 全局回退：只保留 Python 候选；同作用域唯一优先，否则全局唯一才解析。
+ * 带 receiver 的调用只有在 receiver 命中 named import、且子模块无法解析时才继续全局回退，
+ * 避免 `self.save()` 被全局同名函数误连。
+ */
+function resolvePyCallee(
+  fn: FunctionDoc,
+  calledName: string,
+  receiver: string | undefined,
+  relPath: string,
+  context: PyCallContext
+): FunctionDoc | null {
+  const local = resolvePyLocalCall(fn, calledName, receiver, context.byName)
+  if (local.matched) return local.target
+
+  const named = resolvePyNamedImport(calledName, receiver, relPath, context)
+  if (named.matched) return named.target
+
+  if (receiver !== undefined) {
+    const namespace = resolvePyNamespaceCall(calledName, receiver, relPath, context)
+    if (namespace.matched) return namespace.target
+  } else {
+    const bareNamespace = resolvePyBareNamespaceCall(calledName, relPath, context)
+    if (bareNamespace.matched) return bareNamespace.target
+  }
+
+  // 全局回退只看 Python 文件；同作用域（类/嵌套函数作用域）唯一优先。
+  // 带 receiver 时排除「同名 named import 的目标」：`from lib import save` + `self.save()`
+  // 不应连到 lib.save；本类/其它类的 save 仍可凭同作用域或唯一性解析。
+  let candidates = (context.allByName.get(calledName) ?? []).filter(
+    (candidate) => context.languageByFile.get(fileOfFunctionId(candidate.id)) === 'python'
+  )
+  if (receiver !== undefined) {
+    const named = context.importByName.get(calledName)
+    if (named && named.kind === 'named') {
+      const targetFile = resolvePyModule(relPath, named.source, context.knownPaths)
+      const imported = targetFile
+        ? pyModuleFunction(targetFile, named.importedName, context.allByName)
+        : null
+      if (imported) candidates = candidates.filter((candidate) => candidate.id !== imported.id)
+    }
+  }
+
+  // self/cls 只可能是当前类的方法：不得落到其它类的同名方法或全局唯一
+  if (receiver === 'self' || receiver === 'cls') {
+    if (fn.className === null) return null
+    const sameClass = candidates.filter((candidate) => candidate.className === fn.className)
+    return sameClass.length === 1 ? sameClass[0] : null
+  }
+
+  if (fn.className !== null) {
+    const sameScope = candidates.filter((candidate) => candidate.className === fn.className)
+    if (sameScope.length === 1) return sameScope[0]
+    if (sameScope.length > 1) return null
+  }
+  return candidates.length === 1 ? candidates[0] : null
+}
+
+/**
  * 构建单个函数的调用边（阶段二）：
  * 1) 自调用；2) 文件内同名（优先同类方法）；3) 跨文件——经 import 映射到目标文件导出表；
- * C++ 走严格模式：include 可见候选 → 限定作用域/同名回退，多候选一律不猜。
+ * C++ 走严格模式：include 可见候选 → 限定作用域/同名回退，多候选一律不猜；
+ * Python 走严格模式：本文件同名优先 → named import → namespace 成员 → 仅 Python 的全局唯一回退。
  * 解析不到一律归「外部/未解析」，禁止强行猜测。
  */
 function buildCallEdges(
@@ -425,6 +733,7 @@ function buildCallEdges(
   parsed: ParsedFunction,
   byName: Map<string, FunctionDoc[]>,
   importByName: Map<string, ParsedImport>,
+  imports: ParsedImport[],
   relPath: string,
   knownPaths: Set<string>,
   exportedIndex: Map<string, Map<string, FunctionDoc>>,
@@ -433,14 +742,22 @@ function buildCallEdges(
 ): CallEdge[] {
   const edges: CallEdge[] = []
   const seen = new Set<string>()
+  const pyContext: PyCallContext = {
+    byName,
+    allByName: cppContext.allByName,
+    languageByFile: cppContext.languageByFile,
+    importByName,
+    imports,
+    knownPaths
+  }
   // 按调用点行号排序 = 源码执行顺序；同名调用去重，保留首次出现的行号与角色
   const sites = [...parsed.callSites].sort((a, b) => a.line - b.line)
   for (const site of sites) {
     const calledName = site.name
     if (seen.has(calledName)) continue
     seen.add(calledName)
-    // 自调用短路：非 C++ 维持原口径；C++ 交给严格解析（重载/作用域唯一才连，多候选不猜）
-    if (calledName === fn.name && language !== 'cpp') {
+    // 自调用短路：仅 JS/TS/C#/Vue 维持原口径；C++/Python 交给严格解析（唯一才连，多候选不猜）
+    if (calledName === fn.name && language !== 'cpp' && language !== 'python') {
       edges.push({
         callerId: fn.id,
         calleeName: calledName,
@@ -457,6 +774,9 @@ function buildCallEdges(
     if (language === 'cpp') {
       // C++ 不走 import 映射：include 可见候选 + 限定作用域回退，多候选不猜
       resolved = resolveCppCallee(fn, calledName, site.receiver, cppContext)
+    } else if (language === 'python') {
+      // Python 走 .py 专用模块解析 + 严格唯一回退，不参与下面 JS/TS 的文件内同名兜底
+      resolved = resolvePyCallee(fn, calledName, site.receiver, relPath, pyContext)
     } else {
       const candidates = byName.get(calledName) ?? []
       resolved =
@@ -621,8 +941,9 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
     exportedIndex.set(unit.relPath, table)
   }
 
-  // 全局同名索引：仅 C++ 的「无 include 命中」回退使用；JS/TS 仍只用文件内 byName，
-  // 既有跨文件解析口径（必须经 import 映射）保持不变。languageByFile 保证 C++ 只回退到 C++。
+  // 全局同名索引：供 C++ 的「无 include 命中」回退与 Python 的「无 import 命中」回退使用；
+  // JS/TS 仍只用文件内 byName，既有跨文件解析口径（必须经 import 映射）保持不变。
+  // languageByFile 保证 C++/Python 回退只落到各自语言。
   const allFunctionsByName = new Map<string, FunctionDoc[]>()
   const languageByFile = new Map<string, string>()
   for (const unit of units) {
@@ -698,6 +1019,7 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
         p,
         byName,
         importByName,
+        imports,
         relPath,
         knownPaths,
         exportedIndex,

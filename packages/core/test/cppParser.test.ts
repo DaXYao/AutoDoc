@@ -160,7 +160,7 @@ describe('C++ 解析器', () => {
     for (const ext of ['cpp', 'cc', 'cxx', 'h', 'hpp', 'hh', 'hxx', 'inl']) {
       expect(parserRegistry.forFile(`a/b.${ext}`)?.id, ext).toBe('cpp')
     }
-    expect(parserRegistry.forFile('a/b.py')).toBeUndefined()
+    expect(parserRegistry.forFile('a/b.pyi')).toBeUndefined()
     expect(parserRegistry.forFile('a/b.cpp')?.extensions).toEqual([
       'cpp',
       'cc',

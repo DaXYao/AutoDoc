@@ -15,7 +15,8 @@ export const DEFAULT_INCLUDE = [
   '**/*.hpp',
   '**/*.hh',
   '**/*.hxx',
-  '**/*.inl'
+  '**/*.inl',
+  '**/*.py'
 ]
 
 export const DEFAULT_EXCLUDE = [
