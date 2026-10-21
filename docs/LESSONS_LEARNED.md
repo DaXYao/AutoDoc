@@ -49,10 +49,26 @@
 - [ ] Python import 解析必须按「绑定语义」而不是源码字符串拼接：unaliased `import a.b` 绑定顶层包 a；named import 不能覆盖带 receiver 的成员调用；模块导出只算 `className=null` 的模块级函数；未解析的子模块成员不得回退到同名 named import。
 - [ ] 静态类型语言的成员调用：复杂/未知 receiver 必须用哨兵（如 `::?`）阻断「无 receiver」兜底；`new` 必须保留全限定类型；外部/通配符 import 不能靠「简单类名全局唯一」兜底。
 - [ ] Go 的函数值局部变量调用必须与包级函数区分（写 `::?`）；类型推断用词法作用域栈、nested lambda 继承闭包变量；包名≠路径要按目标包名解析（`::pkg?`）；多个 init/_ 要合成唯一名；stdlib 多段路径不能靠后缀兜底。
+- [ ] 严格契约缓存只存契约原样字段：派生字段（如按 allowed 算出的 `relevant`）回读时重算，不能一起落盘——否则严格解析会把自家缓存判成畸形，写路径还会把它删掉，表现为「每次刷新都重新请求、cacheHits 恒 0」（见 2026-10-21 SG2 条）。
+- [ ] 复核/自检的证据包必须与待复核对象文本**物理分离**：AI 判断值（分类/核心判定/理由）不得作为证据回喂，否则第二遍 LLM 退化为自洽检查；`fileId` 这类大范围锚点不能单独作为片段证据，allowed 必须按片段（步骤/块行）收紧；证据包、相关性 allowed、最终锚点校验必须**三处同源**，且证据包要覆盖待引用的 stepId（见 2026-10-21 SG2 条）。
 
 ---
 
 ## 教训条目
+
+### 2026-10-21 · 证据包夹带 AI 判断值 / 三处锚点规则不同步，让 verified 失真或假 unverified
+- **场景**：SG2 第二遍 LLM 语义复核（FunctionPack + 逐片段 allowed + SG1 最终锚点校验）。
+- **现象**：复核「分类为 business」「核心函数」时，证据包里又出现相同的 `aiCategory/isCore/category`，模型只需自洽即可通过；`fileId` 单独就能让 function 级片段相关，而 `stepId/symbol/注释块行` 这些最强证据因 allowed 没收录反而被判无关；所有 part 共用对象级 allowed，等于没有按片段收紧。二轮复审又发现：撤回 AI 分类后旧 `fn.category` 仍以 `categorySource:'static'` 进包；narrative 的 allowed 收 `chain.moduleId` 但锚点集合/SG1 校验不收、externals 收 caller functionId 但最终校验要求 +调用行，制造假 unverified；keySteps 第 13 条后的 stepId 被证据包截断；每 part 证据上限 10 与 prompt 的 2 不一致。
+- **根因**：把「待复核断言」和「证据」混在同一个包里；相关性判定按对象而不是按片段；文件被当成充分证据；证据包、allowed、最终校验三处各自维护一份锚点规则，且「静态分类」被误当成独立事实。
+- **正确做法**：证据包只放独立事实（签名/调用/块/模块关系/purpose），**任何分类/核心值都不进包**；allowed 按片段给出 stepId/symbol/lineRanges，fileId 仅作上下文；关键步骤只认本步 stepId/调用行，内部步骤只认本块行；同一锚点必须在证据包、allowed、`evidenceAnchorsSubject` 三处同源；keySteps 显式把待引用 stepId 带进证据包；上限与 prompt 文案一致（每 part 2 条）。
+- **预防措施**：为每种 pass 写一张「对象文本字段 vs 证据包字段」清单并加 prompt JSON 断言测试；每个 subject 类型配正反例（真实锚点通过、弱锚点不通过）；从契约文本中抽出示例 JSON 直接跑静态校验器，防止「照抄示例必失败」。
+
+### 2026-10-21 · 严格契约缓存写入派生字段，导致自家缓存永远未命中
+- **场景**：SG2 第二遍语义复核缓存（`guarantee:<pass>:<hash>`）。
+- **现象**：首次刷新写入缓存成功，二次刷新仍对每个对象重新请求 LLM；读取路径 `cacheHits` 恒为 0，重复刷新测试 15 个对象变成 30 次调用。
+- **根因**：缓存里存的是解析后的 `IntentReview`，每个片段含服务端按 allowed 集合算出的 `relevant` 派生字段；回读用的 `readIntentReview` 按 LLM 契约严格拒绝契约外字段，于是把自家缓存判成畸形。
+- **正确做法**：缓存只落 LLM 契约原样字段（part/verdict/reason/evidence/confidence + review），派生字段读取时重算；写入与读回共用同一严格解析器时，必须先有「写入 → 读回」往返测试。
+- **预防措施**：区分「LLM 输出 schema」与「缓存 schema」；任何服务端派生/校验结果都不进严格契约缓存。若确需缓存，单独版本化并在读回时剥离。
 
 ### 2026-10-21 · Go 接入的四类误连：函数值 / 作用域覆盖 / 包名≠路径 / init ID
 - **场景**：G1 接入 Go 解析器后的初审与实跑。

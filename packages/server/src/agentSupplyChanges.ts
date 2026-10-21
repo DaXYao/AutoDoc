@@ -363,6 +363,13 @@ function parseChangesFile(
     return { entries, errors }
   }
   const extraKeys = Object.keys(data).filter((k) => !['pass', 'agent', 'writtenAt', 'basis', 'values'].includes(k))
+  if (extraKeys.includes('guarantees')) {
+    reject(
+      'changes 文件暂不支持 guarantees：变更侧语义担保在后续轮次（SG3）接入；guarantees 目前只用于洞察侧 pass 文件',
+      'guarantees'
+    )
+    return { entries, errors }
+  }
   if (extraKeys.length > 0) {
     reject(`存在契约外字段 ${echoValue(extraKeys.join(','))}`, extraKeys[0])
     return { entries, errors }
@@ -848,6 +855,7 @@ export function buildChangesRulesSection(
   L.push('  - `workspace:latest`（**推荐**）：服务端解析为当前批次，永不漂移。')
   L.push('  - `workspace:<batchDate>`：精确写法，batchDate 必须在当前批次 60s 窗口内（否则判错）。')
   L.push('  - `range:` scope 暂不接受变更侧供给。')
+  L.push('- **guarantees**：变更侧文件暂不支持（后续轮次接入）；信封里出现 `guarantees` 会整份拒绝并给出明确原因。')
   L.push('')
   L.push('### 9.2 值形状（三层皆可选，至少提供一层）')
   L.push('')

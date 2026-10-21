@@ -42,12 +42,23 @@ Agent 供给与洞察合并目前只校验**结构、字段与引用**：id 存�
   1. 生成语义内容后，按语言证据提取器收集候选证据（调用边、import、签名/类型、装饰器、注释、链路/模块包含关系等）；
   2. 静态证据校验器逐条验证硬事实 claim；
   3. 第二遍 LLM 对照原文、证据与必要源码片段复核 claim（含意图类），输出 verdict/confidence/reason；
-  4. 硬事实全过 + 复核通过 → `verified`；否则 `unverified`。
+  4. 硬事实全过 + 复核通过 → `verified`（`source='api'`，复核成功时写 `reviewedBy='key'`）；否则 `unverified`。
+
+**Agent 自审的等级上限是 `declared`。** 本地 KEY 产物才可能由第二遍 LLM 复核升为 `verified`；读取路径回放缓存但缓存未命中时不会补写 `reviewedBy`。
+
+**逐片段覆盖。** 意图类不再让 LLM 自由写整段结论，而是由服务端把对象拆成最小片段（part）：每个叙事、每个 stepRole、模块名与职责、每个脉络节点的 label/summary/reason、系统角色、外部符号 purpose/signature、项目 summary、分类与核心理由、每个关键步骤、每条内部步骤都必须单独复核。LLM 必须对每个片段恰好返回一条记录并给出非空、可解析到图谱且与该片段相关的证据；缺段、重复、未知段、空证据、证据与片段无关都判未证实，重试耗尽后不写缓存。
+
+**证据锚点。** `fileId` 只能作上下文，不能单独让片段通过；关键步骤必须命中该步骤 `stepId` 或调用行，内部步骤必须落在对应注释块行，外部符号 purpose/signature 需命中 `symbol` 或调用点（caller `functionId` + 精确调用行号；只给 caller 不给行号不算）。证据条目只接受 `kind/functionId/chainId/stepId/moduleId/fileId/symbol/line`，出现契约外字段整次判畸形。分类/核心判定等 AI 判断值不再由「当前值等于当前值」的静态 claim 自证，**证据包也不携带任何分类/核心判定值（包括源码静态分类）**；分类值只出现在待复核对象的文本里。函数证据包里的调用边只保留 `calleeName` / `calleeId` / `externalModule` / `stepId` / `line` / `role` 等代码事实字段，不携带被调方分类（`calleeCategory`）。
+
+**预算。** 单对象静态 + 意图 claim 上限 200；单对象意图片段上限 72（24 个脉络节点 × 3 段文本）；单个函数硬事实生成到超过 200 即停并由总数检查判未证实；`KEY_GUARANTEE_MAX_TOKENS=12000`。每个 part 的 prompt 明确要求最多 2 条证据，服务端 `sanitizeEvidence` 同样按 2 条上限截断。
+
+**读取路径。** KEY 担保在刷新时生成并写入复核缓存（`guarantee:<pass>:<hash>`）；页面读取（`GET /api/insight` → `loadInsight`）只按同一套对象枚举与片段规则回放缓存，**不调用 LLM**；合并归档新快照前也会先回放一次缓存。缓存未命中或缓存畸形一律按未证实处理，且读取路径不删除缓存（读写分离）。
 - **Agent-only 模式**：
   1. Agent 在供给文件中随语义值提交 `guarantees`（claims + evidence + self-review）；
   2. 系统验证证据结构与硬事实（与 KEY 共用静态校验器）；
   3. 通过 → `declared`（徽标「Agent 声明已复核」）；缺失/失败 → `unverified`；
-  4. 不调用系统 LLM，两条链路仍平等可用。
+  4. `category` / `core` claim 只证明与合并后的当前值一致，最高仍为 `declared`，不会升级为 `verified`；
+  5. 不调用系统 LLM，两条链路仍平等可用。
 - **历史/缺省**：没有 `guarantees` 的旧供给、旧快照、旧缓存统一视为 `unverified`，不报结构错误、不阻塞合并。
 
 ## 5. 失败策略
@@ -64,7 +75,7 @@ Agent 供给与洞察合并目前只校验**结构、字段与引用**：id 存�
   - `ProjectInsight.semanticGuarantees?: Record<string, SemanticGuarantee>`（key = `${pass}:${objectId}`）；
   - 快照内容哈希纳入担保映射，保证历史版本可回滚、同内容不重复存储。
 - Agent 供给信封新增可选 `guarantees`（按 objectId），值形状不变；缺少 `guarantees` 的条目按未证实处理。
-- 变更侧语义（读时合并）在响应中携带同一套担保结构，不进入洞察快照。
+- 变更侧语义担保本轮尚未接入：`changes` 供给文件提交 `guarantees` 会被拒绝，变更侧响应也不携带担保结构。
 - 结构化证据与复核字段必须经过 schema 校验，禁止把自由文本塞进证据字段。
 
 ## 7. UI

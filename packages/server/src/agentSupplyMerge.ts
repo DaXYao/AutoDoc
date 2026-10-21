@@ -8,7 +8,10 @@ import type {
   InsightAgentSources,
   InsightSnapshot,
   InsightSnapshotStats,
-  ProjectInsight
+  ProjectInsight,
+  SemanticClaim,
+  SemanticEvidence,
+  SemanticGuarantee
 } from '@autodoc/shared-types'
 import { AiCache } from './aiCache.js'
 import type { DocService } from './context.js'
@@ -17,6 +20,8 @@ import type { ProjectGraph } from './graph.js'
 import { computeSnapshotStats, loadInsight } from './insight.js'
 import { collectAgentSupply, SUPPLY_PASSES } from './agentSupply.js'
 import { applyAgentPartitionToInsight } from './supplyPartition.js'
+import { applyAgentGuaranteesToInsight } from './semanticGuarantee.js'
+import { readBackKeyGuarantees } from './semanticVerifier.js'
 import {
   applyPassSemantics,
   applyWinnerToInsight,
@@ -85,6 +90,8 @@ export function mergeAgentSupply(input: MergeInput): MergeResult {
 
   const supplied = new Map<AgentSupplyPass, number>()
   const agentsOf = new Map<AgentSupplyPass, Set<string>>()
+  // 只有实际套用成功的 winner 才参与语义担保校验（missing 的对象不写未证实条目）
+  const appliedWinners: AgentSupplyWinner[] = []
   for (const pass of SUPPLY_PASSES) {
     supplied.set(pass, 0)
     agentsOf.set(pass, new Set())
@@ -107,6 +114,7 @@ export function mergeAgentSupply(input: MergeInput): MergeResult {
           agent: partitionWinner.agent
         })
         agentSources[`${partitionWinner.pass}:${partitionWinner.objectId}`] = partitionWinner.agent
+        appliedWinners.push(partitionWinner)
       }
     }
   }
@@ -129,7 +137,11 @@ export function mergeAgentSupply(input: MergeInput): MergeResult {
     agentsOf.get(w.pass)!.add(w.agent)
     provenance.push({ pass: w.pass, objectId: w.objectId, agent: w.agent })
     agentSources[`${w.pass}:${w.objectId}`] = w.agent
+    appliedWinners.push(w)
   }
+
+  // 语义担保在全部字段落位后统一校验：category/core 等硬事实依赖套用后的最终状态。
+  if (applyAgentGuaranteesToInsight(insight, graph, appliedWinners)) changed = true
 
   if (provenance.length > 0) {
     insight.agentSources = agentSources
@@ -159,6 +171,8 @@ export function mergeAgentSupply(input: MergeInput): MergeResult {
 export function insightContentHash(insight: ProjectInsight): string {
   const h = createHash('sha256')
   const stable = (v: unknown): string => JSON.stringify(v)
+  // 码点比较（不用 localeCompare）：同一份语义在任意系统区域设置下都必须得到同一哈希，否则去重失效
+  const compareCodePoints = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
   const sortedRecord = (rec: Record<string, unknown> | undefined): string => {
     const out: Record<string, unknown> = {}
     for (const k of Object.keys(rec ?? {}).sort()) out[k] = rec![k]
@@ -255,6 +269,56 @@ export function insightContentHash(insight: ProjectInsight): string {
   h.update(sortedRecord(insight.aiStatus as Record<string, unknown> | undefined))
   h.update(sortedRecord(insight.aiSource as Record<string, unknown> | undefined))
   h.update(sortedRecord(insight.agentSources))
+  // 语义担保：key 排序；claims / evidence 排序（同一组断言的不同书写顺序不应产生新快照）。
+  // undefined（旧数据/未生成）与空对象 {}（显式无担保）必须区分。
+  const evidenceStable = (e: SemanticEvidence): Record<string, unknown> => ({
+    kind: e.kind ?? null,
+    functionId: e.functionId ?? null,
+    chainId: e.chainId ?? null,
+    stepId: e.stepId ?? null,
+    moduleId: e.moduleId ?? null,
+    fileId: e.fileId ?? null,
+    line: e.line ?? null,
+    symbol: e.symbol ?? null,
+    detail: e.detail ?? null,
+    snippet: e.snippet ?? null
+  })
+  const claimStable = (c: SemanticClaim): Record<string, unknown> => ({
+    id: c.id,
+    kind: c.kind,
+    subject: c.subject,
+    object: c.object ?? null,
+    text: c.text,
+    staticStatus: c.staticStatus,
+    reviewStatus: c.reviewStatus,
+    status: c.status,
+    reason: c.reason ?? null,
+    evidence: c.evidence
+      .map(evidenceStable)
+      .sort((a, b) => compareCodePoints(stable(a), stable(b)))
+  })
+  const guaranteeStable = (g: SemanticGuarantee): Record<string, unknown> => ({
+    pass: g.pass,
+    objectId: g.objectId,
+    status: g.status,
+    source: g.source,
+    reviewedAt: g.reviewedAt ?? null,
+    reviewedBy: g.reviewedBy ?? null,
+    reason: g.reason ?? null,
+    claims: g.claims
+      .map(claimStable)
+      .sort((a, b) => compareCodePoints(stable(a), stable(b)))
+  })
+  const guaranteesStable = (): unknown => {
+    const guarantees = insight.semanticGuarantees
+    // 旧数据/外部写入可能给 null：与 undefined 同口径，且避免 Object.keys(null) 抛错
+    if (guarantees === undefined || guarantees === null) return null
+    const out: Record<string, unknown> = {}
+    for (const key of Object.keys(guarantees).sort()) out[key] = guaranteeStable(guarantees[key])
+    return out
+  }
+  h.update('\u0000guarantees:')
+  h.update(stable(guaranteesStable()))
   return h.digest('hex')
 }
 
@@ -351,7 +415,8 @@ export function executeMerge(service: DocService, projectId: string): MergeEndpo
   //（mergeAgentSupply 内部第一步做），不能假设沿用扫描时的划分。
   const { insight: baseInsight, graph } = loadInsight(service, '', {
     ignoreSnapshot: true,
-    supplyOverlay: false
+    supplyOverlay: false,
+    guarantees: false
   })
   const agents = [...new Set(ctx.scan.winners.map((w) => w.agent))].sort()
 
@@ -373,6 +438,16 @@ export function executeMerge(service: DocService, projectId: string): MergeEndpo
     winners: ctx.scan.winners,
     entries: ctx.scan.entries
   })
+
+  // 归档前补齐 KEY 担保：结构重置（partition/flows winner）会清掉旧的 source='api' 担保，
+  // 这里按复核缓存回放重建，保证归档快照里本地 KEY 产物仍带担保。失败不阻塞合并。
+  try {
+    readBackKeyGuarantees(mergeResult.insight, graph, cache)
+  } catch (e) {
+    console.warn(
+      `[autodoc] 合并归档前担保回放失败（已忽略，不影响合并）：${e instanceof Error ? e.message : String(e)}`
+    )
+  }
 
   // 供给缓存以本次扫描为事实来源整份重写（无条目的 pass 会被删掉），必须早于 noop 早退：
   // 否则 Agent 把文件全撤走时缓存永远不清，实时视图会继续套用已撤回的旧供给。
@@ -443,7 +518,12 @@ function buildPassDataMap(
       m = {}
       out.set(w.pass, m)
     }
-    m[w.objectId] = { value: e.value, agent: w.agent, writtenAt: e.writtenAt }
+    m[w.objectId] = {
+      value: e.value,
+      agent: w.agent,
+      writtenAt: e.writtenAt,
+      ...(e.guarantee ? { guarantee: e.guarantee } : {})
+    }
   }
   return out
 }

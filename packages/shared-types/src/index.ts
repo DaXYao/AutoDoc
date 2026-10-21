@@ -552,6 +552,14 @@ export interface ProjectInsight {
    * key = `${AgentSupplyPass}:${objectId}`，value = 生效的 agent 标识；未列出的 pass/对象 = 本地生成。
    */
   agentSources?: InsightAgentSources
+  /**
+   * 语义担保映射：key = `${pass}:${objectId}`（如 `narratives:chain:0`、`categories:<functionId>`）。
+   * Agent 供给由合并/实时 overlay 按**当前 winners** 重建（旧 Agent 担保先删除再写入，
+   * 被当前 winner 覆盖的 key/API 旧担保也会删除；partition / flows 变化时整份清空重建）；
+   * KEY 模式由 refreshInsightAI 末尾为 TS/JS 对象写入 source='api' 的静态/复核结果。
+   * 随洞察与快照持久化；缺省 = 全部未证实（旧数据/旧快照）。
+   */
+  semanticGuarantees?: Record<string, SemanticGuarantee>
 }
 
 /**
@@ -777,6 +785,153 @@ export type SemanticSource = 'api' | 'agent' | 'mixed'
  */
 export type InsightAgentSources = Record<string, string>
 
+/* ------------------------- 语义担保（SG1） ------------------------- */
+
+/**
+ * 语义担保等级：
+ * - verified  = 硬事实通过静态证据规则，且意图类断言已通过 KEY 第二遍 LLM 复核（SG2 起）；
+ * - declared  = Agent 供给自带证据与自审结论，系统验证证据结构与硬事实，但无法验证 Agent 是否真的复核；
+ * - unverified= 缺证据、证据不合格、复核否定或语言尚未接入，不进入主叙事。
+ */
+export type SemanticGuaranteeStatus = 'verified' | 'declared' | 'unverified'
+
+/** 单条断言（claim）的静态证据校验结果（intent 类恒为 not-applicable） */
+export type SemanticStaticStatus = 'pass' | 'fail' | 'not-applicable'
+
+/** 单条断言（claim）的复核状态：Agent 自审（SG1）或 KEY 第二遍 LLM（SG2）；not-run=仅静态硬事实 */
+export type SemanticReviewStatus = 'pass' | 'fail' | 'not-run'
+
+/** 担保来源：api=本地 KEY API（DeepSeek）第二遍 LLM 复核；agent=外部 Agent 供给自审 */
+export type SemanticGuaranteeSource = 'api' | 'agent'
+
+/**
+ * 语义断言种类：
+ * - 硬事实：call / order / containment / import / type / decorator / visibility /
+ *   category / core / role / external / block（必须有静态证据）；
+ * - 意图类：intent（无法静态证明，只能由复核担保）。
+ * import 已进入类型白名单，但本轮静态校验暂未接入（按未证实处理）。
+ */
+export type SemanticClaimKind =
+  | 'call'
+  | 'order'
+  | 'containment'
+  | 'import'
+  | 'type'
+  | 'decorator'
+  | 'visibility'
+  | 'category'
+  | 'core'
+  | 'role'
+  | 'external'
+  | 'block'
+  | 'intent'
+
+/** 证据来源种类（仅作可读标注，校验以锚点字段为准） */
+export type SemanticEvidenceKind =
+  | 'call'
+  | 'chain'
+  | 'module'
+  | 'signature'
+  | 'decorator'
+  | 'visibility'
+  | 'category'
+  | 'core'
+  | 'role'
+  | 'block'
+  | 'external'
+  | 'file'
+  | 'line'
+  | 'snippet'
+  | 'note'
+
+/**
+ * 代码证据锚点：至少一个锚点字段非空（校验器强制）。
+ * functionId/chainId/stepId/moduleId/fileId 必须能在当前实时图谱/洞察里解析；
+ * line 为 1 基行号（给了 functionId/fileId 时须落在其范围内）；
+ * snippet/detail 只作复核上下文，**不能单独证明硬事实，也不能单独担保 intent**。
+ */
+export interface SemanticEvidence {
+  kind?: SemanticEvidenceKind
+  /** 函数稳定 ID */
+  functionId?: string
+  /** 链路 ID（chain:N） */
+  chainId?: string
+  /** 调用步骤 ID（CallEdge.stepId，形如 `${callerId}>${calleeName}`） */
+  stepId?: string
+  /** 模块 ID（mod:N） */
+  moduleId?: string
+  /** 文件 ID（项目相对路径） */
+  fileId?: string
+  /** 1 基行号 */
+  line?: number
+  /** 符号名（外部调用为 calleeName） */
+  symbol?: string
+  /** 复核上下文（自由文本，不参与硬事实判定） */
+  detail?: string
+  /** 代码片段（自由文本，不参与硬事实判定） */
+  snippet?: string
+}
+
+/** 一条最小可核验断言；status 由服务端校验后写入，Agent 不得自带 */
+export interface SemanticClaim {
+  id: string
+  kind: SemanticClaimKind
+  /**
+   * 断言主体：必须解析到当前图谱/洞察中真实存在的对象（函数稳定 ID / 链路 ID / 模块 ID /
+   * 文件 ID / 外部符号 ID；partition/flows 额外允许 root）。不存在的 subject 一律未证实。
+   */
+  subject: string
+  /** 断言客体（被调函数、模块、链路、类型文本、类别等；视 kind 而定） */
+  object?: string
+  /** 人类可读的断言内容 */
+  text: string
+  evidence: SemanticEvidence[]
+  staticStatus: SemanticStaticStatus
+  reviewStatus: SemanticReviewStatus
+  status: SemanticGuaranteeStatus
+  /** 失败或降级原因 */
+  reason?: string
+}
+
+/** 单个语义对象（pass + objectId）的担保结果 */
+export interface SemanticGuarantee {
+  pass: AgentSupplyPass
+  objectId: string
+  status: SemanticGuaranteeStatus
+  source: SemanticGuaranteeSource
+  claims: SemanticClaim[]
+  reviewedAt?: string
+  /** 复核者：Agent 自审写 agent 标识；KEY 第二遍 LLM 复核成功后写 `key`（仅 reviewOutcome 成功时） */
+  reviewedBy?: string
+  /** 未证实/降级原因 */
+  reason?: string
+}
+
+/** Agent 提交的单条断言（不含服务端回填的 staticStatus/reviewStatus/status） */
+export interface AgentSupplyClaimInput {
+  /** 可选；缺省由服务端按顺序生成 `claim-N` */
+  id?: string
+  kind: SemanticClaimKind
+  subject: string
+  object?: string
+  text: string
+  evidence: SemanticEvidence[]
+}
+
+/** Agent 对整条语义对象的自审结论（verdict=pass 才可能进入 declared） */
+export interface AgentSupplyGuaranteeReview {
+  verdict: 'pass' | 'fail'
+  reason: string
+  /** 可选：Agent 复核时间（ISO，须可被 Date.parse 解析） */
+  reviewedAt?: string
+}
+
+/** Agent 供给文件里单条语义对象的担保输入（claims + 自审） */
+export interface AgentSupplyGuaranteeInput {
+  claims: AgentSupplyClaimInput[]
+  review: AgentSupplyGuaranteeReview
+}
+
 /**
  * 可被外部 Agent 供给的语义 pass：十个洞察侧 pass（partition + flows + modules + narratives + categories +
  * coreJudgment + coreRoles + blocks + keySteps + externals）+ 变更侧 changes。
@@ -990,6 +1145,13 @@ export interface AgentSupplyFile<P extends AgentSupplyPass = AgentSupplyPass> {
   basis?: string
   /** 对象 id → 该 pass 的值（形状见 AgentSupplyValueShapes） */
   values: Record<string, AgentSupplyValueShapes[P]>
+  /**
+   * 可选：对象 id → 语义担保输入（claims + 自审）。key 必须同时出现在 `values` 中；
+   * 缺省 = 该条目未证实（不报错、不阻塞合并）。SG1 仅 TypeScript/JavaScript 家族参与静态校验；
+   * guarantee 体积计入单条目（值 + guarantee）与单文件上限。
+   * 变更侧 `changes.<agent>.json` 暂不支持 `guarantees`（后续轮次接入）。
+   */
+  guarantees?: Record<string, AgentSupplyGuaranteeInput>
 }
 
 /** 校验通过的单个供给条目（对象级，G2 字段级合并的最小单位） */
@@ -1005,6 +1167,8 @@ export interface AgentSupplyEntry<P extends AgentSupplyPass = AgentSupplyPass> {
   writtenAt: string
   /** 来源文件名（供给目录内，如 `narratives.qoder.json`） */
   file: string
+  /** 文件级 guarantees 中属于本对象的担保输入（已通过结构与长度校验） */
+  guarantee?: AgentSupplyGuaranteeInput
 }
 
 /** 判别联合：按 entry.pass 收窄即可拿到对应值类型（G2 合并用） */
@@ -1047,6 +1211,8 @@ export interface AgentSupplyWinner {
   file: string
   /** 参与竞争的家数（>1 表示存在被覆盖的供给） */
   contenders: number
+  /** 胜出条目自带的语义担保输入（跟随 winner；落选者的 guarantee 不生效） */
+  guarantee?: AgentSupplyGuaranteeInput
 }
 
 /** 扫描规模统计（供界面状态条与契约文本抬头） */

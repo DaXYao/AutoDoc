@@ -42,10 +42,17 @@
 - [ ] **Python 零模型扩展**：类/嵌套作用域复用 `className`、嵌套函数/lambda 合成条目、`ParsedImport` 复用 + Python 专用 resolver；import 解析按绑定语义（unaliased `import a.b` 绑定顶层包、named/namespace/receiver 分开处理），`self/cls` 只按当前类（见 2026-10-21 P1 条）。
 - [ ] **Java 零模型扩展**：包+类路径进 `className`、类型推断结果写 `::Type` receiver、类索引 + 普通/static/嵌套 import、无 receiver 先本类后 static import、去掉简单类名全局兜底（见 2026-10-21 J1 条）。
 - [ ] **Go 零模型扩展**：包+类型进 `className`、`::pkg`/`::pkg?`/`::Type`/`::?` receiver、词法作用域类型推断、包目录/go.mod import 解析、按 calleeId 去重、重复 init 合成名（见 2026-10-21 G1 条）。
+- [ ] **契约示例可执行**：从代码生成的契约文本里反抽示例 JSON，直接喂给同一校验器断言最高档状态，防止「照抄示例必失败」（见 2026-10-21 SG2 条）。
 
 ---
 
 ## 成功经验条目
+
+### 2026-10-21 · 契约示例可执行：从生成文本反抽 JSON 跑同一校验器
+- **场景**：契约文本由代码生成，里面带「照抄即可」的 JSON 示例（如 Agent 供给 guarantees 的示例 J）。**适用条件**：示例中的 id 能取自同一测试夹具的索引，而不是占位符。
+- **做法**：测试用正则从 `generateSupplyRulesText` 输出中抽出 ` ```json ` 示例，`JSON.parse` 后把 `claims/review` 直接交给生产用的校验器（`validateGuaranteeClaims`），断言最高档状态；示例里的 target/moduleId 用夹具实算，避免占位符被跳过。
+- **验证清单**：示例键与 values 一致、每个 claim 都达到 declared、校验失败能定位到具体 claim。
+- **证据**：`packages/server/test/semanticGuarantee.test.ts`「示例 J 的 JSON 照抄即可通过 validateGuaranteeClaims（declared）」。
 
 ### 2026-10-21 · Vue SFC：复用脚本解析器 + 轻量模板扫描 + 合成模板入口
 - **场景**：已有 tree-sitter JS/TS 解析器，要给 `.vue` 增加文档与调用图支持。**适用条件**：SFC 的 script 块是标准 JS/TS；模板是 HTML 形态、事件处理器写在属性值里；不引入 HTML parser 依赖。

@@ -301,7 +301,11 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       const snapshotRecords = service.storage.listChangeRecords({ source: 'snapshot' })
       const supplyId = scopeToSupplyId(scope, snapshotRecords)
       if (supplyId) {
-        const { graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+        const { graph } = loadInsight(service, '', {
+          ignoreSnapshot: true,
+          supplyOverlay: false,
+          guarantees: false
+        })
         const light = collectChangesSupplyLight(service, projectId, graph, snapshotRecords)
         if (light) {
           const semantics = resolveChangesAgentSemantics(supplyId, light.winners, light.entries)

@@ -2,6 +2,38 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · SG2 收尾门禁：移除被调方分类通道 / narrative 锚点同源 / 证据与 null 口径回归 · server
+
+- **修复**：`FunctionPack.calls` 删除 `calleeCategory`，证据包不再经调用边带出被调函数分类（函数自身分类此前已移除，这是最后一条分类值通道）；`buildIntentObject` 的 `narrativeAllowed.moduleIds` 与 `addChainAnchor` 同源，只有 `graph.modules` 中真实存在的 `chain.moduleId` 才进入 allowed；`finalizeKeyGuarantees` 把 `null` 与 `undefined` 同口径，本轮无对象/无担保时不再把 `null` 写成 `{}`。
+- **测试**：证据包用例改为递归扫描 pack 全部键（含嵌套 calls），断言无 `/category$/i` 键且无 `isCore`，新增自调用 fixture（被担保主体同时为被调方）验证分类不经调用边泄漏；新增幽灵 `chain.moduleId` 反例（narrative 最终 unverified，原因含「无关/无法解析」）；新增单 part 返回 3 条合法证据仍按 `MAX_INTENT_EVIDENCE=2` 截断的回归；新增 `semanticGuarantees=null` 且无对象时保持 null。
+- **文档**：`docs/SEMANTIC_GUARANTEE.md` 补充调用边只保留代码事实字段（calleeName/calleeId/externalModule/stepId/line/role），不携带被调方分类。
+- **测试结果**：server 534 项、全仓 1159 项（core 366 / web 259）通过，`pnpm lint` 全绿。
+- **关联 commit**：随 SG1/SG2 一并提交。
+
+## 2026-10-21 · SG2 修复三轮：证据包彻底去分类值 / allowed 与锚点校验对齐 / 契约示例可执行 · server
+
+- **复审红线**：①撤回 AI 分类后，`fn.category` 仍以 `categorySource:'static'` 进入证据包，继续自证；②narrative 的 allowed 收 `chain.moduleId`，但锚点集合与 SG1 链路校验不收；externals 的 allowed 收 caller functionId，但最终校验要求 functionId+调用行，属「先判相关、后判无效」的假 unverified；③契约示例 J 的 intent 只有 `note` 证据，照抄必 unverified。
+- **修复**：`FunctionPack` 彻底删除 `category/categorySource`，证据包不携带任何分类/核心判定值；`addChainAnchor` 收真实 `chain.moduleId` 且 SG1 链路分支接受它；externals 的 allowed 改为 stepId + symbol + 逐调用点行号（caller functionId 必须配调用行）；stepRole 只认函数自身与链中相邻调用边；`functionPack/packsForFunctions` 支持 `includeStepIds`，keySteps 第 13 条以后的调用也进证据包；`MAX_INTENT_EVIDENCE` 10→2 与 prompt/文档一致；示例 J 的 containment 改用目标函数所属模块、intent 带 signature 锚点，契约按 subject 类型说明可接受锚点并注明 Agent category/core 只证明与当前值一致。
+- **健壮性**：`applyAgentGuaranteesToInsight` 在 try 前安全快照 winner.agent，catch 不再二次读取；旧 `semanticGuarantees` 为 null 时与 undefined 同口径，空结果不写成 `{}`；结构重置保留 `changes:` 键不变。
+- **文档**：`docs/SEMANTIC_GUARANTEE.md` 明确变更侧担保未接入、证据包不含分类值、每 part 最多 2 条证据、读取路径只回放缓存且合并归档前回放一次、Agent 自审最高 declared。
+- **测试**：新增 8 项（证据包三类场景无 category、chain.moduleId 叙事、stepRole 三种锚点、外部 caller+行/仅 caller、keySteps 第 13 条、24 节点 flows、未知/重复 part key、证据契约外字段、示例 J 直接校验、winner.agent 抛错、null 担保口径）；server 531 项、全仓 1156 项（core 366 / web 259）通过，`pnpm lint` 全绿。
+- **关联 commit**：随 SG1/SG2 一并提交。
+
+## 2026-10-21 · SG2 修复二轮：证据包去 AI 值 / allowed 锚点收紧 / flows 预算 / 归档与读取开关 · server
+
+- **初审红线**：①FunctionPack 夹带 `aiCategory/isCore`，第二遍复核拿 AI 自己的判断值自证；②fileId 单独即可让 function 片段过关，而 stepId/symbol/块内行等最强证据反而被判无关，所有 part 共用对象级 allowed；③`MAX_INTENT_PARTS=36` 与 `MAX_FLOW_NODES=24` 预算算术不一致（13 节点×3 段即永远未证实）。
+- **修复**：FunctionPack 删除 AI 判断字段，只保留源码静态 `category`（非 pending 且无 AI 分类时）+ `purpose`；coreRoles 对象文本去掉 category/isCore；prompt 升 v3 并明确「AI 判定是待复核断言、file 不能单独作证据、关键步骤用 stepId/调用行、内部步骤用块内行、外部用 symbol/调用点、每 part 证据 ≤2」。`IntentAllowed` 删除 fileIds，新增 symbols/lineRanges；categories/keySteps/blocks/modules/narratives/externals/partition/flows 的 allowed 按片段收紧（关键步骤只认本步 stepId+调用行，内部步骤只认本块行）。预算调整为静态+意图 200、意图片段 72、单函数事实生成到 >200 即停、maxTokens 12000，semanticGuarantee 的 claims 上限同步 200。
+- **同时修复**：pass+无关证据按畸形重试且不写缓存；`reviewedBy` 只在复核成功时写；blocks 证据包按 internalSteps 实际引用的 blockIndexes 选取（含第 6+ 块）；模块 name/description 任一非空即担保、name 单独成 part；外部 signature 单独成 part；intent claim 直接用 part.text；part key 唯一性对账；Agent winner 整段 try/catch、结构重置保留 `changes:` 键；executeMerge 归档前按复核缓存回放 KEY 担保；`loadInsight` 新增 `guarantees?: boolean`，供给索引/变更集/合并基线传 false，GET 保持 true；内容哈希容忍 null 担保；契约/共享类型/文档同步 `declared` 与 `verified` 分工；畸形 internalSteps 不再拖垮项目；空对象集不 prune 复核缓存。
+- **测试**：新增 15 项（证据包不含 AI 值、每个 pass 意图 claim 集合、fileId-only/stepId/symbol/块内行正反例、fail+无关证据可缓存、13 节点 flows verified 与 25 节点上限、30 条调用事实不再截断、201 条静态事实超限、读取路径零写/零删、reviewedBy 空缓存、loadInsight guarantees:false/无 KEY/回滚快照、结构重置保留 changes 并回放 api、模块 name-only、畸形 internalSteps、空对象集不 prune）；server 523 项、全仓 1148 项（core 366 / server 523 / web 259）通过，`pnpm lint` 全绿。
+- **关联 commit**：随 SG1/SG2 一并提交。
+
+## 2026-10-21 · SG2 修复：逐片段覆盖 / KEY 担保读取路径 / 非自证证据 · server
+
+- **初审问题**：①对象级覆盖缺失——一条泛化意图 claim 即可把整个 narratives/flows/partition 标 verified，stepRoles、节点文本、模块名与职责等未真正复核；②KEY 担保只在 refreshInsightAI 挂载，GET /api/insight 走 loadInsight 后 source=api 担保消失；③categories/coreJudgment 的静态 claim 复述当前 AI 值（自证），keySteps/blocks 的选择与文本未被复核，证据锚点过松，静态 claim 24 条截断无缺口检测，Agent 担保无逐 winner 隔离。
+- **修复**：意图复核改为服务端拆 part（分类与理由、核心判定与理由、系统角色、每个关键步骤、每条内部步骤、模块名/职责、叙事与每个 stepRole、每个脉络节点 label/summary/reason、外部符号 purpose、项目 summary）；LLM 必须逐 part 返回恰好一条记录，证据非空、可解析且命中该 part 允许集合，缺段/重复/未知段/空证据/无关证据一律未证实并重试。静态 claim 只保留代码事实（签名/可见性/装饰器/内部与外部调用、注释块、path/顺序/包含），生成到 >50 即停由装配判超限；不再用 category/core 复述 AI 判断值。新增同步 readBackKeyGuarantees（只读复核缓存，绝不发网络/写缓存），loadInsight 在 applySupplyOverlay 后回放，恢复页面读取的 source=api 担保。锚点收紧：line 不能单独定位，function/chain/module 主体支持 stepId/链路 path 归属；复核缓存只存契约原样字段，派生字段回读重算。applyAgentGuaranteesToInsight 逐 winner try/catch，坏 guarantee 只降级自身。
+- **测试**：SG2 27 项、SG1 44 项（新增逐片段覆盖、漏段、无关证据、空证据、分类/核心非自证、关键步骤/内部步骤否定、静态 51 条与 parts 40 个预算、读取路径回放、loadInsight 回归、Agent winner 异常隔离、line 单独不可定位与 function/chain/module 的 stepId 归属）；server 508 项、全仓 1133 项通过（core 366 / server 508 / web 259），`pnpm lint` 全绿。
+- **关联 commit**：未提交（随 SG1/SG2 一并提交）。
+
 ## 2026-10-21 · S0：语义担保目标与边界（文档）· docs
 
 - **现状**：Agent 供给与洞察合并只校验结构、字段与引用，不担保语义正确性；可能出现 id 全对、字段合规但与代码事实不符的链路叙事。

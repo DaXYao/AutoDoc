@@ -44,6 +44,7 @@ import {
   snapshotSourceOf
 } from './supplyCache.js'
 import { applyAgentPartitionToInsight } from './supplyPartition.js'
+import { attachKeyGuarantees, readBackKeyGuarantees } from './semanticVerifier.js'
 
 /** AI 划分信封（缓存单元）：members 为函数在索引表中的下标 */
 interface PartitionEnvelope {
@@ -1446,6 +1447,11 @@ export interface LoadInsightOptions {
    *    且合并结果依赖上一轮状态 → 不幂等，内容哈希去重失效。
    */
   supplyOverlay?: boolean
+  /**
+   * SG2：是否回放 KEY 语义担保缓存（缺省 true）。
+   * 供给层/变更侧/合并基线只需要结构、不需要担保，传 false 可避免为纯内部读路径重建担保。
+   */
+  guarantees?: boolean
 }
 
 /** 读取洞察：静态 + 命中缓存的 AI（不触发网络） */
@@ -1584,6 +1590,18 @@ export function loadInsight(
   // partition 已在最前面应用，overlay 只叠其余 pass 并按新 basis 读取；skipPartition 防重复改写。
   if (overlay) applySupplyOverlay(insight, graph, cache, { skipPartition: agentPartitionApplied })
   insight.aiGenerated = touched || insight.aiGenerated
+  // SG2：读取路径只回放复核缓存（绝不发网络、绝不写/删缓存），保证页面刷新、
+  // 合并基线或回滚后 KEY 语义仍带 source='api' 担保。逐对象 try/catch 在函数内部。
+  // guarantees:false 用于纯内部读路径（供给索引 / 变更集 / 合并基线），避免无谓重建担保。
+  if (opts.guarantees !== false) {
+    try {
+      readBackKeyGuarantees(insight, graph, cache)
+    } catch (e) {
+      console.warn(
+        `[autodoc] SG2 担保回放失败（已忽略，不影响洞察读取）：${e instanceof Error ? e.message : String(e)}`
+      )
+    }
+  }
   return { insight, graph }
 }
 
@@ -1966,6 +1984,25 @@ export async function refreshInsightAI(
     cache.reload()
     // partition 已在本函数最前面应用；overlay 只登记来源与状态（aiStatus.partition='ok'、aiSource='agent'），不重复改写结构。
     applySupplyOverlay(insight, graph, cache, { skipPartition: agentPartitionApplied })
+  }
+  // SG2：本地语义与 Agent overlay 全部套用后，为 TS/JS 家族对象生成语义担保。
+  // 硬事实走静态校验；意图类走 KEY 第二遍 LLM（命中 guarantee:* 缓存则不重复请求）。
+  // attachKeyGuarantees 内部逐对象 try/catch，失败只写 unverified，不得拖垮刷新/快照。
+  try {
+    const sg2 = await attachKeyGuarantees(insight, graph, cache, {
+      force: opts.force === true,
+      prune: true
+    })
+    if (sg2.objects > 0) {
+      console.log(
+        `[autodoc] SG2 语义担保：对象 ${sg2.objects}，verified ${sg2.verified}/unverified ${sg2.unverified}，` +
+          `LLM 复核 ${sg2.llmReviews}、缓存命中 ${sg2.cacheHits}`
+      )
+    }
+  } catch (e) {
+    console.warn(
+      `[autodoc] SG2 语义担保失败（已忽略，不影响洞察生成）：${e instanceof Error ? e.message : String(e)}`
+    )
   }
   // I2：chunk 增量统计入日志与返回值；I3：同时记入 service，供 /api/insight 家族响应附带下发
   console.log(

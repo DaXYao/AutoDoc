@@ -183,6 +183,20 @@ describe('scanChangesSupply（信封校验 + 文件名纪律）', () => {
     expect(res.fileCount).toBe(1)
   })
 
+  it('guarantees 在变更侧文件不受支持：整份拒绝并给明确原因', () => {
+    const dir = freshDir()
+    const envelope = JSON.parse(changesEnvelope('qoder', {
+      [`commit:${COMMIT_HASH}`]: { narrative: { what: '做了什么', why: '为什么', risks: [] } }
+    })) as Record<string, unknown>
+    envelope.guarantees = { [`commit:${COMMIT_HASH}`]: { claims: [], review: { verdict: 'pass', reason: 'ok' } } }
+    writeChanges(dir, 'changes.qoder.json', JSON.stringify(envelope))
+    const res = scanChanges(dir)
+    expect(res.entries).toEqual([])
+    expect(res.errors).toHaveLength(1)
+    expect(res.errors[0].path).toBe('guarantees')
+    expect(res.errors[0].reason).toContain('暂不支持 guarantees')
+  })
+
   it('坏 JSON / 顶层非对象：整份判错', () => {
     const dir = freshDir()
     writeChanges(dir, 'changes.qoder.json', '{ broken')

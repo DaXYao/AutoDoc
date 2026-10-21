@@ -1,5 +1,6 @@
 import type {
   AgentSupplyFlowsValue,
+  AgentSupplyGuaranteeInput,
   AgentSupplyKeyStepsValue,
   AgentSupplyPartitionModule,
   AgentSupplyPartitionValue,
@@ -21,6 +22,7 @@ import { isCategoryCandidate, markClassified } from './categoryCandidates.js'
 import { applyAgentPartitionToInsight } from './supplyPartition.js'
 import { applyAgentFlowsToInsight, validateAgentFlowShape } from './supplyFlows.js'
 import { collectGraphExternalSymbols, SUPPLY_PASSES } from './agentSupply.js'
+import { applyAgentGuaranteesToInsight } from './semanticGuarantee.js'
 
 /* ------------------------- 供给缓存命名空间 ------------------------- */
 
@@ -30,6 +32,8 @@ export interface SupplyValueEntry {
   agent: string
   /** 供给文件自身的 writtenAt：flows 的时间戳口径必须与归档快照一致（不能用合并时刻凑） */
   writtenAt?: string
+  /** 该对象的语义担保输入（SG1）：overlay 套用后由 applyAgentGuaranteesToInsight 校验并写入洞察 */
+  guarantee?: AgentSupplyGuaranteeInput
 }
 
 /**
@@ -118,7 +122,7 @@ export function readSupplyCache(
 export function readPartitionSupply(
   cache: AiCache,
   fingerprint: string
-): { value: AgentSupplyPartitionValue; agent: string } | null {
+): { value: AgentSupplyPartitionValue; agent: string; guarantee?: AgentSupplyGuaranteeInput } | null {
   const entry = cache.getGlobal<SupplyCacheEntry>(supplyCacheKey('partition'))
   if (!entry || typeof entry !== 'object') return null
   if (entry.fingerprint !== fingerprint) return null
@@ -145,7 +149,8 @@ export function readPartitionSupply(
   const value: AgentSupplyPartitionValue = { modules }
   if (typeof source.summary === 'string') value.summary = source.summary
   const agent = typeof item.agent === 'string' && item.agent.length > 0 ? item.agent : 'agent'
-  return { value, agent }
+  const guarantee = item.guarantee && typeof item.guarantee === 'object' ? item.guarantee : undefined
+  return { value, agent, ...(guarantee ? { guarantee } : {}) }
 }
 
 /**
@@ -157,7 +162,7 @@ export function readFlowsSupply(
   cache: AiCache,
   fingerprint: string,
   basis: string
-): { value: AgentSupplyFlowsValue; agent: string; writtenAt: string } | null {
+): { value: AgentSupplyFlowsValue; agent: string; writtenAt: string; guarantee?: AgentSupplyGuaranteeInput } | null {
   const entry = cache.getGlobal<SupplyCacheEntry>(supplyCacheKey('flows'))
   if (!entry || typeof entry !== 'object') return null
   if (entry.fingerprint !== fingerprint || entry.basis !== basis) return null
@@ -174,7 +179,8 @@ export function readFlowsSupply(
       : typeof entry.mergedAt === 'string'
         ? entry.mergedAt
         : ''
-  return { value: shape.value, agent, writtenAt }
+  const guarantee = item.guarantee && typeof item.guarantee === 'object' ? item.guarantee : undefined
+  return { value: shape.value, agent, writtenAt, ...(guarantee ? { guarantee } : {}) }
 }
 
 /* ------------------------- 单条目写入洞察 ------------------------- */
@@ -625,6 +631,9 @@ export function applySupplyOverlay(
   const supplied = new Map<AgentSupplyPass, number>()
   // 并集合并：基线可能已带来源标记，整份替换会让旧键丢失（Agent 写的字段被标成本地）
   const agentSources: InsightAgentSources = { ...insight.agentSources }
+  // 语义担保只跟随「实际套用成功」的供给条目；缺 guarantee 的 winner 也传入
+  //（用于清掉同 key 的旧担保——内容已被本轮 winner 覆盖，旧担保失效）。
+  const appliedWinners: AgentSupplyWinner[] = []
 
   // 1) 结构层：partition 只按图指纹读取（它就是 basis 的来源），且必须先于其它 pass 应用
   const partition = readPartitionSupply(cache, graph.fingerprint)
@@ -638,6 +647,15 @@ export function applySupplyOverlay(
     if (applied) {
       supplied.set('partition', 1)
       agentSources['partition:root'] = partition.agent
+      appliedWinners.push({
+        pass: 'partition',
+        objectId: 'root',
+        agent: partition.agent,
+        writtenAt: '',
+        file: '',
+        contenders: 1,
+        ...(partition.guarantee ? { guarantee: partition.guarantee } : {})
+      })
     }
   }
 
@@ -653,12 +671,22 @@ export function applySupplyOverlay(
     if (outcome !== 'missing') {
       supplied.set('flows', 1)
       agentSources['flows:root'] = flows.agent
+      appliedWinners.push({
+        pass: 'flows',
+        objectId: 'root',
+        agent: flows.agent,
+        writtenAt: flows.writtenAt,
+        file: '',
+        contenders: 1,
+        ...(flows.guarantee ? { guarantee: flows.guarantee } : {})
+      })
     }
   }
 
   // 3) 其余 pass：用**应用 partition 之后**的 basis 读缓存（旧划分下的语义供给自然失效）
   const supplyData = readSupplyCache(cache, graph.fingerprint, basis)
   if (supplyData.size === 0) {
+    if (applyAgentGuaranteesToInsight(insight, graph, appliedWinners)) changed = true
     if (Object.keys(agentSources).length === 0) return changed
     insight.agentSources = agentSources
     insight.aiGenerated = true
@@ -683,18 +711,30 @@ export function applySupplyOverlay(
         agent,
         writtenAt: '',
         file: '',
-        contenders: 1
+        contenders: 1,
+        ...(item.guarantee ? { guarantee: item.guarantee } : {})
       }
-      const fakeEntry = { pass, objectId, value: item.value, agent, writtenAt: '', file: '' } as AnyAgentSupplyEntry
+      const fakeEntry = {
+        pass,
+        objectId,
+        value: item.value,
+        agent,
+        writtenAt: '',
+        file: '',
+        ...(item.guarantee ? { guarantee: item.guarantee } : {})
+      } as AnyAgentSupplyEntry
       const outcome = applyWinnerToInsight(insight, graph, fakeWinner, fakeEntry)
       if (outcome === 'missing') continue
       if (outcome === 'changed') changed = true
+      // 无论有没有 guarantee 都登记：applyAgentGuaranteesToInsight 需要知道该 key 已被本轮覆盖
+      appliedWinners.push(fakeWinner)
       n++
       agentSources[`${pass}:${objectId}`] = agent
     }
     supplied.set(pass, n)
   }
 
+  if (applyAgentGuaranteesToInsight(insight, graph, appliedWinners)) changed = true
   if (Object.keys(agentSources).length === 0) return changed
   insight.agentSources = agentSources
   insight.aiGenerated = true

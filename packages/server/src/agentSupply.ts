@@ -5,10 +5,13 @@ import { classifyFunction } from '@autodoc/core'
 import type {
   AgentSupplyBaseline,
   AgentSupplyCategoryValue,
+  AgentSupplyClaimInput,
   AgentSupplyCoreValue,
   AgentSupplyEntry,
   AgentSupplyError,
   AgentSupplyExportResponse,
+  AgentSupplyGuaranteeInput,
+  AgentSupplyGuaranteeReview,
   AgentSupplyIgnored,
   AgentSupplyKeyStepsValue,
   AgentSupplyModuleValue,
@@ -32,7 +35,10 @@ import type {
   FunctionDoc,
   InsightChain,
   InsightModule,
-  InternalStep
+  InternalStep,
+  SemanticClaimKind,
+  SemanticEvidence,
+  SemanticEvidenceKind
 } from '@autodoc/shared-types'
 import type { DocService } from './context.js'
 import { flowsBasis } from './flow.js'
@@ -263,14 +269,62 @@ const LEN = {
   /** flows 节点字段上限（与 supplyFlows 的形状校验保持一致） */
   flowLabel: 200,
   flowSummary: 2000,
-  flowReason: 1000
+  flowReason: 1000,
+  /** 语义担保：claim / evidence / review（SG1） */
+  claimId: 200,
+  claimSubject: 400,
+  claimObject: 400,
+  claimText: 2000,
+  guaranteeReason: 1000,
+  evidenceId: 400,
+  evidenceSymbol: 400,
+  evidenceDetail: 1000,
+  evidenceSnippet: 2000,
+  reviewedAt: 40
 } as const
 const MAX_STEP_ROLES_PER_CHAIN = 80
 const MAX_STEPS_PER_FUNCTION = 80
 const MAX_KEY_STEP_CALLEES = 200
+/** 单条语义对象的担保上限（claims / 每条 claim 的 evidence） */
+const MAX_GUARANTEE_CLAIMS = 50
+const MAX_GUARANTEE_EVIDENCE = 50
+/** SG1 契约：import 静态校验尚未接入（与 semanticGuarantee.ts 同口径） */
+const IMPORT_UNSUPPORTED_REASON = 'TypeScript 轮次暂不支持 import 静态校验'
 
 const STEP_KINDS: InternalStep['kind'][] = ['step', 'banner', 'todo', 'deadcode']
 const CATEGORIES: Category[] = ['business', 'implementation', 'utility']
+const GUARANTEE_CLAIM_KINDS: SemanticClaimKind[] = [
+  'call',
+  'order',
+  'containment',
+  'import',
+  'type',
+  'decorator',
+  'visibility',
+  'category',
+  'core',
+  'role',
+  'external',
+  'block',
+  'intent'
+]
+const GUARANTEE_EVIDENCE_KINDS: SemanticEvidenceKind[] = [
+  'call',
+  'chain',
+  'module',
+  'signature',
+  'decorator',
+  'visibility',
+  'category',
+  'core',
+  'role',
+  'block',
+  'external',
+  'file',
+  'line',
+  'snippet',
+  'note'
+]
 
 /** 索引规模控制：每模块核心函数 / 文件上限（防整仓索引撑爆契约文本） */
 const INDEX_CORE_FUNCTIONS_PER_MODULE = 15
@@ -958,6 +1012,275 @@ function validateEntry(
   }
 }
 
+/* ------------------------- 语义担保（SG1，文件级 guarantees） ------------------------- */
+
+type GuaranteeOutcome<T> = { kind: 'ok'; value: T } | { kind: 'error'; reason: string; field?: string }
+
+function guaranteeFail(reason: string, field?: string): GuaranteeOutcome<never> {
+  return field === undefined ? { kind: 'error', reason } : { kind: 'error', reason, field }
+}
+
+function guaranteePath(objectId: string, field?: string): string {
+  const base = `guarantees[${JSON.stringify(cutEcho(objectId))}]`
+  if (!field) return base
+  return field.startsWith('[') ? `${base}${field}` : `${base}.${field}`
+}
+
+/** 单条证据：闭集字段 + 至少一个锚点 + 长度/行号校验（锚点是否存在由静态校验器负责） */
+function parseGuaranteeEvidence(raw: unknown, at: string): GuaranteeOutcome<SemanticEvidence> {
+  if (!isPlainObject(raw)) return guaranteeFail(`${at} 必须是对象`, at)
+  const allowed = [
+    'kind',
+    'functionId',
+    'chainId',
+    'stepId',
+    'moduleId',
+    'fileId',
+    'line',
+    'symbol',
+    'detail',
+    'snippet'
+  ]
+  const extra = Object.keys(raw).filter((k) => !allowed.includes(k))
+  if (extra.length > 0) {
+    return guaranteeFail(`${at} 存在契约外字段 ${echoValue(extra.join(','))}（只接受 ${allowed.join(' / ')}）`, at)
+  }
+  const evidence: SemanticEvidence = {}
+  const idFields: { key: 'functionId' | 'chainId' | 'stepId' | 'moduleId' | 'fileId'; max: number }[] = [
+    { key: 'functionId', max: LEN.evidenceId },
+    { key: 'chainId', max: LEN.evidenceId },
+    { key: 'stepId', max: LEN.evidenceId },
+    { key: 'moduleId', max: LEN.evidenceId },
+    { key: 'fileId', max: LEN.evidenceId }
+  ]
+  for (const { key, max } of idFields) {
+    const parsed = optionalText(raw, key, max)
+    if (parsed.kind !== 'ok') return guaranteeFail(`${at}.${parsed.reason}`, `${at}.${key}`)
+    if (parsed.value !== undefined) evidence[key] = parsed.value
+  }
+  if (raw.kind !== undefined && raw.kind !== null) {
+    if (typeof raw.kind !== 'string' || !GUARANTEE_EVIDENCE_KINDS.includes(raw.kind as SemanticEvidenceKind)) {
+      return guaranteeFail(`${at}.kind 必须是 ${GUARANTEE_EVIDENCE_KINDS.join(' / ')} 之一`, `${at}.kind`)
+    }
+    evidence.kind = raw.kind as SemanticEvidenceKind
+  }
+  if (raw.line !== undefined && raw.line !== null) {
+    if (typeof raw.line !== 'number' || !Number.isInteger(raw.line) || raw.line < 1) {
+      return guaranteeFail(`${at}.line 必须是 ≥1 的整数（1 基行号）`, `${at}.line`)
+    }
+    evidence.line = raw.line
+  }
+  const textFields: { key: 'symbol' | 'detail' | 'snippet'; max: number }[] = [
+    { key: 'symbol', max: LEN.evidenceSymbol },
+    { key: 'detail', max: LEN.evidenceDetail },
+    { key: 'snippet', max: LEN.evidenceSnippet }
+  ]
+  for (const { key, max } of textFields) {
+    const parsed = optionalText(raw, key, max)
+    if (parsed.kind !== 'ok') return guaranteeFail(`${at}.${parsed.reason}`, `${at}.${key}`)
+    if (parsed.value !== undefined) evidence[key] = parsed.value
+  }
+  const hasAnchor =
+    evidence.functionId !== undefined ||
+    evidence.chainId !== undefined ||
+    evidence.stepId !== undefined ||
+    evidence.moduleId !== undefined ||
+    evidence.fileId !== undefined ||
+    evidence.line !== undefined ||
+    evidence.symbol !== undefined ||
+    evidence.snippet !== undefined ||
+    evidence.detail !== undefined
+  if (!hasAnchor) {
+    return guaranteeFail(
+      `${at} 至少需要一个锚点（functionId / chainId / stepId / moduleId / fileId / line / symbol / detail / snippet）`,
+      at
+    )
+  }
+  return { kind: 'ok', value: evidence }
+}
+
+/** 单条 claim：字段闭集 + kind 白名单 + text/evidence 上限（staticStatus 等由服务端回填） */
+function parseGuaranteeClaim(raw: unknown, index: number): GuaranteeOutcome<AgentSupplyClaimInput> {
+  const at = `claims[${index}]`
+  if (!isPlainObject(raw)) return guaranteeFail(`${at} 必须是对象`, at)
+  const allowed = ['id', 'kind', 'subject', 'object', 'text', 'evidence']
+  const extra = Object.keys(raw).filter((k) => !allowed.includes(k))
+  if (extra.length > 0) {
+    return guaranteeFail(
+      `${at} 存在契约外字段 ${echoValue(extra.join(','))}（只接受 ${allowed.join(' / ')}；` +
+        'staticStatus/reviewStatus/status 由服务端回填）',
+      at
+    )
+  }
+  const id = optionalText(raw, 'id', LEN.claimId)
+  if (id.kind !== 'ok') return guaranteeFail(`${at}.${id.reason}`, `${at}.id`)
+  const kindRaw = raw.kind
+  if (typeof kindRaw !== 'string' || !GUARANTEE_CLAIM_KINDS.includes(kindRaw as SemanticClaimKind)) {
+    return guaranteeFail(
+      `${at}.kind 必须是 ${GUARANTEE_CLAIM_KINDS.join(' / ')} 之一（收到 ${echoValue(kindRaw)}）`,
+      `${at}.kind`
+    )
+  }
+  const subject = requireText(raw, 'subject', LEN.claimSubject)
+  if (subject.kind !== 'ok') return guaranteeFail(`${at}.${subject.reason}`, `${at}.subject`)
+  const object = optionalText(raw, 'object', LEN.claimObject)
+  if (object.kind !== 'ok') return guaranteeFail(`${at}.${object.reason}`, `${at}.object`)
+  const text = requireText(raw, 'text', LEN.claimText)
+  if (text.kind !== 'ok') return guaranteeFail(`${at}.${text.reason}`, `${at}.text`)
+  const rawEvidence = raw.evidence
+  if (!Array.isArray(rawEvidence) || rawEvidence.length === 0) {
+    return guaranteeFail(`${at}.evidence 必须是非空数组`, `${at}.evidence`)
+  }
+  if (rawEvidence.length > MAX_GUARANTEE_EVIDENCE) {
+    return guaranteeFail(`${at}.evidence 超过 ${MAX_GUARANTEE_EVIDENCE} 条上限`, `${at}.evidence`)
+  }
+  const evidence: SemanticEvidence[] = []
+  for (let i = 0; i < rawEvidence.length; i++) {
+    const parsed = parseGuaranteeEvidence(rawEvidence[i], `${at}.evidence[${i}]`)
+    if (parsed.kind !== 'ok') return guaranteeFail(parsed.reason, parsed.field ?? `${at}.evidence[${i}]`)
+    evidence.push(parsed.value)
+  }
+  const claim: AgentSupplyClaimInput = {
+    kind: kindRaw as SemanticClaimKind,
+    subject: subject.value,
+    text: text.value,
+    evidence
+  }
+  if (id.value !== undefined) claim.id = id.value
+  if (object.value !== undefined) claim.object = object.value
+  return { kind: 'ok', value: claim }
+}
+
+/** 自审：verdict 合法且 reason 非空；reviewedAt 若给须可解析 */
+function parseGuaranteeReview(raw: unknown): GuaranteeOutcome<AgentSupplyGuaranteeReview> {
+  if (!isPlainObject(raw)) return guaranteeFail('review 必须是对象 { verdict, reason, reviewedAt? }', 'review')
+  const extra = Object.keys(raw).filter((k) => !['verdict', 'reason', 'reviewedAt'].includes(k))
+  if (extra.length > 0) {
+    return guaranteeFail(
+      `review 存在契约外字段 ${echoValue(extra.join(','))}（只接受 verdict / reason / reviewedAt）`,
+      'review'
+    )
+  }
+  if (raw.verdict !== 'pass' && raw.verdict !== 'fail') {
+    return guaranteeFail('review.verdict 必须是 pass 或 fail', 'review.verdict')
+  }
+  const reason = requireText(raw, 'reason', LEN.guaranteeReason)
+  if (reason.kind !== 'ok') return guaranteeFail(`review.${reason.reason}`, 'review.reason')
+  const reviewedAt = optionalText(raw, 'reviewedAt', LEN.reviewedAt)
+  if (reviewedAt.kind !== 'ok') return guaranteeFail(`review.${reviewedAt.reason}`, 'review.reviewedAt')
+  if (reviewedAt.value !== undefined && Number.isNaN(Date.parse(reviewedAt.value))) {
+    return guaranteeFail('review.reviewedAt 若提供须为可解析的 ISO 时间字符串', 'review.reviewedAt')
+  }
+  const review: AgentSupplyGuaranteeReview = { verdict: raw.verdict, reason: reason.value }
+  if (reviewedAt.value !== undefined) review.reviewedAt = reviewedAt.value
+  return { kind: 'ok', value: review }
+}
+
+/** 单个 objectId 的担保：claims 1..50 + review */
+function parseGuaranteeValue(raw: unknown): GuaranteeOutcome<AgentSupplyGuaranteeInput> {
+  if (!isPlainObject(raw)) return guaranteeFail('值必须是对象 { claims, review }')
+  const extra = Object.keys(raw).filter((k) => !['claims', 'review'].includes(k))
+  if (extra.length > 0) {
+    return guaranteeFail(`存在契约外字段 ${echoValue(extra.join(','))}（只接受 claims / review）`, extra[0])
+  }
+  const rawClaims = raw.claims
+  if (!Array.isArray(rawClaims) || rawClaims.length === 0) {
+    return guaranteeFail('claims 必须是非空数组', 'claims')
+  }
+  if (rawClaims.length > MAX_GUARANTEE_CLAIMS) {
+    return guaranteeFail(`claims 超过 ${MAX_GUARANTEE_CLAIMS} 条上限`, 'claims')
+  }
+  const claims: AgentSupplyClaimInput[] = []
+  const ids = new Set<string>()
+  for (let i = 0; i < rawClaims.length; i++) {
+    const parsed = parseGuaranteeClaim(rawClaims[i], i)
+    if (parsed.kind !== 'ok') return guaranteeFail(parsed.reason, parsed.field ?? `claims[${i}]`)
+    const claim = parsed.value
+    if (claim.id !== undefined) {
+      if (ids.has(claim.id)) return guaranteeFail(`claim id 重复：${echoValue(claim.id)}`, `claims[${i}].id`)
+      ids.add(claim.id)
+    }
+    claims.push(claim)
+  }
+  const review = parseGuaranteeReview(raw.review)
+  if (review.kind !== 'ok') return guaranteeFail(review.reason, review.field ?? 'review')
+  return { kind: 'ok', value: { claims, review: review.value } }
+}
+
+/**
+ * 解析文件级 guarantees：key 必须同时出现在本文件 values 中。
+ * 坏 guarantee 只进 errors（不废整份文件、不影响其它条目）；缺省/空对象均为无担保。
+ * guarantee 体积计入该条目的单条目上限（值 + guarantee 合计），文件上限由读前体积闸口自然覆盖。
+ */
+function parseGuarantees(
+  raw: unknown,
+  values: Record<string, unknown>,
+  pass: AgentSupplyPass,
+  file: string
+): { guarantees: Map<string, AgentSupplyGuaranteeInput>; errors: AgentSupplyError[] } {
+  const guarantees = new Map<string, AgentSupplyGuaranteeInput>()
+  const errors: AgentSupplyError[] = []
+  if (raw === undefined || raw === null) return { guarantees, errors }
+  if (!isPlainObject(raw)) {
+    errors.push({ file, path: 'guarantees', reason: 'guarantees 必须是「对象 id → { claims, review }」的 map' })
+    return { guarantees, errors }
+  }
+  const ids = Object.keys(raw)
+  if (ids.length > SUPPLY_VALUES_MAX_ENTRIES) {
+    errors.push({ file, path: 'guarantees', reason: `guarantees 条目数超过 ${SUPPLY_VALUES_MAX_ENTRIES} 上限` })
+    return { guarantees, errors }
+  }
+  const valuesIds = new Set(Object.keys(values))
+  const entryMax = entryMaxBytesOf(pass)
+  for (const objectId of ids) {
+    const at = guaranteePath(objectId)
+    if (objectId.trim().length === 0) {
+      errors.push({ file, path: at, reason: 'guarantees 的对象 id 不能是空串' })
+      continue
+    }
+    if (!valuesIds.has(objectId)) {
+      errors.push({
+        file,
+        path: at,
+        objectId,
+        reason: `guarantees 的对象 id 必须同时出现在本文件 values 中：${cutEcho(objectId)}`
+      })
+      continue
+    }
+    const parsed = parseGuaranteeValue(raw[objectId])
+    if (parsed.kind !== 'ok') {
+      errors.push({
+        file,
+        path: parsed.field ? guaranteePath(objectId, parsed.field) : at,
+        objectId,
+        reason: parsed.reason
+      })
+      continue
+    }
+    let bytes = 0
+    try {
+      bytes =
+        Buffer.byteLength(JSON.stringify(values[objectId]) ?? '', 'utf-8') +
+        Buffer.byteLength(JSON.stringify(parsed.value) ?? '', 'utf-8')
+    } catch {
+      errors.push({ file, path: at, objectId, reason: '条目值 + guarantee 无法序列化为 JSON' })
+      continue
+    }
+    if (bytes > entryMax) {
+      const limit = entryMax >= 1024 * 1024 ? `${entryMax / 1024 / 1024}MB` : `${entryMax / 1024}KB`
+      errors.push({
+        file,
+        path: at,
+        objectId,
+        reason: `条目值 + guarantee 合计超过单条目 ${limit} 上限（guarantee 计入体积）`
+      })
+      continue
+    }
+    guarantees.set(objectId, parsed.value)
+  }
+  return { guarantees, errors }
+}
+
 /** 信封校验 + 逐条目校验（文件级错误整份拒绝，条目级错误进 errors 但好条目照用） */
 function parseSupplyFile(
   ctx: ValidateCtx,
@@ -985,7 +1308,7 @@ function parseSupplyFile(
     reject('顶层必须是 JSON 对象')
     return { entries, errors, ignored }
   }
-  const extra = checkNoExtraKeys(data, ['pass', 'agent', 'writtenAt', 'basis', 'values'])
+  const extra = checkNoExtraKeys(data, ['pass', 'agent', 'writtenAt', 'basis', 'values', 'guarantees'])
   if (extra) {
     reject(extra.reason, extra.field)
     return { entries, errors, ignored }
@@ -1049,6 +1372,11 @@ function parseSupplyFile(
     reject(`values 条目数超过 ${SUPPLY_VALUES_MAX_ENTRIES} 上限`, 'values')
     return { entries, errors, ignored }
   }
+  // 语义担保是条目附属信息：坏 guarantee 只进 errors，不废整份文件/其它条目。
+  // 先解析（只做结构与长度校验），再在逐条目采纳时挂到对应 entry（objectId 必须存在于本文件 values）。
+  const guaranteeResult = parseGuarantees(data.guarantees, data.values, filePass, file)
+  errors.push(...guaranteeResult.errors)
+  const guarantees = guaranteeResult.guarantees
   const writtenAt = data.writtenAt
   // partition / flows 是整份结构（结构层）：values 唯一键 root，值做原子校验（任何覆盖缺口/未知引用整份拒绝），
   // 不进入逐条循环——逐条降级会让半份划分/半棵树生效，结构失真比整份拒绝危险得多。
@@ -1060,7 +1388,10 @@ function parseSupplyFile(
     if (filePass === 'partition') {
       const res = validatePartitionValue(data.values.root, ctx)
       if (res.kind === 'ok') {
-        entries.push(entryOf('partition', 'root', res.value, fileAgent, writtenAt, file))
+        const entry = entryOf('partition', 'root', res.value, fileAgent, writtenAt, file)
+        const guarantee = guarantees.get('root')
+        if (guarantee) entry.guarantee = guarantee
+        entries.push(entry)
       } else if (res.kind === 'ignored') {
         ignored.push({ file, pass: 'partition', objectId: 'root', reason: res.reason })
       } else {
@@ -1080,12 +1411,17 @@ function parseSupplyFile(
       errors.push({ file, path: pathOf('root', built.path), objectId: 'root', reason: built.reason })
       return { entries, errors, ignored }
     }
-    entries.push(entryOf('flows', 'root', shape.value, fileAgent, writtenAt, file))
+    const flowEntry = entryOf('flows', 'root', shape.value, fileAgent, writtenAt, file)
+    const flowGuarantee = guarantees.get('root')
+    if (flowGuarantee) flowEntry.guarantee = flowGuarantee
+    entries.push(flowEntry)
     return { entries, errors, ignored }
   }
   for (const objectId of ids) {
     const res = validateEntry(ctx, filePass, fileAgent, writtenAt, file, objectId, data.values[objectId])
     if (res.kind === 'entry') {
+      const guarantee = guarantees.get(objectId)
+      if (guarantee) res.entry.guarantee = guarantee
       entries.push(res.entry)
     } else if (res.kind === 'error') {
       errors.push({ file, path: pathOf(objectId, res.field), objectId, reason: res.reason })
@@ -1270,7 +1606,8 @@ export function pickWinners(entries: AnyAgentSupplyEntry[]): AgentSupplyWinner[]
       agent: top.agent,
       writtenAt: top.writtenAt,
       file: top.file,
-      contenders: sorted.length
+      contenders: sorted.length,
+      ...(top.guarantee ? { guarantee: top.guarantee } : {})
     })
   }
   const passOrder = new Map<AgentSupplyPass, number>(SUPPLY_PASSES.map((p, i) => [p, i]))
@@ -1916,7 +2253,7 @@ function buildRulesText(
   L.push('  - 文件内的 `pass` / `agent` 字段必须与文件名**逐字一致**，否则整份判错。')
   L.push(
     `- 编码 UTF-8；\`partition\` / \`flows\` 单文件与单条目 ≤ ${SUPPLY_PARTITION_FILE_MAX_BYTES / 1024 / 1024}MB，` +
-      `其余 pass 单文件 ≤ ${SUPPLY_FILE_MAX_BYTES / 1024}KB、单条目 ≤ ${SUPPLY_ENTRY_MAX_BYTES / 1024}KB；` +
+      `其余 pass 单文件 ≤ ${SUPPLY_FILE_MAX_BYTES / 1024}KB、单条目 ≤ ${SUPPLY_ENTRY_MAX_BYTES / 1024}KB（语义担保 guarantees 计入同一条目/文件体积）；` +
       `values 条目数 ≤ ${SUPPLY_VALUES_MAX_ENTRIES}（partition / flows 固定只有 1 条）；子目录与非 \`.json\` 文件一律忽略。`
   )
   L.push(
@@ -1933,7 +2270,22 @@ function buildRulesText(
       writtenAt: '2026-01-01T00:00:00.000Z',
       basis:
         '<仅 modules / narratives / flows 必填：逐字抄下面给出的当前值；partition 与函数类 pass 禁止携带>',
-      values: { '<对象id>': '<该 pass 的值，形状见第 4 节；partition / flows 唯一键为 root>' }
+      values: { '<对象id>': '<该 pass 的值，形状见第 4 节；partition / flows 唯一键为 root>' },
+      guarantees: {
+        '<对象id>': {
+          claims: [
+            {
+              id: 'c1',
+              kind: '<call / order / containment / type / decorator / visibility / category / core / role / external / block / intent>',
+              subject: '<函数 / 链路 / 模块 / 外部符号的稳定 id>',
+              object: '<被调函数、模块、链路、类型文本、类别等（视 kind 而定，可省略）>',
+              text: '一条最小可核验断言。',
+              evidence: [{ functionId: '<对象id>', line: 1, detail: '对照用的代码锚点。' }]
+            }
+          ],
+          review: { verdict: 'pass', reason: '已对照图谱与代码锚点逐条核对。', reviewedAt: '2026-01-01T00:00:00.000Z' }
+        }
+      }
     })
   )
   L.push('')
@@ -1946,6 +2298,9 @@ function buildRulesText(
     '| basis | modules / narratives / flows **必填**，其余 pass（含 partition、函数类、externals）**禁止** | 划分身份指纹，逐字抄下面的当前值；不符 = 契约已过期（模块划分已变），整份判错 |'
   )
   L.push('| values | 是 | 非空 map：键 = 对象 id（partition / flows 只能是 `root`；其余为 moduleId / chainId / functionId / externals 的 `module::symbol`），值 = 该 pass 的内容 |')
+  L.push(
+    '| guarantees | 否 | 可选 map：键必须同时出现在本文件 `values` 中；值 = `{ claims, review }`（见 4.10）。缺省 = 该条目未证实；坏 guarantee 只进错误清单，不废整份文件/其它条目 |'
+  )
   L.push('')
   L.push(
     `- **当前 basis（逐字复制，不要改大小写或补空格）**：\`${baseline.basis}\`` +
@@ -2189,6 +2544,93 @@ function buildRulesText(
     '- 同一个符号被多家 Agent 供给时仍按 `writtenAt` 最新者赢；冲突只影响该符号，不会整模块覆盖。'
   )
   L.push('')
+  L.push('### 4.10 `guarantees` — 语义担保（可选，随语义对象提交）')
+  L.push('')
+  L.push(
+    '- **目的**：让每条语义断言都能追溯到代码证据，并如实标注可信等级。' +
+      '缺省 `guarantees` 的条目视为**未证实**（不报错、不阻塞合并）；你也可以对每条语义对象都提供 claims + 自审。'
+  )
+  L.push(
+    '- **等级**：`declared` = 所有硬事实 claim 静态证据通过，且 `review.verdict=\'pass\'`；' +
+      '否则 `unverified`。Agent 自审最高只能到 `declared`；本地 KEY 产物由第二遍 LLM 复核为 `verified`。'
+  )
+  L.push(
+    '- **category / core 的证明边界**：Agent 的 `category` / `core` claim 只证明与合并后的当前值一致，' +
+      '最高仍是 `declared`，不会升级为 `verified`。'
+  )
+  L.push(
+    '- **语言范围（本轮）**：仅 TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）。' +
+      '`.vue` / `.cs` / `.cpp` / `.py` / `.java` / `.go` 等其它语言、以及包含非 TS 文件的项目级对象（partition / flows / 混合模块 / 混合链路）' +
+      '一律 `unverified`，原因「该语言尚未接入语义担保」。'
+  )
+  L.push(
+    '- **对象覆盖**：`guarantees` 的键必须同时出现在同文件 `values` 中；claims 至少要引用该对象本身（subject / object / evidence 锚点任一），' +
+      '否则担保无法挂载、判未证实。'
+  )
+  L.push(
+    '- **subject 解析**：所有 claim 的 `subject` 必须解析到当前图谱/洞察里真实存在的对象（函数 / 链路 / 模块 / 文件 / 外部符号；' +
+      'partition / flows 额外允许 `root` 与本轮划分/树内对象），且引用到的函数必须全部属于 TypeScript / JavaScript 家族；' +
+      '不存在的 subject、非 TS subject 一律 `unverified`，不能进入 `declared`。'
+  )
+  L.push(
+    '- **证据底线**：`detail` / `snippet` 只是复核上下文，不能单独担保。intent 断言必须再给出指向 subject 的可定位锚点，' +
+      '且不同 subject 类型接受的范围不同：'
+  )
+  L.push('  - 函数主体：`functionId`；或该函数的 `fileId`；或该函数调用边的 `stepId`；或包含该函数的 `chainId`。')
+  L.push('  - 链路主体：`chainId`；或 path 上的 `functionId`；或 path 相邻调用边 `stepId`；或 `chain.moduleId`。')
+  L.push('  - 模块主体：`moduleId`；或成员 `functionId`；或模块 `fileId`；或成员函数调用边的 `stepId`。')
+  L.push('  - 外部符号主体：`symbol`；或该外部调用的 `stepId`；或 caller 的 `functionId` + 精确调用行号。')
+  L.push('  - 文件主体：`fileId`；partition / flows 的 `root`：任意可定位锚点。')
+  L.push(
+    `- **本轮限制**：\`import\` 允许出现，但静态校验尚未接入 → 一律 \`unverified\`（原因「${IMPORT_UNSUPPORTED_REASON}」）；` +
+      '变更侧 `changes` 文件暂不支持 `guarantees`（后续轮次接入）。'
+  )
+  L.push('')
+  L.push('**claim 形状**')
+  L.push('')
+  L.push('| 字段 | 必填 | 约束 |')
+  L.push('| --- | --- | --- |')
+  L.push(`| id | 否 | 非空 ≤ ${LEN.claimId} 字符；同一 guarantee 内唯一；缺省由服务端生成 \`claim-N\` |`)
+  L.push(`| kind | 是 | 枚举：${GUARANTEE_CLAIM_KINDS.join(' / ')} |`)
+  L.push(`| subject | 是 | 断言主体：函数 / 链路 / 模块 / 文件 / 外部符号的稳定 id（partition / flows 可用 \`root\`），≤ ${LEN.claimSubject} 字符；必须能解析到当前图谱/洞察 |`)
+  L.push(`| object | 否 | 断言客体（被调函数、模块、链路、类型文本、类别、true/false 等），≤ ${LEN.claimObject} 字符 |`)
+  L.push(`| text | 是 | 人类可读断言，非空 ≤ ${LEN.claimText} 字符 |`)
+  L.push(`| evidence | 是 | 数组 1..${MAX_GUARANTEE_EVIDENCE} 条；每条至少一个锚点（见下） |`)
+  L.push('')
+  L.push('**evidence 锚点**：`functionId` / `chainId` / `stepId`（`CallEdge.stepId`）/ `moduleId` / `fileId` / `line`（1 基）/ `symbol` / `detail` / `snippet`，' +
+    `可选 \`kind\`（${GUARANTEE_EVIDENCE_KINDS.join(' / ')}）。id 类字段 ≤ ${LEN.evidenceId} 字符，line 必须是 ≥1 的整数；` +
+    '硬事实必须有能解析、且与图谱一致的锚点，不能只写一段自由文本。')
+  L.push('')
+  L.push('**硬事实 claim 的判定口径（SG1）**')
+  L.push('')
+  L.push('| kind | 静态校验 |')
+  L.push('| --- | --- |')
+  L.push('| call | subject=caller 函数 id，object=callee 函数 id 或 calleeName；必须是真实内部调用边（calleeId 非空），证据须含该边的 stepId，或 caller 的 functionId + 调用行号（只给 caller 不给行号不算） |')
+  L.push('| order | subject=链路 id 时 object=`函数A->函数B`（按 chain.path 顺序）；subject=函数 id 时 object=`调用A->调用B`（按调用行号顺序） |')
+  L.push('| containment | 函数↔模块 / 函数↔链路 / 模块↔链路 / 链路↔函数的成员关系；必须给出 moduleId / chainId 目标锚点并核对成员 |')
+  L.push('| type | subject=函数 id，object=类型文本；必须与该函数签名 / 参数 / 返回值的整体或完整类型 token 精确匹配（不做子串匹配） |')
+  L.push('| decorator | subject=函数 id，object=装饰器名（可带或不带 @） |')
+  L.push('| visibility | subject=函数 id，object=public / private / protected / exported / module-local |')
+  L.push('| category | subject=函数 id，object=business / implementation / utility；对照合并后的当前分类 |')
+  L.push('| core | subject=函数 id，object=true / false（或 core / not-core）；对照合并后的当前核心判定 |')
+  L.push('| role | subject=函数 id，object=链路 id；只校验「函数在该链路 path 上」，角色文本交给 review |')
+  L.push('| external | subject=`module::symbol`，或 subject=caller 函数 id + object=`module::symbol`；证据须为该外部调用的 stepId，或 caller 的 functionId + 调用行号（symbol 单独不算调用点锚点） |')
+  L.push('| block | subject=函数 id，object=注释块下标；或用 evidence.line 落在某注释块行号范围；若同时给下标与行号，行号必须落在该块内；可选 snippet 须与块内容一致 |')
+  L.push('| intent | 无法静态证明（设计意图、业务价值等）：staticStatus=not-applicable，必须由 review 担保；证据须含指向 subject 的可定位锚点，detail/snippet 不能单独担保 |')
+  L.push(`| import | 本轮不做 import 静态校验：允许提交但一律 \`unverified\`（原因「${IMPORT_UNSUPPORTED_REASON}」），不会误判为 declared |`)
+  L.push('')
+  L.push('**review（自审）**')
+  L.push('')
+  L.push('| 字段 | 必填 | 约束 |')
+  L.push('| --- | --- | --- |')
+  L.push('| verdict | 是 | `pass` / `fail`；只有 pass 才可能进入 declared，fail 一律未证实 |')
+  L.push(`| reason | 是 | 非空 ≤ ${LEN.guaranteeReason} 字符，写清你核对了哪些证据 |`)
+  L.push(`| reviewedAt | 否 | 可解析的 ISO 时间字符串（≤ ${LEN.reviewedAt} 字符）；缺省不填 |`)
+  L.push('')
+  L.push(`- 上限：每份 guarantee 的 claims 1..${MAX_GUARANTEE_CLAIMS} 条；每条 claim 的 evidence 1..${MAX_GUARANTEE_EVIDENCE} 条；` +
+    '**guarantee 体积计入第 2 节的单条目上限（值 + guarantee 合计）与单文件上限（整份文件体积）**，超限时该 guarantee 只进错误清单、条目照用。')
+  L.push('- 系统只做静态证据校验，无法验证你是否真的复核；因此 Agent 自审最高只到 `declared`，不会升级为 `verified`。')
+  L.push('')
 
   L.push('## 5. 完整示例（用本仓真实 id，照抄改内容即可）')
   L.push('')
@@ -2384,6 +2826,58 @@ function buildRulesText(
     )
     L.push('')
   }
+  const guaranteeTarget =
+    ex.coreFunctionId ?? '<从下方索引原样复制一个 functionId>'
+  // 示例里的 containment 必须用**该函数所属模块**，否则照抄示例会被判「成员关系不符」
+  const guaranteeModuleId =
+    graph.moduleIdsOf.get(guaranteeTarget)?.[0] ?? ex.moduleId
+  L.push(`**示例 J：\`coreRoles.${exampleAgent}.json\`（带 guarantees）**`)
+  L.push('')
+  L.push(
+    ...jsonBlock({
+      pass: 'coreRoles',
+      agent: exampleAgent,
+      writtenAt: exampleTime,
+      values: {
+        [guaranteeTarget]: '这个函数在系统里扮演的角色（一句话）。'
+      },
+      guarantees: {
+        [guaranteeTarget]: {
+          claims: [
+            {
+              id: 'c1',
+              kind: 'containment',
+              subject: guaranteeTarget,
+              object: guaranteeModuleId,
+              text: '该函数属于当前模块。',
+              evidence: [
+                { kind: 'module', moduleId: guaranteeModuleId },
+                { kind: 'call', functionId: guaranteeTarget }
+              ]
+            },
+            {
+              id: 'c2',
+              kind: 'intent',
+              subject: guaranteeTarget,
+              text: '系统角色描述：该函数承担的业务职责。',
+              evidence: [{ kind: 'signature', functionId: guaranteeTarget }]
+            }
+          ],
+          review: {
+            verdict: 'pass',
+            reason: '已核对模块归属与函数用途，角色描述与代码事实一致。',
+            reviewedAt: exampleTime
+          }
+        }
+      }
+    })
+  )
+  L.push('')
+  L.push(
+    '> 示例 J 示意 guarantees 与 values 的键必须一致；硬事实（containment）必须带可解析的证据锚点，' +
+      'intent 也必须给指向 subject 的可定位锚点（示例用函数签名），由 review 担保。缺省 guarantees 的条目按未证实处理。'
+  )
+  L.push('')
 
   L.push('## 6. 目标索引（取自**实时图谱**，不是历史快照）')
   L.push('')
@@ -2555,6 +3049,12 @@ function buildRulesText(
       '不改调用分类或调用边；**不要带 basis**。'
   )
   L.push(
+    '- **guarantees 自检（建议每条语义对象都做）**：键必须同时出现在本文件 `values` 中；claims 1..50、每条 evidence 1..50；' +
+      '硬事实（call / order / containment / type / decorator / visibility / category / core / role / external / block）必须有可解析、' +
+      '与图谱一致的锚点；意图类用 kind=intent 并交给 review；只有 TS/JS 家族参与静态校验，' +
+      '所有硬事实通过且 `review.verdict=pass` 才会是 declared，缺省/失败一律未证实。'
+  )
+  L.push(
     `- 本次扫描：${scan.stats.fileCount} 个文件、${scan.stats.winnerCount} 个生效条目、` +
       `${scan.stats.errorCount} 条错误、${scan.stats.ignoredCount} 条忽略。`
   )
@@ -2680,7 +3180,11 @@ export function collectAgentSupply(service: DocService, projectId: string): Agen
   // supplyOverlay:false：其余 pass 的基准只由「静态 + 本地 AI 划分」决定，不能吃 Agent 自己的语义供给；
   // partition 是例外——它由 scanAgentSupply 在本请求私有的 graph 上先应用（见下），故返回的 graph 已是
   // 「本地划分 + Agent partition」的最终结构视图，index / 建议 / baseline 全部基于它。
-  const { graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+  const { graph } = loadInsight(service, '', {
+    ignoreSnapshot: true,
+    supplyOverlay: false,
+    guarantees: false
+  })
   const dir = supplyDirOf(service.storage.dataPath, projectId)
   const classification = service.normalized.config.classification
   // 两阶段扫描：partition 先校验并应用到 graph，其余 pass 再按新划分校验（graph 只在本请求内可见）。
