@@ -1,6 +1,6 @@
 # 语义担保（Semantic Guarantee）
 
-> 状态：TypeScript / JavaScript / TSX 与 C#、Vue SFC 已落地（SG1 静态证据、SG2 KEY 逐片段复核、SG3 洞察/变更 UI 与变更侧担保）。下一轮：C++。
+> 状态：TypeScript / JavaScript / TSX 与 C#、Vue SFC、C++ 已落地（SG1 静态证据、SG2 KEY 逐片段复核、SG3 洞察/变更 UI 与变更侧担保）。下一轮：Python。
 
 ## 1. 现状与目标
 
@@ -38,7 +38,7 @@ Agent 供给与洞察合并目前只校验**结构、字段与引用**：id 存�
 ## 4. 验证流程
 
 - **时机**：扫描 / 合并时验证，结果随洞察与快照持久化；历史版本也能回答「当时是否已担保」。读取时不再调用 LLM。
-- **已接入语言**：TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）、C#（`.cs`）与 Vue SFC（`.vue`）。C# 不新增证据提取器，直接复用通用证据包：`[Attribute]` → `decorators`、可见性、调用边、注释块、签名/参数/返回类型都来自现有 `FunctionDoc`；`using` 不映射源文件，`import` claim 在所有已接入语言中仍一律未证实。Vue SFC 同样复用通用证据包：`.vue` 的 script 函数（`<script setup>` 与 Options API methods）使用签名/参数/返回类型/可见性/装饰器/调用边/注释块；合成的 `[template]` 入口没有真实函数体，其 `call` 证据来自模板事件调用边（`stepId` 或调用行），`block` claim 不适用。`.cpp` / `.py` / `.java` / `.go` 等未接入语言、以及包含未接入语言文件的项目级对象（partition / flows / 混合模块 / 混合链路）仍为 `unverified`。
+- **已接入语言**：TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）、C#（`.cs`）、Vue SFC（`.vue`）与 C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`）。C# 不新增证据提取器，直接复用通用证据包：`[Attribute]` → `decorators`、可见性、调用边、注释块、签名/参数/返回类型都来自现有 `FunctionDoc`；`using` 不映射源文件，`import` claim 在所有已接入语言中仍一律未证实。Vue SFC 同样复用通用证据包：`.vue` 的 script 函数（`<script setup>` 与 Options API methods）使用签名/参数/返回类型/可见性/装饰器/调用边/注释块；合成的 `[template]` 入口没有真实函数体，其 `call` 证据来自模板事件调用边（`stepId` 或调用行），`block` claim 不适用。C++ 也复用通用证据包（见下），`.py` / `.java` / `.go` 等未接入语言、以及包含未接入语言文件的项目级对象（partition / flows / 混合模块 / 混合链路）仍为 `unverified`。
 - **C# 口径细节**：
   - `type` 只对「参数类型 / 返回类型」整体或完整类型 token 生效：`int page` → `int`、`out string reason` → `string`、`List<User> users` → `List<User>`、`[FromBody] User user` → `User`；参数名、完整参数声明与整个签名都不是类型。
   - `decorator` 的 `[Obsolete]`、`ObsoleteAttribute`、`Obsolete` 归一为同一名称后再精确比较（类级 attribute 不会落到方法上）。
@@ -48,6 +48,12 @@ Agent 供给与洞察合并目前只校验**结构、字段与引用**：id 存�
   - `script` 函数（含 Options API methods，`className` 可能是 `[component]` 或 null）复用 TS/JS 签名、参数、返回类型、可见性、装饰器、调用边与注释块；稳定 ID 由现有解析器生成，不做特殊处理。
   - 每个 `.vue` 产出一个合成 `[template]` 入口：`call` claim 用模板事件（`@event` / `v-on:event`）调用边的 `stepId`（或 caller `functionId` + 调用行号）担保；`category` / `core` / `role` 等对象级 claim 只要对象真实存在即可担保。
   - `[template]` 没有真实源码函数体与注释块，`block` claim 不适用（会因无注释块判未证实）；Vue 的 `import` 静态校验也尚未接入，`import` claim 一律未证实。
+- **C++ 口径细节**：
+  - 不改 C++ parser，直接复用 `FunctionDoc`：命名空间与类作用域编码在 `className`（自由函数为命名空间或 null，方法如 `demo::Widget`），lambda 为合成 `[lambda#N]` 条目；调用边、注释块、可见性、签名/返回类型共用通用锚点。
+  - `decorator` 对应 C++ attributes：parser 记录 attribute 名（如 `nodiscard`），claim 写 `[[nodiscard]]`、`[[nodiscard()]]` 或 `nodiscard` 归一到同一名称后精确比较（`[[deprecated("…")]]` 同样接受）。
+  - `type` 只对「参数类型 / 返回类型」整体或完整类型 token 生效：从参数声明去顶层默认值后，在顶层（忽略 `<> () []` 与字符串）从右往左找最后一个空白，左侧为类型；`*` / `&` / `&&` 并入类型，数组维度保留，无空白的 `char*name` / `std::string&name` 也按声明符拆出类型。例：`int value` → `int`、`const std::string& name` → `const std::string&`、`const std::vector<int>& values` → `const std::vector<int>&`、`char *name` / `char* name` / `char*name` → `char*`、`int x = 0` → `int`、`int values[]` → `int[]`。参数名、完整参数声明（含参数名）与整个签名都不是类型。
+  - **函数指针/成员指针限制**：`void (*cb)(int)` 这类声明符只保留空白左侧的类型段（`void`），不把括号里的形参名并入类型；未命名参数（`const char*`、`std::string`、`unsigned int`）整体作为类型。极端声明符不保证得到完整类型文本，但不会把参数名当作类型 token。
+  - quoted `#include "..."` 只解析项目内 C++ 文件（系统 `<...>` 不产生 import）：include 可见且 exported 的候选优先，其次限定作用域/当前类作用域/全局唯一回退，多候选不猜；未解析调用归「外部/未解析」。由于 C++ 的 import source 恒为 `./` 开头，未解析调用的 `externalModule` 恒为 null，`external` claim 与 KEY `externals` pass 对 C++ 实际不可生成；`import` claim 一律未证实。
 - **KEY 模式**：
   1. 生成语义内容后，按语言证据提取器收集候选证据（调用边、import、签名/类型、装饰器、注释、链路/模块包含关系等）；
   2. 静态证据校验器逐条验证硬事实 claim；
@@ -109,10 +115,10 @@ Agent 供给与洞察合并目前只校验**结构、字段与引用**：id 存�
 1. **TypeScript / JavaScript / TSX**（JsFamilyParser，同族规则共享）— 已落地
 2. **C#**（复用通用证据包：Attribute→decorators、可见性、调用边、注释块）— 已落地
 3. **Vue SFC**（script 复用 TS/JS 证据；`[template]` 用模板事件调用边）— 已落地
-4. C++ — 下一轮
-5. Python
-6. Java
-7. Go
+4. **C++**（attributes→decorators、namespace/class 编码进 className、quoted include 跨文件调用、C++ 参数类型提取）— 已落地
+5. **Python** — 下一轮
+6. **Java**
+7. **Go**
 
 每一轮「完成」需同时具备：
 
@@ -128,6 +134,7 @@ Agent 供给与洞察合并目前只校验**结构、字段与引用**：id 存�
 
 - 静态证据来自现有解析/图谱（语法级调用、import、签名/类型注解、装饰器、注释等），不是完整编译器/类型检查器；跨语言动态特性仍可能漏判。
 - C# 本轮只复用通用证据包（Attribute/可见性/调用边/注释块/签名），未新增 C# 专属证据类型；`using` / 命名空间导入不参与 `import` claim 校验，`import` claim 一律未证实。C# 只覆盖文件内可解析的内部调用，跨文件调用未解析；`external` claim 与 KEY `externals` 未接入（未解析调用没有 `externalModule`），相关表述不得写成「外部调用点已覆盖」。
+- C++ 本轮只复用通用证据包与现有 parser 输出：attributes 走 `decorators`，命名空间/类作用域编码在 `className`，quoted include 只连接项目内 C++ 文件；系统头、宏展开、模板实例化与编译参数不参与解析。未解析调用没有 `externalModule`，`external` claim 与 KEY `externals` 对 C++ 实际不可生成；`import` claim 一律未证实。C++ 参数类型由 `FunctionDoc.params` 文本提取，函数指针/成员指针等极端声明符只保留空白左侧类型段（如 `void (*cb)(int)` → `void`），不保证完整类型文本，但不会把参数名当作类型。
 - Vue SFC 只复用通用证据包与现有 `[template]` 合成入口：模板表达式是轻量词法扫描，未解析的模板调用按「外部/未解析」处理；`[template]` 没有函数体，`block` claim 不适用；Vue 的 `import` 静态校验尚未接入。Vue parser 本身未在本轮改动。
 - 第二遍 LLM 复核是概率判断，只用于意图类与交叉确认，不能替代静态证据；Agent 自审无法被系统验证。
 - 不执行用户代码、不做运行时验证、不做测试生成。

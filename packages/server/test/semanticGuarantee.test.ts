@@ -283,6 +283,109 @@ function csharpPythonFile(): FileDoc {
   }
 }
 
+/* ------------------------- C++ 夹具 ------------------------- */
+
+const CPP_RUN = 'src/main.cpp::demo::runWidget@111111111111'
+const CPP_RENDER = 'include/widget.hpp::demo::Widget::render@222222222222'
+const CPP_ADD = 'include/widget.hpp::demo::addValues@333333333333'
+const CPP_PARAM = 'include/widget.hpp::demo::paramMatrix@444444444444'
+const CPP_PY = 'scripts/foreign.py::-::foreign@555555555555'
+
+/** C++ 夹具：命名空间内自由函数 + 类方法 + attribute/注释块/调用边（结构对齐真实解析输出） */
+function cppFiles(): FileDoc[] {
+  const runWidget = mkFn(CPP_RUN, 'runWidget', {
+    className: 'demo',
+    signature: 'runWidget(int count): int',
+    params: ['int count'],
+    returnType: 'int',
+    visibility: 'public',
+    exported: true,
+    category: 'business',
+    startLine: 4,
+    endLine: 9,
+    calls: [mkCall(CPP_RUN, CPP_RENDER, 'render', 7)]
+  })
+  const render = mkFn(CPP_RENDER, 'render', {
+    className: 'demo::Widget',
+    kind: 'method',
+    signature: 'render(int width): int',
+    params: ['int width'],
+    returnType: 'int',
+    visibility: 'private',
+    exported: false,
+    category: 'implementation',
+    startLine: 17,
+    endLine: 22,
+    calls: [mkCall(CPP_RENDER, CPP_ADD, 'addValues', 20)],
+    codeBlocks: [{ ...mkBlock(CPP_RENDER, 19, 20, 'int result = addValues(width, 2);'), commentText: '// 计算缩放' }]
+  })
+  const addValues = mkFn(CPP_ADD, 'addValues', {
+    className: 'demo',
+    signature: 'addValues(int a, int b): int',
+    params: ['int a', 'int b'],
+    returnType: 'int',
+    visibility: 'public',
+    decorators: ['nodiscard', 'deprecated'],
+    exported: true,
+    category: 'business',
+    startLine: 8,
+    endLine: 8
+  })
+  const paramMatrix = mkFn(CPP_PARAM, 'paramMatrix', {
+    className: 'demo',
+    signature: 'paramMatrix(...): std::vector<int>',
+    params: [
+      'int value',
+      'const std::string& name',
+      'const std::vector<int>& values',
+      'char *label',
+      'char* raw',
+      'int x = 0',
+      'std::function<void(int)> callback',
+      'const Widget& other',
+      'volatile int * ptr',
+      'int counts[]',
+      'void (*handler)(int)',
+      'void(*rawHandler)(int)',
+      'int (Widget::*memberFn)(int)',
+      'unsigned int count',
+      'const char* text',
+      'std::vector<std::string> items',
+      'char*glued',
+      'const std::string&gluedRef'
+    ],
+    returnType: 'std::vector<int>',
+    visibility: 'public',
+    exported: true,
+    category: 'utility',
+    startLine: 26,
+    endLine: 30
+  })
+  return [
+    {
+      fileId: 'include/widget.hpp',
+      path: 'include/widget.hpp',
+      language: 'cpp',
+      functions: [addValues, paramMatrix, render]
+    },
+    {
+      fileId: 'src/main.cpp',
+      path: 'src/main.cpp',
+      language: 'cpp',
+      functions: [runWidget]
+    }
+  ]
+}
+
+function cppPythonFile(): FileDoc {
+  return {
+    fileId: 'scripts/foreign.py',
+    path: 'scripts/foreign.py',
+    language: 'python',
+    functions: [mkFn(CPP_PY, 'foreign', { category: 'utility' })]
+  }
+}
+
 /* ------------------------- 真实 C# 夹具解析 ------------------------- */
 
 const CSHARP_FIXTURE = fileURLToPath(
@@ -384,6 +487,11 @@ const CSHARP_MIXED_GRAPH = buildGraph([...csharpFiles(), csharpPythonFile()])
 const CS_MOD = CSHARP_GRAPH.modules.find((m) => m.name === 'Services')!.id
 const CS_CHAIN = CSHARP_GRAPH.chains.find((c) => c.entryId === CS_LIST)!.id
 
+const CPP_GRAPH = buildGraph(cppFiles())
+const CPP_MIXED_GRAPH = buildGraph([...cppFiles(), cppPythonFile()])
+const CPP_MOD = CPP_GRAPH.modules.find((m) => m.name === 'include')!.id
+const CPP_CHAIN = CPP_GRAPH.chains.find((c) => c.entryId === CPP_RUN)!.id
+
 function moduleIdOf(name: string): string {
   const mod = GRAPH.modules.find((m) => m.name === name)
   if (!mod) throw new Error(`夹具缺少模块 ${name}`)
@@ -449,6 +557,18 @@ CSHARP_INSIGHT.functions[CS_LIST] = {
 }
 const CSHARP_MIXED_INSIGHT = baseInsightOf(CSHARP_MIXED_GRAPH)
 
+const CPP_INSIGHT = baseInsightOf(CPP_GRAPH)
+CPP_INSIGHT.functions[CPP_RUN] = {
+  ...CPP_INSIGHT.functions[CPP_RUN],
+  isCore: true,
+  coreSource: 'ai',
+  coreReason: '示例程序入口',
+  aiCategory: 'business',
+  aiCategoryReason: '对外命令入口',
+  systemRole: '示例程序入口'
+}
+const CPP_MIXED_INSIGHT = baseInsightOf(CPP_MIXED_GRAPH)
+
 /* ------------------------- claim / guarantee 构造 ------------------------- */
 
 function claim(
@@ -499,7 +619,7 @@ function validate(
 /* ------------------------- 基础语言判定 ------------------------- */
 
 describe('语言判定', () => {
-  it('按扩展名识别已接入语言（TS/JS/TSX、C#、Vue SFC）与未接入语言', () => {
+  it('按扩展名识别已接入语言（TS/JS/TSX、C#、Vue SFC、C++）与未接入语言', () => {
     for (const f of [
       'a.ts',
       'a.tsx',
@@ -509,11 +629,19 @@ describe('语言判定', () => {
       'a.cjs',
       'dir/b.d.ts',
       'Services/UserService.cs',
-      'packages/web/src/components/SampleCard.vue'
+      'packages/web/src/components/SampleCard.vue',
+      'src/widget.cpp',
+      'src/widget.cc',
+      'src/widget.cxx',
+      'include/widget.h',
+      'include/widget.hpp',
+      'include/widget.hh',
+      'include/widget.hxx',
+      'include/widget.inl'
     ]) {
       expect(isGuaranteeLanguageFile(f), f).toBe(true)
     }
-    for (const f of ['a.cpp', 'a.py', 'a.java', 'a.go', 'README']) {
+    for (const f of ['a.py', 'a.java', 'a.go', 'README']) {
       expect(isGuaranteeLanguageFile(f), f).toBe(false)
     }
   })
@@ -1451,6 +1579,243 @@ describe('C# 硬事实静态校验', () => {
   })
 })
 
+/* ------------------------- C++ 硬事实通过 ------------------------- */
+
+describe('C++ 硬事实静态校验', () => {
+  it('categories / coreJudgment / coreRoles 的 C++ 对象可 declared', () => {
+    const category = validateOn(CPP_INSIGHT, CPP_GRAPH, 'categories', CPP_RUN, [
+      claim('category', CPP_RUN, [{ functionId: CPP_RUN }], { object: 'business', text: 'C++ 命令入口。' })
+    ])
+    expect(category.status).toBe('declared')
+    expect(category.claims[0].status).toBe('declared')
+
+    const core = validateOn(CPP_INSIGHT, CPP_GRAPH, 'coreJudgment', CPP_RUN, [
+      claim('core', CPP_RUN, [{ functionId: CPP_RUN }], { object: 'true', text: 'C++ 核心入口。' })
+    ])
+    expect(core.status).toBe('declared')
+
+    const role = validateOn(CPP_INSIGHT, CPP_GRAPH, 'coreRoles', CPP_RUN, [
+      claim('role', CPP_RUN, [{ functionId: CPP_RUN }, { chainId: CPP_CHAIN }], {
+        object: CPP_CHAIN,
+        text: 'C++ 链路入口。'
+      })
+    ])
+    expect(role.status).toBe('declared')
+  })
+
+  it('C++ 类型/可见性/attribute/调用边/注释块证据可 declared', () => {
+    const render = CPP_GRAPH.nodes.get(CPP_RENDER)!
+    expect(render.kind).toBe('method')
+    expect(render.className).toBe('demo::Widget')
+    expect(render.visibility).toBe('private')
+    expect(render.codeBlocks).toHaveLength(1)
+
+    const type = validateOn(CPP_INSIGHT, CPP_GRAPH, 'coreRoles', CPP_RENDER, [
+      claim('type', CPP_RENDER, [{ functionId: CPP_RENDER }], { object: 'int', text: 'C++ 返回类型。' })
+    ])
+    expect(type.status).toBe('declared')
+
+    const visibility = validateOn(CPP_INSIGHT, CPP_GRAPH, 'coreRoles', CPP_RENDER, [
+      claim('visibility', CPP_RENDER, [{ functionId: CPP_RENDER }], { object: 'private' })
+    ])
+    expect(visibility.status).toBe('declared')
+
+    for (const object of ['[[nodiscard]]', 'nodiscard', '[[deprecated("use addValues")]]', 'deprecated']) {
+      const decorator = validateOn(CPP_INSIGHT, CPP_GRAPH, 'coreRoles', CPP_ADD, [
+        claim('decorator', CPP_ADD, [{ functionId: CPP_ADD }], { object })
+      ])
+      expect(decorator.claims[0].staticStatus, `应命中：${object}`).toBe('pass')
+      expect(decorator.status, `应命中：${object}`).toBe('declared')
+    }
+    const missing = validateOn(CPP_INSIGHT, CPP_GRAPH, 'coreRoles', CPP_RENDER, [
+      claim('decorator', CPP_RENDER, [{ functionId: CPP_RENDER }], { object: '[[nodiscard]]' })
+    ])
+    expect(missing.claims[0].staticStatus).toBe('fail')
+
+    const call = validateOn(CPP_INSIGHT, CPP_GRAPH, 'coreRoles', CPP_RUN, [
+      claim('call', CPP_RUN, [{ stepId: `${CPP_RUN}>render` }], {
+        object: CPP_RENDER,
+        text: 'C++ 内部调用。'
+      })
+    ])
+    expect(call.status).toBe('declared')
+
+    const block = validateOn(CPP_INSIGHT, CPP_GRAPH, 'coreRoles', CPP_RENDER, [
+      claim('block', CPP_RENDER, [{ functionId: CPP_RENDER, line: 19, snippet: 'addValues' }], {
+        object: '0'
+      })
+    ])
+    expect(block.status).toBe('declared')
+  })
+
+  it('C++ 参数类型：完整类型通过；参数名、完整声明与默认值失败', () => {
+    const run = (object: string) =>
+      validateOn(CPP_INSIGHT, CPP_GRAPH, 'coreRoles', CPP_PARAM, [
+        claim('type', CPP_PARAM, [{ functionId: CPP_PARAM }], { object })
+      ])
+
+    for (const object of [
+      'int',
+      'const std::string&',
+      'const std::vector<int>&',
+      'std::vector<int>',
+      'char*',
+      'std::function<void(int)>',
+      'const Widget&',
+      'volatile int*',
+      'int[]',
+      'unsigned int',
+      'const char*',
+      'std::vector<std::string>',
+      'void',
+      'std::string'
+    ]) {
+      const result = run(object)
+      expect(result.claims[0].staticStatus, `应通过：${object}`).toBe('pass')
+      expect(result.status, `应通过：${object}`).toBe('declared')
+    }
+    for (const object of [
+      'value',
+      'name',
+      'values',
+      'label',
+      'raw',
+      'x',
+      'callback',
+      'other',
+      'ptr',
+      'counts',
+      'handler',
+      'rawHandler',
+      'memberFn',
+      'count',
+      'text',
+      'items',
+      'glued',
+      'gluedRef',
+      'const std::string& name',
+      'char *label',
+      'char* raw',
+      'int x = 0',
+      'std::function<void(int)> callback',
+      'int counts[]',
+      'void (*handler)(int)',
+      'void(*rawHandler)(int)',
+      'int (Widget::*memberFn)(int)',
+      'unsigned int count',
+      'const char* text',
+      'std::vector<std::string> items',
+      'char *',
+      '0'
+    ]) {
+      const result = run(object)
+      expect(result.claims[0].staticStatus, `应失败：${object}`).toBe('fail')
+      expect(result.status, `应失败：${object}`).toBe('unverified')
+    }
+  })
+
+  it('包含 C++ 函数的链路：narratives / order / role 可 declared', () => {
+    expect(CPP_GRAPH.chains.find((c) => c.id === CPP_CHAIN)?.path).toEqual([
+      CPP_RUN,
+      CPP_RENDER,
+      CPP_ADD
+    ])
+    const narrative = validateOn(CPP_INSIGHT, CPP_GRAPH, 'narratives', CPP_CHAIN, [
+      claim('intent', CPP_CHAIN, [{ chainId: CPP_CHAIN, functionId: CPP_RUN }], {
+        text: 'C++ 示例程序链路。'
+      })
+    ])
+    expect(narrative.status).toBe('declared')
+
+    const order = validateOn(CPP_INSIGHT, CPP_GRAPH, 'narratives', CPP_CHAIN, [
+      claim('order', CPP_CHAIN, [{ chainId: CPP_CHAIN }], {
+        object: `${CPP_RUN}->${CPP_RENDER}`,
+        text: 'C++ 调用顺序。'
+      })
+    ])
+    expect(order.status).toBe('declared')
+
+    const role = validateOn(CPP_INSIGHT, CPP_GRAPH, 'coreRoles', CPP_RENDER, [
+      claim('role', CPP_RENDER, [{ functionId: CPP_RENDER }, { chainId: CPP_CHAIN }], {
+        object: CPP_CHAIN
+      })
+    ])
+    expect(role.status).toBe('declared')
+  })
+
+  it('partition / flows：全 C++ 与 TS+C++ 可 declared；含 .py 时 unverified', () => {
+    const partition = validateOn(CPP_INSIGHT, CPP_GRAPH, 'partition', 'root', [
+      claim('intent', 'root', [{ moduleId: CPP_MOD }], { text: 'C++ 项目划分。' })
+    ])
+    expect(partition.status).toBe('declared')
+    const flows = validateOn(CPP_INSIGHT, CPP_GRAPH, 'flows', 'root', [
+      claim('intent', 'root', [{ chainId: CPP_CHAIN }], { text: 'C++ 项目脉络。' })
+    ])
+    expect(flows.status).toBe('declared')
+
+    // TS + C++ 混合项目：两种语言都已接入，项目级对象仍可 declared
+    const mixedTs = buildGraph([...fixtureFiles().filter((f) => isGuaranteeLanguageFile(f.fileId)), ...cppFiles()])
+    const mixedTsInsight = baseInsightOf(mixedTs)
+    const cppMod = mixedTs.modules.find((m) =>
+      m.functionIds.some((id) => id.startsWith('include/widget.hpp'))
+    )!
+    expect(cppMod).toBeTruthy()
+    const tsCppPartition = validateOn(mixedTsInsight, mixedTs, 'partition', 'root', [
+      claim('containment', cppMod.id, [{ moduleId: cppMod.id }], {
+        object: CPP_ADD,
+        text: 'TS+C++ 项目划分。'
+      })
+    ])
+    expect(tsCppPartition.status).toBe('declared')
+    const tsCppFlows = validateOn(mixedTsInsight, mixedTs, 'flows', 'root', [
+      claim('intent', cppMod.id, [{ moduleId: cppMod.id }], { text: 'TS+C++ 项目脉络。' })
+    ])
+    expect(tsCppFlows.status).toBe('declared')
+
+    const mixedMod = CPP_MIXED_GRAPH.modules[0].id
+    const mixedPartition = validateOn(CPP_MIXED_INSIGHT, CPP_MIXED_GRAPH, 'partition', 'root', [
+      claim('intent', 'root', [{ moduleId: mixedMod }], { text: '混合项目划分。' })
+    ])
+    expect(mixedPartition.status).toBe('unverified')
+    expect(mixedPartition.reason).toContain('项目级混合对象')
+    expect(mixedPartition.reason).toContain('尚未接入')
+    const mixedFlows = validateOn(CPP_MIXED_INSIGHT, CPP_MIXED_GRAPH, 'flows', 'root', [
+      claim('intent', 'root', [{ moduleId: mixedMod }], { text: '混合项目脉络。' })
+    ])
+    expect(mixedFlows.status).toBe('unverified')
+    expect(mixedFlows.reason).toContain('尚未接入')
+  })
+
+  it('changes scope 含 C++ 函数可 declared；含 .py 函数时 unverified', () => {
+    const cppValue: AgentSupplyChangesValue = {
+      narrative: { what: '调整 C++ 示例入口。', why: '测试。', risks: [] },
+      changeRoles: { [CPP_RUN]: '本次变更的 C++ 入口。' }
+    }
+    const cpp = validateChangesGuarantee(
+      CPP_INSIGHT,
+      CPP_GRAPH,
+      'commit:cpp',
+      cppValue,
+      guaranteeOf([claim('intent', CPP_RUN, [{ functionId: CPP_RUN }], { text: 'C++ 变更意图。' })])
+    )
+    expect(cpp.status).toBe('declared')
+
+    const pyValue: AgentSupplyChangesValue = {
+      narrative: { what: '调整 Python 脚本。', why: '测试。', risks: [] },
+      changeRoles: { [CPP_PY]: '本次变更的 Python 函数。' }
+    }
+    const py = validateChangesGuarantee(
+      CPP_MIXED_INSIGHT,
+      CPP_MIXED_GRAPH,
+      'commit:py',
+      pyValue,
+      guaranteeOf([claim('intent', 'commit:py', [{ functionId: CPP_PY }], { text: 'Python 变更意图。' })])
+    )
+    expect(py.status).toBe('unverified')
+    expect(py.reason).toContain('尚未接入')
+  })
+})
+
 /* ------------------------- 真实 C# 夹具（解析 → 担保） ------------------------- */
 
 describe('真实 C# 夹具解析 → 担保集成', () => {
@@ -1583,6 +1948,240 @@ describe('真实 C# 夹具解析 → 担保集成', () => {
           [{ functionId: fn.id, line: edge.line }],
           { object: 'System::ArgumentOutOfRangeException' }
         )
+      ])
+    )
+    expect(ext.status).toBe('unverified')
+    expect(ext.reason).toContain('不在当前图谱的外部符号集中')
+  })
+})
+
+/* ------------------------- 真实 C++ 夹具（解析 → 建图 → 担保） ------------------------- */
+
+const CPP_WIDGET_HEADER = `#pragma once
+#include <string>
+
+namespace demo {
+
+/// 计算两数之和。
+[[nodiscard]] inline int addValues(int a, int b = 1) { return a + b; }
+
+inline int labelLength(const std::string& name) { return (int)name.size(); }
+
+struct Widget {
+  int scale(int value) {
+    // 计算缩放
+    int result = addValues(value, 2);
+    return result;
+  }
+};
+
+}
+`
+
+const CPP_MAIN_SOURCE = `#include "../include/widget.hpp"
+
+namespace demo {
+int runWidget(int count) {
+  Widget widget;
+  // 执行缩放
+  int scaled = widget.scale(count);
+  return scaled + labelLength("demo");
+}
+}
+`
+
+const CPP_EXTRA_SOURCE = `namespace demo {
+int extraValue() { return 7; }
+}
+`
+
+const CPP_LEGACY_HEADER = `#pragma once
+inline int legacyValue(int x) { return x; }
+`
+
+interface RealCppFixture {
+  graph: ProjectGraph
+  insight: ProjectInsight
+  fnByKey: Map<string, FunctionDoc>
+  files: FileDoc[]
+}
+
+let realCppCache: RealCppFixture | null = null
+
+/**
+ * 真实 C++ 项目：真 parser + 真 generate 管线（quoted include 跨文件解析）+ buildGraph。
+ * 所有 evidence（attribute、参数、注释块、调用边、externalModule）都来自解析结果，避免手造错配。
+ */
+async function realCppFixture(): Promise<RealCppFixture> {
+  if (realCppCache) return realCppCache
+  const root = freshDir('autodoc-sg1-cpp-')
+  mkdirSync(join(root, 'include'), { recursive: true })
+  mkdirSync(join(root, 'src'), { recursive: true })
+  writeFileSync(
+    join(root, 'autodoc.config.json'),
+    JSON.stringify(
+      {
+        include: ['**/*.cpp', '**/*.cc', '**/*.hpp', '**/*.h'],
+        classification: { fallback: 'implementation' },
+        storage: { type: 'json', path: '.autodoc/autodoc.json' }
+      },
+      null,
+      2
+    )
+  )
+  writeFileSync(join(root, 'include/widget.hpp'), CPP_WIDGET_HEADER)
+  writeFileSync(join(root, 'src/main.cpp'), CPP_MAIN_SOURCE)
+  writeFileSync(join(root, 'src/extra.cc'), CPP_EXTRA_SOURCE)
+  writeFileSync(join(root, 'src/legacy.h'), CPP_LEGACY_HEADER)
+
+  const normalized = await loadConfig(root)
+  const storage = createStorage(normalized.config.storage, root)
+  let files: FileDoc[]
+  try {
+    files = (await generateDocs({ rootDir: root, normalized, storage })).files
+  } finally {
+    storage.close()
+  }
+  const graph = buildGraph(files)
+  const insight = baseInsightOf(graph)
+  const run = graph.nodes.get(
+    files
+      .find((f) => f.fileId === 'src/main.cpp')!
+      .functions.find((fn) => fn.name === 'runWidget')!.id
+  )!
+  insight.functions[run.id] = {
+    ...insight.functions[run.id],
+    aiCategory: 'business',
+    aiCategoryReason: '示例程序入口',
+    isCore: true,
+    coreSource: 'ai',
+    coreReason: '示例程序入口',
+    systemRole: '示例程序入口'
+  }
+  const fnByKey = new Map<string, FunctionDoc>()
+  for (const file of files) {
+    for (const fn of file.functions) fnByKey.set(`${file.fileId}#${fn.className ?? ''}#${fn.name}`, fn)
+  }
+  realCppCache = { graph, insight, fnByKey, files }
+  return realCppCache
+}
+
+describe('真实 C++ 项目解析 → 建图 → 担保集成', () => {
+  function fnOf(files: FileDoc[], fileId: string, name: string, className?: string): FunctionDoc {
+    const file = files.find((candidate) => candidate.fileId === fileId)
+    expect(file, `缺少文件 ${fileId}`).toBeTruthy()
+    const fn = file!.functions.find(
+      (candidate) => candidate.name === name && (className === undefined || candidate.className === className)
+    )
+    expect(fn, `缺少函数 ${fileId}::${name}`).toBeTruthy()
+    return fn!
+  }
+
+  it('4 个 C++ 文件全部解析；attribute/参数/注释块与源码一致', async () => {
+    const { files } = await realCppFixture()
+    expect(files.map((f) => f.fileId).sort()).toEqual([
+      'include/widget.hpp',
+      'src/extra.cc',
+      'src/legacy.h',
+      'src/main.cpp'
+    ])
+    const addValues = fnOf(files, 'include/widget.hpp', 'addValues', 'demo')
+    expect(addValues.decorators).toEqual(['nodiscard'])
+    expect(addValues.params).toEqual(['int a', 'int b'])
+    expect(addValues.returnType).toBe('int')
+    expect(addValues.visibility).toBe('public')
+
+    const labelLength = fnOf(files, 'include/widget.hpp', 'labelLength', 'demo')
+    expect(labelLength.params).toEqual(['const std::string& name'])
+
+    const scale = fnOf(files, 'include/widget.hpp', 'scale', 'demo::Widget')
+    expect(scale.kind).toBe('method')
+    expect(scale.codeBlocks).toHaveLength(1)
+    expect(scale.codeBlocks[0].commentText).toContain('计算缩放')
+    expect(scale.codeBlocks[0].codeText).toContain('addValues')
+  })
+
+  it('quoted include 的跨文件调用解析；未解析调用 externalModule 恒为 null', async () => {
+    const { files } = await realCppFixture()
+    const run = fnOf(files, 'src/main.cpp', 'runWidget', 'demo')
+    const scale = fnOf(files, 'include/widget.hpp', 'scale', 'demo::Widget')
+    const labelLength = fnOf(files, 'include/widget.hpp', 'labelLength', 'demo')
+
+    const scaleEdge = run.calls.find((edge) => edge.calleeName === 'scale')!
+    expect(scaleEdge.calleeId).toBe(scale.id)
+    const labelEdge = run.calls.find((edge) => edge.calleeName === 'labelLength')!
+    expect(labelEdge.calleeId).toBe(labelLength.id)
+
+    const sizeEdge = fnOf(files, 'include/widget.hpp', 'labelLength', 'demo').calls.find(
+      (edge) => edge.calleeName === 'size'
+    )!
+    expect(sizeEdge.calleeId).toBeNull()
+    expect(sizeEdge.calleeCategory).toBe('external')
+    // C++ quoted include 的 source 恒为 ./ 开头：未解析调用不会产生 externalModule
+    expect(sizeEdge.externalModule ?? null).toBeNull()
+    for (const file of files) {
+      for (const fn of file.functions) {
+        for (const edge of fn.calls) {
+          if (edge.calleeId === null) expect(edge.externalModule ?? null).toBeNull()
+        }
+      }
+    }
+  })
+
+  it('真实解析结果可支撑 category/type/decorator/call/block 的 declared', async () => {
+    const { graph, insight, files } = await realCppFixture()
+    const run = fnOf(files, 'src/main.cpp', 'runWidget', 'demo')
+    const scale = fnOf(files, 'include/widget.hpp', 'scale', 'demo::Widget')
+    const addValues = fnOf(files, 'include/widget.hpp', 'addValues', 'demo')
+
+    const category = validateOn(insight, graph, 'categories', run.id, [
+      claim('category', run.id, [{ functionId: run.id }], { object: 'business', text: 'C++ 命令入口。' })
+    ])
+    expect(category.status).toBe('declared')
+
+    const type = validateOn(insight, graph, 'coreRoles', scale.id, [
+      claim('type', scale.id, [{ functionId: scale.id }], { object: 'int' })
+    ])
+    expect(type.status).toBe('declared')
+    const nameAsType = validateOn(insight, graph, 'coreRoles', scale.id, [
+      claim('type', scale.id, [{ functionId: scale.id }], { object: 'value' })
+    ])
+    expect(nameAsType.claims[0].staticStatus).toBe('fail')
+
+    for (const object of ['[[nodiscard]]', 'nodiscard']) {
+      const decorator = validateOn(insight, graph, 'coreRoles', addValues.id, [
+        claim('decorator', addValues.id, [{ functionId: addValues.id }], { object })
+      ])
+      expect(decorator.claims[0].staticStatus, `应命中：${object}`).toBe('pass')
+      expect(decorator.status, `应命中：${object}`).toBe('declared')
+    }
+
+    const scaleEdge = run.calls.find((edge) => edge.calleeName === 'scale')!
+    const call = validateOn(insight, graph, 'coreRoles', run.id, [
+      claim('call', run.id, [{ stepId: scaleEdge.stepId }], { object: scale.id })
+    ])
+    expect(call.status).toBe('declared')
+
+    const block = validateOn(insight, graph, 'blocks', scale.id, [
+      claim(
+        'block',
+        scale.id,
+        [{ functionId: scale.id, line: scale.codeBlocks[0].startLine, snippet: 'addValues' }],
+        { object: '0' }
+      )
+    ])
+    expect(block.status).toBe('declared')
+
+    // 没有任何 externalModule，externals 对象无法挂载
+    const ext = validateGuaranteeClaims(
+      insight,
+      graph,
+      'externals',
+      'std::string::size',
+      guaranteeOf([
+        claim('external', run.id, [{ functionId: run.id, line: 1 }], {
+          object: 'std::string::size'
+        })
       ])
     )
     expect(ext.status).toBe('unverified')
@@ -2396,6 +2995,10 @@ describe('供给契约包含 guarantees 说明与示例', () => {
     expect(rulesText).toContain('TypeScript / JavaScript 家族')
     expect(rulesText).toContain('C#（`.cs`）')
     expect(rulesText).toContain('C# 证据口径')
+    expect(rulesText).toContain('C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`）')
+    expect(rulesText).toContain('C++ 证据口径')
+    expect(rulesText).toContain('`char *name` / `char* name` → `char*`')
+    expect(rulesText).toContain('`external` claim 与 KEY externals pass 对 C++ 实际不可生成')
     expect(rulesText).toContain('不接受参数名')
     expect(rulesText).toContain('文件内可解析的内部调用')
     expect(rulesText).toContain('external` claim 与 KEY externals pass 实际无法生成')

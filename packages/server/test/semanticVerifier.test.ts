@@ -48,6 +48,8 @@ const CS_NAME = 'Services/UserService.cs::UserService::ComputeName@333333333333'
 const VUE_FILE = 'packages/web/src/components/SampleCard.vue'
 const VUE_CLICK = 'packages/web/src/components/SampleCard.vue::-::handleClick@vvvvvvvvvvvv'
 const VUE_TEMPLATE = 'packages/web/src/components/SampleCard.vue::-::[template]@tttttttttttt'
+const CPP_RUN = 'src/widget.cpp::demo::runWidget@cccccccccccc'
+const CPP_RENDER = 'src/widget.cpp::demo::Widget::render@dddddddddddd'
 const EXTERNAL_ID = 'node:fs::readFile'
 
 const workDirs: string[] = []
@@ -121,7 +123,12 @@ function mkFn(id: string, name: string, opts: Partial<FunctionDoc> = {}): Functi
   }
 }
 
-function fixtureFiles(includePython = false, includeCsharp = false, includeVue = false): FileDoc[] {
+function fixtureFiles(
+  includePython = false,
+  includeCsharp = false,
+  includeVue = false,
+  includeCpp = false
+): FileDoc[] {
   const alpha = mkFn(ALPHA, 'alpha', {
     signature: 'alpha(req: Request): Promise<Result>',
     params: ['req: Request'],
@@ -232,6 +239,40 @@ function fixtureFiles(includePython = false, includeCsharp = false, includeVue =
       functions: [click, template]
     })
   }
+  if (includeCpp) {
+    // C++：命名空间自由函数 + 类方法（namespace 编码进 className），复用通用证据包
+    const render = mkFn(CPP_RENDER, 'render', {
+      className: 'demo::Widget',
+      kind: 'method',
+      signature: 'render(int width): int',
+      params: ['int width'],
+      returnType: 'int',
+      visibility: 'private',
+      exported: false,
+      category: 'implementation',
+      startLine: 14,
+      endLine: 20,
+      codeBlocks: [mkBlock(CPP_RENDER, 15, 16, 'int result = addValues(width, 2);')]
+    })
+    const run = mkFn(CPP_RUN, 'runWidget', {
+      className: 'demo',
+      signature: 'runWidget(int count): int',
+      params: ['int count'],
+      returnType: 'int',
+      visibility: 'public',
+      exported: true,
+      category: 'business',
+      startLine: 3,
+      endLine: 8,
+      calls: [mkCall(CPP_RUN, CPP_RENDER, 'render', 6)]
+    })
+    files.push({
+      fileId: 'src/widget.cpp',
+      path: 'src/widget.cpp',
+      language: 'cpp',
+      functions: [run, render]
+    })
+  }
   return files
 }
 
@@ -324,11 +365,17 @@ function fullFixture(opts: {
   includePython?: boolean
   includeCsharp?: boolean
   includeVue?: boolean
+  includeCpp?: boolean
   withFlows?: boolean
   partitionSource?: 'ai' | 'dir'
 } = {}): Fixture {
   const graph = buildGraph(
-    fixtureFiles(opts.includePython === true, opts.includeCsharp === true, opts.includeVue === true)
+    fixtureFiles(
+      opts.includePython === true,
+      opts.includeCsharp === true,
+      opts.includeVue === true,
+      opts.includeCpp === true
+    )
   )
   // graph 的目录划分描述为空；模拟本地 AI 划分写入模块职责
   for (const mod of graph.modules) {
@@ -410,6 +457,30 @@ function fullFixture(opts: {
       aiCategory: 'business',
       aiCategoryReason: '模板事件分发入口',
       systemRole: '模板事件分发'
+    }
+  }
+  if (functions[CPP_RUN]) {
+    functions[CPP_RUN] = {
+      ...functions[CPP_RUN],
+      isCore: true,
+      coreSource: 'ai',
+      coreReason: 'C++ 示例入口',
+      aiCategory: 'business',
+      aiCategoryReason: '对外命令入口',
+      systemRole: 'C++ 示例入口',
+      keyCallIndexes: [0],
+      internalSteps: []
+    }
+  }
+  if (functions[CPP_RENDER]) {
+    functions[CPP_RENDER] = {
+      ...functions[CPP_RENDER],
+      isCore: false,
+      coreSource: 'ai',
+      coreReason: 'C++ 内部实现',
+      aiCategory: 'implementation',
+      aiCategoryReason: '渲染实现',
+      internalSteps: [{ blockIndexes: [0], title: '计算缩放', kind: 'step' }]
     }
   }
 
@@ -1861,6 +1932,21 @@ describe('SG2 跳过规则', () => {
     const stats = await attachKeyGuarantees(insight, graph, new AiCache(freshDir()))
     expect(insight.semanticGuarantees?.[`categories:${CS_LIST}`]?.status).toBe('verified')
     expect(insight.semanticGuarantees?.[`coreRoles:${CS_LIST}`]?.status).toBe('verified')
+    expect(insight.semanticGuarantees?.[`categories:${DELTA}`]).toBeUndefined()
+    expect(stats.skippedNonTs).toBe(1)
+  })
+
+  it('C++ 对象参与担保：categories/coreRoles/narratives 可 verified；同项目 .py 仍跳过', async () => {
+    const { graph, insight } = fullFixture({ includePython: true, includeCpp: true, withFlows: false })
+    const cppChainId = chainIdOfEntry(graph, CPP_RUN)
+    const cppChain = insight.chains.find((c) => c.id === cppChainId)!
+    cppChain.narrative = '创建 Widget 并调用渲染方法。'
+    cppChain.stepRoles = { [CPP_RUN]: '示例入口', [CPP_RENDER]: '渲染实现' }
+    mockAuto()
+    const stats = await attachKeyGuarantees(insight, graph, new AiCache(freshDir()))
+    expect(insight.semanticGuarantees?.[`categories:${CPP_RUN}`]?.status).toBe('verified')
+    expect(insight.semanticGuarantees?.[`coreRoles:${CPP_RUN}`]?.status).toBe('verified')
+    expect(insight.semanticGuarantees?.[`narratives:${cppChainId}`]?.status).toBe('verified')
     expect(insight.semanticGuarantees?.[`categories:${DELTA}`]).toBeUndefined()
     expect(stats.skippedNonTs).toBe(1)
   })

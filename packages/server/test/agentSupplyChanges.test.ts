@@ -828,6 +828,7 @@ describe('buildChangesRulesSection', () => {
     expect(text).toContain('"kind": "intent"')
     expect(text).toContain('TypeScript / JavaScript 家族')
     expect(text).toContain('C#（`.cs`）')
+    expect(text).toContain('C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`）')
     expect(text).toContain('该语言尚未接入语义担保')
   })
 

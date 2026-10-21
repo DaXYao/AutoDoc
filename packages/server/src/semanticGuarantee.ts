@@ -22,7 +22,7 @@ import type { ProjectGraph } from './graph.js'
 
 /**
  * SG1：语义担保的静态证据校验
- * （已接入语言：TypeScript / JavaScript / TSX / JSX、C#、Vue SFC）。
+ * （已接入语言：TypeScript / JavaScript / TSX / JSX、C#、Vue SFC、C++）。
  *
  * 本模块只依赖 shared-types 与 graph.js（禁止 import agentSupply / supplyCache）：
  * - agentSupply.ts 负责供给文件的结构/长度校验并挂载 guarantee；
@@ -30,14 +30,34 @@ import type { ProjectGraph } from './graph.js'
  *   applyAgentGuaranteesToInsight，把担保结果写入 insight.semanticGuarantees；
  * - 本模块不调用 LLM（KEY 第二遍复核见 semanticVerifier.ts），也不做前端展示。
  *
- * 已接入语言：.ts / .tsx / .js / .jsx / .mjs / .cjs / .cs / .vue。
+ * 已接入语言：.ts / .tsx / .js / .jsx / .mjs / .cjs / .cs / .vue /
+ * .cpp / .cc / .cxx / .h / .hpp / .hh / .hxx / .inl。
  * Vue 的 script 函数复用 TS/JS 证据（签名/参数/返回类型/可见性/装饰器/调用/注释块）；
  * 合成 `[template]` 入口的调用边来自模板事件，`block` claim 不适用（模板节点没有函数体）。
+ * C++ 复用通用证据包：attributes → decorators、命名空间/类编码在 className、quoted include
+ * 只连项目内文件（未解析调用没有 externalModule）。参数类型按 C++ 声明语法提取，参数名不算类型。
  * 未接入语言、项目级混合对象一律 unverified（原因「该语言尚未接入语义担保」），不阻塞合并。
  */
 
 /** 已接入语义担保的文件扩展名 */
-const GUARANTEE_LANGUAGE_EXTENSIONS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'cs', 'vue'])
+const GUARANTEE_LANGUAGE_EXTENSIONS = new Set([
+  'ts',
+  'tsx',
+  'js',
+  'jsx',
+  'mjs',
+  'cjs',
+  'cs',
+  'vue',
+  'cpp',
+  'cc',
+  'cxx',
+  'h',
+  'hpp',
+  'hh',
+  'hxx',
+  'inl'
+])
 const UNSUPPORTED_LANGUAGE_REASON = '该语言尚未接入语义担保'
 const MIXED_PROJECT_REASON = '项目级混合对象包含尚未接入语义担保的文件'
 /** import 静态校验（import 语句/模块解析）尚未接入：允许 claim，但只能停在未证实 */
@@ -113,12 +133,28 @@ export function fileIdOfFunctionId(functionId: string): string | null {
   return at > 0 ? functionId.slice(0, at) : null
 }
 
-/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C# + Vue SFC，按文件扩展名判定） */
+/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C# + Vue SFC + C++，按文件扩展名判定） */
 export function isGuaranteeLanguageFile(fileId: string): boolean {
   const lower = fileId.toLowerCase()
   const dot = lower.lastIndexOf('.')
   if (dot < 0 || dot === lower.length - 1) return false
   return GUARANTEE_LANGUAGE_EXTENSIONS.has(lower.slice(dot + 1))
+}
+
+/** 按扩展名判定参数/类型口径的语言（仅影响参数类型提取；未知语言保持 TS 冒号口径） */
+type ParamTypeLanguage = 'js' | 'csharp' | 'cpp'
+
+const CPP_TYPE_EXTENSIONS = new Set(['cpp', 'cc', 'cxx', 'h', 'hpp', 'hh', 'hxx', 'inl'])
+
+function paramTypeLanguageOf(fileId: string | null): ParamTypeLanguage {
+  if (fileId === null) return 'js'
+  const lower = fileId.toLowerCase()
+  const dot = lower.lastIndexOf('.')
+  if (dot < 0 || dot === lower.length - 1) return 'js'
+  const ext = lower.slice(dot + 1)
+  if (ext === 'cs') return 'csharp'
+  if (CPP_TYPE_EXTENSIONS.has(ext)) return 'cpp'
+  return 'js'
 }
 
 /* ------------------------- 上下文与结果 ------------------------- */
@@ -734,8 +770,9 @@ function effectiveCore(ctx: FactContext, functionId: string): boolean | null {
 
 function normalizeDecorator(s: string): string {
   let text = s.trim().replace(/^@/, '').trim()
-  // C# 的 Attribute 写法：[Obsolete] / [Obsolete("...")] / ObsoleteAttribute
-  if (text.startsWith('[') && text.endsWith(']')) text = text.slice(1, -1).trim()
+  // C# 的 Attribute 写法：[Obsolete] / [Obsolete("...")] / ObsoleteAttribute；
+  // C++ attributes 写作 [[nodiscard]] / [[deprecated("...")]]（parser 输出 name，claim 两种写法都接受）。
+  while (text.startsWith('[') && text.endsWith(']')) text = text.slice(1, -1).trim()
   text = text.replace(/\(.*$/s, '').trim()
   return text.replace(/Attribute$/, '').trim()
 }
@@ -792,8 +829,8 @@ function scanTopLevel(text: string, visit: (index: number, ch: string) => void):
   }
 }
 
-/** 去掉 C# 参数的顶层默认值（`= 1`、`= default`、`= null` 等；`=>`/`==`/`>=` 不算） */
-function stripCSharpDefaultValue(text: string): string {
+/** 去掉参数的顶层默认值（C# `= 1` / C++ `= 0`、`= T{}` 等；`=>`/`==`/`>=`/`<=` 不算） */
+function stripTopLevelDefaultValue(text: string): string {
   let cut = -1
   scanTopLevel(text, (i, ch) => {
     if (cut >= 0 || ch !== '=') return
@@ -857,7 +894,7 @@ function stripCSharpParamModifiers(text: string): string {
  * `(int Id, string Name) user`→`(int Id, string Name)`；`[FromBody] User user`→`User`。
  */
 function csharpParamTypeText(param: string): string {
-  let text = stripCSharpAttributes(stripCSharpDefaultValue(param)).trim()
+  let text = stripCSharpAttributes(stripTopLevelDefaultValue(param)).trim()
   text = stripCSharpParamModifiers(text)
   let lastSpace = -1
   scanTopLevel(text, (i, ch) => {
@@ -868,20 +905,157 @@ function csharpParamTypeText(param: string): string {
   return type.length > 0 ? type : text
 }
 
+/** C++ 内置类型关键字：未命名参数里的第二个关键字仍是类型的一部分（`unsigned int`） */
+const CPP_TYPE_KEYWORDS = new Set([
+  'void',
+  'bool',
+  'char',
+  'char8_t',
+  'char16_t',
+  'char32_t',
+  'wchar_t',
+  'short',
+  'int',
+  'long',
+  'signed',
+  'unsigned',
+  'float',
+  'double',
+  'auto'
+])
+
+/** 只含 cv/elaborated 修饰符、缺少实际类型的左侧片段（未命名参数的 `const Foo` 形态） */
+const CPP_TYPE_PREFIX_KEYWORDS = new Set([
+  'const',
+  'volatile',
+  'mutable',
+  'typename',
+  'class',
+  'struct',
+  'enum',
+  'union'
+])
+
+/** C++ 类型排版归一：折叠空白，并把 `char *` / `T &` / `T &&` 归一为 `char*` / `T&` / `T&&` */
+function normalizeCppTypeText(text: string): string {
+  return normalizeTypeText(text).replace(/\s+([*&])/g, '$1')
+}
+
 /**
- * 取参数的类型段：TypeScript / JavaScript 保持冒号后类型；
- * C#（文件扩展名 `.cs`）按参数声明提取类型，参数名不会被当作类型。
+ * C++ 参数名 token：允许前导 `*` / `&` / `&&`（`char *name`）与尾部数组维度（`int values[]`）。
+ * 返回需要并入类型的前后缀；不是「类型 + 参数名」形态时返回 null。
  */
-function paramTypeText(param: string, csharp: boolean): string {
-  if (csharp) return csharpParamTypeText(param)
+function cppParamNameParts(right: string): { typeSuffix: string; name: string } | null {
+  const m = /^((?:&&|&|\*)*)([A-Za-z_][A-Za-z0-9_]*)((?:\s*\[[^\]]*\])*)$/.exec(right)
+  if (!m) return null
+  return { typeSuffix: `${m[1]}${m[3].replace(/\s+/g, '')}`, name: m[2] }
+}
+
+/**
+ * 无空白分隔的「类型+指针/引用+参数名」声明（`char*name` / `std::string&name`）：
+ * 把末尾的 `*` / `&` / `&&` 并入类型，避免把参数名带进类型文本。
+ */
+function splitCppGluedDeclarator(text: string): { type: string; name: string } | null {
+  const m = /^(.+?)((?:&&|&|\*)+)([A-Za-z_][A-Za-z0-9_]*)$/.exec(text)
+  if (!m) return null
+  return { type: `${m[1]}${m[2]}`, name: m[3] }
+}
+
+/**
+ * 函数指针/成员指针声明符（`void (*cb)(int)`、`void(*cb)(int)`、`int (Widget::*p)(int)`）：
+ * 返回声明符左侧的类型段。括号里的形参名不属于类型，必须提前截断，避免名字 token 假阳性。
+ * 只扫描模板实参之外的括号；`decltype(x)` / `std::function<void(int)>` 不命中。
+ */
+function cppFunctionPointerTypePrefix(text: string): string | null {
+  let angle = 0
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '<') {
+      angle++
+      continue
+    }
+    if (ch === '>') {
+      if (angle > 0) angle--
+      continue
+    }
+    if (angle > 0 || ch !== '(') continue
+    let j = i + 1
+    while (j < text.length && /\s/.test(text[j])) j++
+    if (text[j] === '*' || text[j] === '&') return text.slice(0, i).trim()
+    // 成员指针：`(Widget::*name)` / `(ns::Widget::*name)`
+    if (/^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*::\*/.test(text.slice(j))) {
+      return text.slice(0, i).trim()
+    }
+  }
+  return null
+}
+
+/**
+ * C++ 参数声明 → 参数类型（不依赖 C++ parser 的内部结构，只处理 FunctionDoc.params 文本）：
+ * 去顶层默认值 → 在顶层（忽略 `<> () []` 与字符串）从右往左找最后一个空白，左侧为类型。
+ * 常见形态：
+ * - `int value` → `int`；`const std::string& name` → `const std::string&`；
+ * - `const std::vector<int>& values` → `const std::vector<int>&`；
+ * - `char *name` / `char* name` / `char * name` → `char*`（`*`/`&`/`&&` 并入类型）；
+ * - `char*name` / `const std::string&name`（无空白）同样只取类型；
+ * - `int values[]` → `int[]`；`int x = 0` → `int`（默认值先去掉）。
+ * 未命名参数（`const char*`、`std::string`、`unsigned int`）按整个声明作类型；
+ * 函数指针/成员指针参数（`void (*cb)(int)`）只取声明符左侧的类型段（`void`），
+ * 不会把括号里的参数名当作类型 token（允许不完美，但不产生名字假阳性）。
+ */
+function cppParamTypeText(param: string): string {
+  const text = stripTopLevelDefaultValue(param).trim()
+  const fpPrefix = cppFunctionPointerTypePrefix(text)
+  if (fpPrefix !== null && fpPrefix.length > 0) return normalizeCppTypeText(fpPrefix)
+  let lastSpace = -1
+  scanTopLevel(text, (i, ch) => {
+    if (/\s/.test(ch)) lastSpace = i
+  })
+  if (lastSpace < 0) {
+    const glued = splitCppGluedDeclarator(text)
+    return normalizeCppTypeText(glued ? glued.type : text)
+  }
+  const left = text.slice(0, lastSpace).trim()
+  const right = text.slice(lastSpace + 1)
+  if (left.length === 0) return normalizeCppTypeText(text)
+  const parts = cppParamNameParts(right)
+  if (parts !== null) {
+    // `unsigned int` / `long long`：右侧是内置类型关键字，说明这是未命名参数而不是「类型 名字」
+    if (CPP_TYPE_KEYWORDS.has(parts.name) || CPP_TYPE_PREFIX_KEYWORDS.has(parts.name)) {
+      return normalizeCppTypeText(text)
+    }
+    // `const Foo` / `volatile Foo`：左侧只有修饰符，同样按未命名参数处理
+    if (!left.includes(' ') && CPP_TYPE_PREFIX_KEYWORDS.has(left)) {
+      return normalizeCppTypeText(text)
+    }
+    return normalizeCppTypeText(`${left}${parts.typeSuffix}`)
+  }
+  // `std::string&name`：右侧无空白但含声明符，拆出类型段后与左侧类型拼接
+  const gluedRight = splitCppGluedDeclarator(right)
+  if (gluedRight !== null) {
+    return normalizeCppTypeText(`${left} ${gluedRight.type}`)
+  }
+  // 函数指针 / 成员指针：括号或 `*` 属于声明符，只保留左侧类型段，避免把形参名并入类型
+  if (right.startsWith('(')) return normalizeCppTypeText(left)
+  // 右侧不是参数名：`const char*`、`std::string` 等未命名参数的类型片段，整体作为类型
+  return normalizeCppTypeText(text)
+}
+
+/**
+ * 取参数的类型段：TypeScript / JavaScript（含 Vue）保持冒号后类型；
+ * C#（`.cs`）与 C++（`.cpp/.h/...`）按参数声明提取类型，参数名不会被当作类型。
+ */
+function paramTypeText(param: string, language: ParamTypeLanguage): string {
+  if (language === 'csharp') return csharpParamTypeText(param)
+  if (language === 'cpp') return cppParamTypeText(param)
   const at = param.indexOf(':')
   return at >= 0 ? param.slice(at + 1) : param
 }
 
-/** 从类型文本提取完整类型 token（支持 `Foo.Bar`，不做子串匹配） */
+/** 从类型文本提取完整类型 token（支持 `Foo.Bar` 与 C++ 的 `std::string`，不做子串匹配） */
 function typeTokensOf(text: string): string[] {
   const out: string[] = []
-  const re = /[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*/g
+  const re = /[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\.|::)[A-Za-z_$][A-Za-z0-9_$]*)*/g
   let m: RegExpExecArray | null
   while ((m = re.exec(text)) !== null) out.push(m[0])
   return out
@@ -892,11 +1066,10 @@ function typeTokensOf(text: string): string[] {
  * 供 type claim 校验与 KEY 静态事实生成共用，保证两侧口径一致。
  */
 export function functionTypeTexts(fn: FunctionDoc): string[] {
-  const file = fileIdOfFunctionId(fn.id)
-  const csharp = file !== null && file.toLowerCase().endsWith('.cs')
+  const language = paramTypeLanguageOf(fileIdOfFunctionId(fn.id))
   const out: string[] = []
   for (const param of fn.params) {
-    const text = normalizeTypeText(paramTypeText(param, csharp))
+    const text = normalizeTypeText(paramTypeText(param, language))
     if (text) out.push(text)
   }
   if (fn.returnType) {
