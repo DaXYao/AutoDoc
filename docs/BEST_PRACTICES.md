@@ -41,6 +41,7 @@
 - [ ] **C++ 零模型扩展**：命名空间复用 `className`、quoted include 复用 `ParsedImport`、lambda 合成 `[lambda#N]`、cv/ref 限定符并入稳定 ID、跨语言候选按 `languageByFile` 过滤；共享 `resolveModule` 不追加新语言候选（见 2026-10-21 C1 条）。
 - [ ] **Python 零模型扩展**：类/嵌套作用域复用 `className`、嵌套函数/lambda 合成条目、`ParsedImport` 复用 + Python 专用 resolver；import 解析按绑定语义（unaliased `import a.b` 绑定顶层包、named/namespace/receiver 分开处理），`self/cls` 只按当前类（见 2026-10-21 P1 条）。
 - [ ] **Java 零模型扩展**：包+类路径进 `className`、类型推断结果写 `::Type` receiver、类索引 + 普通/static/嵌套 import、无 receiver 先本类后 static import、去掉简单类名全局兜底（见 2026-10-21 J1 条）。
+- [ ] **Go 零模型扩展**：包+类型进 `className`、`::pkg`/`::pkg?`/`::Type`/`::?` receiver、词法作用域类型推断、包目录/go.mod import 解析、按 calleeId 去重、重复 init 合成名（见 2026-10-21 G1 条）。
 
 ---
 

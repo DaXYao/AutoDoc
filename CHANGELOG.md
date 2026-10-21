@@ -2,6 +2,23 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · G1 修复：Go 局部函数值/作用域/默认 import 名/init ID · core
+
+- **初审问题**：①`func run(work func()){work()}` 把局部函数值误连到同包 `work`；②单变量表被内层块覆盖，外层 `w.Do()` 误连内层类型，且 `a.Close(); b.Close()` 按 calledName 去重丢 B；③包名与 import 路径末段不一致（目录 tool/包 toolkit、/v2、gopkg.in/yaml.v3）时 receiver 变 `::?`；④同文件多个 init/_ 稳定 ID 相同。
+- **修复**：局部/字段函数值调用写 `::?` 一律 unresolved；类型推断改词法作用域栈，nested lambda 继承外层闭包变量；Go 按解析后的 calleeId 去重（两 receiver 同名方法保留两条）；新增 `::pkg?name` 候选，J1b 只在 import 的目标包名/localName 中解析；重复 init/_ 合成 `init#2`/`_#2`；builtin 只在无 receiver 时拦截；stdlib 仅首段含点或命中 go.mod module 才允许目录后缀兜底。
+- **测试**：core 366 项通过，全仓 1061 项通过（core 366 / server 436 / web 259），`pnpm lint` 全绿；`PARSER_VERSION` 6→7（解析产物变化，旧缓存失效）。
+- **关联 commit**：本次修复提交。
+
+## 2026-10-21 · G1a/G1b：Go 语言接入（包索引 / 类型推断 / import / lambda）· core
+
+- **动机**：完成 Go 语言接入（扩展版、零共享数据模型改动），覆盖包级函数/方法/接口/结构体、类型推断、lambda 与包/import 解析。
+- **解析器**：新增 `GoParser`（`.go`）；方法 `className=包.类型`、接口方法 `包.接口`、包级函数 null；值/指针/泛型接收者取基类型；泛型/可变参数/多返回值/命名返回值/type params；doc/注释块；`::pkg`/`::pkg?`/`::Type`/`::?` receiver；局部 var/:=/range/复合字面量/&T/new/T(x)/字段类型推断；lambda `[lambda#N]`；普通/别名/分组 import 与 `__go_package__` 合成 import；首字母大写导出规则。
+- **跨文件**：Go 包目录/类型索引、go.mod module、普通/别名 import、同包跨文件函数（含未导出）、包选择器仅导出函数、类型方法/接口声明、`::this` 无（Go 无 this）；stdlib/函数值/未知 receiver/嵌入/提升不猜，无全局同名回退，跨语言隔离。
+- **注册/缓存**：`PARSER_VERSION` 5→7（G1 修复再 bump）；默认 include 增加 `**/*.go`；shared-types/UI/其它语言行为未改。
+- **测试/实跑**：core 366 / 全仓 1061 项通过；临时 Go 模块（module 路径、包名≠目录、别名、同包跨文件、接口、lambda、两个 receiver 同名方法、stdlib 同名目录）实跑：import/类型/接口/同包解析正确，`toolkit.Do` 命中，`net/http` 与函数值调用保持未解析，多个 init ID 不同；Go 文件页正常呈现。
+- **已知边界**：dot/blank import、嵌入/提升方法、继承/接口实现、链式返回值、顶层 var func 值、comma-ok、build tags/cgo、包级变量函数值不建模；泛型实例化与类型转换同形，不猜返回类型；`_test.go` 按普通 Go 文件解析。
+- **关联 commit**：本次代码提交。
+
 ## 2026-10-21 · J1 修复：Java receiver/构造器/通配符误连 + 关键边界 · core
 
 - **初审问题**：①链式/cast/class literal 等复杂 receiver 被当成无 receiver，`getB().work()`、`A.class.getName()` 误连本类；②`new com.util.Helper()` 丢全限定类型，按同包/唯一名回退误连；③`import java.util.*` 后项目同名类被唯一简单名兜底误连。

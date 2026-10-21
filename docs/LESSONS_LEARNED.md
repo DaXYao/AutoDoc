@@ -48,10 +48,18 @@
 - [ ] 外部供给的可选字段缺省 ≠ 清空：字段级合并必须保留本地已有值；外部可控的 module/symbol 键写入对象前用 null-prototype 容器或 Map，防 `__proto__` / `constructor` 原型污染。
 - [ ] Python import 解析必须按「绑定语义」而不是源码字符串拼接：unaliased `import a.b` 绑定顶层包 a；named import 不能覆盖带 receiver 的成员调用；模块导出只算 `className=null` 的模块级函数；未解析的子模块成员不得回退到同名 named import。
 - [ ] 静态类型语言的成员调用：复杂/未知 receiver 必须用哨兵（如 `::?`）阻断「无 receiver」兜底；`new` 必须保留全限定类型；外部/通配符 import 不能靠「简单类名全局唯一」兜底。
+- [ ] Go 的函数值局部变量调用必须与包级函数区分（写 `::?`）；类型推断用词法作用域栈、nested lambda 继承闭包变量；包名≠路径要按目标包名解析（`::pkg?`）；多个 init/_ 要合成唯一名；stdlib 多段路径不能靠后缀兜底。
 
 ---
 
 ## 教训条目
+
+### 2026-10-21 · Go 接入的四类误连：函数值 / 作用域覆盖 / 包名≠路径 / init ID
+- **场景**：G1 接入 Go 解析器后的初审与实跑。
+- **现象**：①参数函数值 `work()` 误连包级 `work`；②内层块类型覆盖外层，`w.Do()` 误连内层类型，`a.Close(); b.Close()` 按名去重丢一条；③目录 tool/包 toolkit、`/v2`、gopkg.in/yaml.v3 未别名时 receiver 变 `::?`；④同文件多个 init/_ 稳定 ID 相同。
+- **根因**：裸调用没有检查局部函数值表；类型推断使用单表而非词法作用域，调用边按 calledName 去重；import 局部名默认取路径末段，而 Go 绑定的是**包名**；稳定 ID 只用 name/params/className，未处理 Go 允许的多个 init/_。
+- **正确做法**：函数值调用写 `::?`；类型推断用作用域栈、lambda 继承闭包；Go 按 calleeId 去重；新增 `::pkg?name` 候选并在 import 目标包名/localName 中解析；重复 init/_ 合成 `init#2`；builtin 仅无 receiver 时拦截；stdlib 只允许 module/域名式路径走后缀兜底。
+- **预防措施**：接入新语言先列出「名字绑定类别」（包/类型/变量/函数值/内置），每类都要有正反例；有作用域的语言必须用栈而不是单表；稳定 ID 要检查语言是否允许同名重复声明（Go init、Java 重载、C++ 重载）。
 
 ### 2026-10-21 · Java 接入的三类误连：无 receiver 哨兵 / new 丢类型 / 唯一名兜底
 - **场景**：J1 接入 Java 解析器后的初审与实跑。
