@@ -7,6 +7,7 @@ import type { NormalizedConfig } from './config.js'
 import { collectFiles } from './files.js'
 import { fingerprint, makeStableId, sha256 } from './identity.js'
 import { overloadQualifier } from './parser/identity.js'
+import { JAVA_PACKAGE_IMPORT_LOCAL, JAVA_UNKNOWN_RECEIVER } from './parser/java.js'
 import { ensureDefaultParsers, PARSER_VERSION, parserRegistry } from './parser/registry.js'
 import type { ParsedFile, ParsedFunction, ParsedImport } from './parser/types.js'
 import type { ParseCacheEntry, StorageAdapter } from './storage/StorageAdapter.js'
@@ -721,11 +722,250 @@ function resolvePyCallee(
   return candidates.length === 1 ? candidates[0] : null
 }
 
+/** Java 类条目：类全名 → 文件集合 + 该类方法/构造器（lambda 不计入成员） */
+interface JavaClassEntry {
+  fullName: string
+  simpleName: string
+  /** 声明该类的文件集合（同名类被多个文件定义时保持多候选，不猜） */
+  files: Set<string>
+  /** className 去 `#` 后与 fullName 完全一致的方法/构造器 */
+  methods: FunctionDoc[]
+}
+
+/**
+ * Java 建图上下文（仅由 language === 'java' 的文件构建）：
+ * 类全名索引 + 文件包名（来自解析器的 `__java_package__` 合成 import）。
+ * 所有查找都限制在这份 Java 索引内，不会连到 Python/C++/TS 的同名函数。
+ */
+interface JavaCallContext {
+  classes: Map<string, JavaClassEntry>
+  /** 文件 → 包名；默认包（或缺少合成 import）取空包 */
+  packageByFile: Map<string, string>
+}
+
+/** 函数所属类全名：去除 lambda 的 `#方法名(参数签名)` 后缀 */
+function javaClassOf(fn: FunctionDoc): string | null {
+  if (fn.className === null) return null
+  const marker = fn.className.indexOf('#')
+  return marker >= 0 ? fn.className.slice(0, marker) : fn.className
+}
+
+/** 构造器识别：名字等于简单类名且无返回类型（解析器对构造器 returnType = null） */
+function isJavaConstructor(fn: FunctionDoc, simpleName: string): boolean {
+  return fn.name === simpleName && fn.returnType === null
+}
+
+/** 从 Java 解析单元构建类索引；类名以 FunctionDoc.className 为唯一事实来源 */
+function buildJavaCallContext(units: ParsedUnit[]): JavaCallContext {
+  const classes = new Map<string, JavaClassEntry>()
+  const packageByFile = new Map<string, string>()
+  for (const unit of units) {
+    if (unit.language !== 'java') continue
+    const packageImport = unit.imports.find(
+      (imp) => imp.localName === JAVA_PACKAGE_IMPORT_LOCAL
+    )
+    if (packageImport) packageByFile.set(unit.relPath, packageImport.source)
+    for (const fn of unit.functions) {
+      const fullName = javaClassOf(fn)
+      if (fullName === null) continue
+      let entry = classes.get(fullName)
+      if (!entry) {
+        const simpleName = fullName.split('.').pop() ?? fullName
+        entry = { fullName, simpleName, files: new Set(), methods: [] }
+        classes.set(fullName, entry)
+      }
+      entry.files.add(unit.relPath)
+      // lambda 的 className = 类路径#方法名(...)，只归属其所在类，不作为类成员
+      if (fn.className === fullName) entry.methods.push(fn)
+    }
+  }
+  return { classes, packageByFile }
+}
+
+/**
+ * 显式 import 可能绑定的项目内类型全名：
+ * - 普通/嵌套类型 import：source 本身就是类全名（最后一段 = localName）；
+ * - static 嵌套类型 import：source 是外层类，`source.importedName` 才是类全名；
+ * 不是类型绑定（如 static 成员 import）或目标不在类索引 → null。
+ */
+function importedJavaType(imp: ParsedImport, context: JavaCallContext): string | null {
+  if (imp.kind !== 'named') return null
+  if (
+    context.classes.has(imp.source) &&
+    (imp.source === imp.localName || imp.source.endsWith(`.${imp.localName}`))
+  ) {
+    return imp.source
+  }
+  const nested = `${imp.source}.${imp.importedName}`
+  return context.classes.has(nested) ? nested : null
+}
+
+/**
+ * Java 类型名 → 项目内类全名（严格、不猜）。只允许四种来源：
+ * 1) 类索引中的全限定名（含默认包/嵌套路径）；
+ * 2) 显式 import：普通、嵌套、static 嵌套类型；
+ * 3) 同包 `${package}.${类型名}`；
+ * 4) 显式 import 前缀 + 嵌套后缀（`import a.Outer` / `import a.Outer.Inner` + `Outer.Inner`）。
+ * 外部类型（含显式 import 的项目外类型）与找不到的类一律 null。
+ * 不设「简单类名全局唯一」兜底：通配符 import 下的外部类型不得连到同名项目类。
+ */
+function resolveJavaTypeName(
+  typeName: string,
+  relPath: string,
+  importByName: Map<string, ParsedImport>,
+  context: JavaCallContext
+): string | null {
+  if (typeName.length === 0) return null
+  if (context.classes.has(typeName)) return typeName
+  const dot = typeName.indexOf('.')
+  const first = dot >= 0 ? typeName.slice(0, dot) : typeName
+  const rest = dot >= 0 ? typeName.slice(dot + 1) : ''
+  const packageName = context.packageByFile.get(relPath) ?? ''
+
+  // 显式 import：首段是 import 的局部名（普通/嵌套/static 嵌套类型）
+  const imported = importByName.get(first)
+  if (imported && imported.kind === 'named') {
+    const isTypeImport =
+      imported.source === imported.localName ||
+      imported.source.endsWith(`.${imported.localName}`)
+    if (isTypeImport) {
+      // 外层类本身可能没有方法（不在类索引），但 `import Outer` + `Outer.Inner`
+      // 仍应按 import 前缀补出嵌套全名后查类索引
+      const full = rest.length > 0 ? `${imported.source}.${rest}` : imported.source
+      return context.classes.has(full) ? full : null
+    }
+    // static 嵌套类型 import：source 是外层类，source.importedName 才是类型全名
+    const nested = rest.length > 0
+      ? `${imported.source}.${imported.importedName}.${rest}`
+      : `${imported.source}.${imported.importedName}`
+    if (context.classes.has(nested)) return nested
+    // static 成员 import 不构成类型绑定，继续按同包解析
+  }
+
+  const samePackage = packageName.length > 0 ? `${packageName}.${typeName}` : typeName
+  if (context.classes.has(samePackage)) return samePackage
+
+  // 显式 import 前缀 + 嵌套后缀：`import a.Outer` + `Outer.Inner`、
+  // `import a.Outer.Inner` + `Outer.Inner`（import 全名以类型名为后缀）
+  for (const imp of importByName.values()) {
+    if (imp.kind !== 'named') continue
+    const bound = importedJavaType(imp, context)
+    if (bound === null) continue
+    if (bound === typeName || bound.endsWith(`.${typeName}`)) return bound
+    if (typeName.startsWith(`${imp.localName}.`)) {
+      const candidate = `${bound}${typeName.slice(imp.localName.length)}`
+      if (context.classes.has(candidate)) return candidate
+    }
+  }
+  return null
+}
+
+interface JavaMemberLookup {
+  /** 同名成员是否存在（存在多个时为 true 且 target=null，调用方不得继续回退） */
+  matched: boolean
+  target: FunctionDoc | null
+}
+
+/** 类内按名称找方法（排除构造器）；多候选返回 matched=true/target=null */
+function lookupJavaMethod(entry: JavaClassEntry, calledName: string): JavaMemberLookup {
+  const matches = entry.methods.filter(
+    (fn) => fn.name === calledName && !isJavaConstructor(fn, entry.simpleName)
+  )
+  return { matched: matches.length > 0, target: matches.length === 1 ? matches[0] : null }
+}
+
+/** 类构造器查找（多构造器返回 matched=true/target=null） */
+function lookupJavaConstructor(entry: JavaClassEntry): JavaMemberLookup {
+  const matches = entry.methods.filter((fn) => isJavaConstructor(fn, entry.simpleName))
+  return { matched: matches.length > 0, target: matches.length === 1 ? matches[0] : null }
+}
+
+/**
+ * 在指定类中解析成员调用：调用名等于简单类名时优先构造器（`new Foo()` / 构造器名），
+ * 其次方法；方法多候选不猜。
+ */
+function resolveJavaClassMember(
+  fullName: string,
+  calledName: string,
+  context: JavaCallContext
+): FunctionDoc | null {
+  const entry = context.classes.get(fullName)
+  if (!entry) return null
+  if (calledName === entry.simpleName) {
+    const ctor = lookupJavaConstructor(entry)
+    if (ctor.matched) return ctor.target
+  }
+  return lookupJavaMethod(entry, calledName).target
+}
+
+/**
+ * Java 调用解析（严格、不猜）：
+ * - receiver 为哨兵 `::?`（有 object 但类型不可知）：直接未解析，不落回无 receiver 分支；
+ * - receiver 以 `::` 开头：`::this` 只查当前类；`::super` 不建模基类 → null；
+ *   类型 receiver 按「全限定名 → 显式 import → 同包 → import 前缀 + 嵌套后缀」定位类，
+ *   再查方法/构造器（new 的类型 receiver 精确命中构造器）；
+ * - 无 receiver：当前类方法优先（本类同名方法覆盖 static import），其次 static import；
+ * - 普通文本 receiver 不会出现（解析器对未知对象写 `::?`）；不做全局同名方法回退。
+ */
+function resolveJavaCallee(
+  fn: FunctionDoc,
+  calledName: string,
+  receiver: string | undefined,
+  relPath: string,
+  importByName: Map<string, ParsedImport>,
+  context: JavaCallContext
+): FunctionDoc | null {
+  const currentClass = javaClassOf(fn)
+  if (receiver !== undefined) {
+    if (receiver === JAVA_UNKNOWN_RECEIVER) return null
+    if (receiver === '::this') {
+      if (currentClass === null) return null
+      const entry = context.classes.get(currentClass)
+      return entry ? lookupJavaMethod(entry, calledName).target : null
+    }
+    if (receiver === '::super') return null
+    if (receiver.startsWith('::')) {
+      const fullName = resolveJavaTypeName(
+        receiver.slice(2),
+        relPath,
+        importByName,
+        context
+      )
+      return fullName === null
+        ? null
+        : resolveJavaClassMember(fullName, calledName, context)
+    }
+    // 其它文本 receiver 不是类型（解析器已统一写 ::?），不猜
+    return null
+  }
+
+  // 无 receiver：本类同名方法优先；方法多候选直接失败，不再落到 static import
+  if (currentClass !== null) {
+    const entry = context.classes.get(currentClass)
+    if (entry) {
+      const method = lookupJavaMethod(entry, calledName)
+      if (method.matched) return method.target
+    }
+  }
+
+  // static import：source 是成员所属类；类不在索引中即外部类型，不再回退当前类/全局
+  const imported = importByName.get(calledName)
+  if (imported && imported.kind === 'named') {
+    if (!context.classes.has(imported.source)) return null
+    return resolveJavaClassMember(imported.source, calledName, context)
+  }
+
+  // new 的构造器调用已由解析器写入 ::Type receiver；无 receiver 的调用不再按
+  // 「调用名 = 类名」猜构造器（解析不到一律外部/未解析）
+  return null
+}
+
 /**
  * 构建单个函数的调用边（阶段二）：
  * 1) 自调用；2) 文件内同名（优先同类方法）；3) 跨文件——经 import 映射到目标文件导出表；
  * C++ 走严格模式：include 可见候选 → 限定作用域/同名回退，多候选一律不猜；
- * Python 走严格模式：本文件同名优先 → named import → namespace 成员 → 仅 Python 的全局唯一回退。
+ * Python 走严格模式：本文件同名优先 → named import → namespace 成员 → 仅 Python 的全局唯一回退；
+ * Java 走严格模式：类索引 + import/同包/import 前缀嵌套 → 类成员/构造器，多候选一律不猜。
  * 解析不到一律归「外部/未解析」，禁止强行猜测。
  */
 function buildCallEdges(
@@ -738,7 +978,8 @@ function buildCallEdges(
   knownPaths: Set<string>,
   exportedIndex: Map<string, Map<string, FunctionDoc>>,
   language: string,
-  cppContext: CppCallContext
+  cppContext: CppCallContext,
+  javaContext: JavaCallContext
 ): CallEdge[] {
   const edges: CallEdge[] = []
   const seen = new Set<string>()
@@ -756,8 +997,13 @@ function buildCallEdges(
     const calledName = site.name
     if (seen.has(calledName)) continue
     seen.add(calledName)
-    // 自调用短路：仅 JS/TS/C#/Vue 维持原口径；C++/Python 交给严格解析（唯一才连，多候选不猜）
-    if (calledName === fn.name && language !== 'cpp' && language !== 'python') {
+    // 自调用短路：仅 JS/TS/C#/Vue 维持原口径；C++/Python/Java 交给严格解析（唯一才连，多候选不猜）
+    if (
+      calledName === fn.name &&
+      language !== 'cpp' &&
+      language !== 'python' &&
+      language !== 'java'
+    ) {
       edges.push({
         callerId: fn.id,
         calleeName: calledName,
@@ -777,6 +1023,16 @@ function buildCallEdges(
     } else if (language === 'python') {
       // Python 走 .py 专用模块解析 + 严格唯一回退，不参与下面 JS/TS 的文件内同名兜底
       resolved = resolvePyCallee(fn, calledName, site.receiver, relPath, pyContext)
+    } else if (language === 'java') {
+      // Java 走类索引 + import/同包/import 前缀嵌套，禁止跨语言与全局同名方法回退
+      resolved = resolveJavaCallee(
+        fn,
+        calledName,
+        site.receiver,
+        relPath,
+        importByName,
+        javaContext
+      )
     } else {
       const candidates = byName.get(calledName) ?? []
       resolved =
@@ -955,6 +1211,9 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
     }
   }
 
+  // Java 类索引（仅 Java 文件）：类全名/简单类名/包名，供严格跨文件解析使用
+  const javaContext = buildJavaCallContext(units)
+
   // C++ 类外定义在所在 .cpp 里看不到类声明：用全局已观测到的「方法作用域」回填 kind。
   // 只对首段像类型名（大写开头）的作用域生效，避免把 namespace demo 的自由函数误判为方法。
   const cppMethodScopes = new Set<string>()
@@ -1024,7 +1283,8 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
         knownPaths,
         exportedIndex,
         unit.language,
-        cppContext
+        cppContext,
+        javaContext
       )
     })
 
