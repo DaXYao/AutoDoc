@@ -51,6 +51,13 @@
 
 ## 教训条目
 
+### 2026-10-21 · C++ 接入的三处静默失败：预处理容器 / 重载限定符 / 跨语言兜底
+- **场景**：C1 接入 C++ 解析器后的初审。
+- **现象**：`#ifndef X_H` 包裹的头文件解析出 0 个函数；`const` 与非 `const` 重载共享稳定 ID、重载父函数下的 lambda 也撞 ID；C++ 全局回退连到同名 TS 函数，`#include "x.h"` 还会命中同目录 `x.ts`。
+- **根因**：tree-sitter-cpp 把 `#ifdef` 包成 `preproc_ifdef`（类体内亦然），只遍历 translation_unit 的直接子节点会整段漏掉；cv/ref 限定符不在参数列表里，不并入 ID 哈希就分不开重载；C++ 全局同名索引未按语言过滤；共享 `resolveModule` 追加 C++ 扩展名后，`./x` 会先命中 x.ts。
+- **正确做法**：递归遍历预处理容器并按 className/name/params/限定符去重（保留首次）；限定符独立提取后并入参数签名哈希；跨语言兜底索引带 `languageByFile` 过滤；C++ include 用独立 `resolveCppModule`（精确命中优先），共享解析器保持原语言候选不变。
+- **预防措施**：接入新语言先用探针 dump AST 确认容器节点（预处理/装饰器/属性）；任何跨语言全局索引必须显式过滤语言；给共享解析器追加候选前先问「会不会抢走原语言的命中」。
+
 ### 2026-10-20 · basis 混入「非身份字段」：KEY 模式下整批 Agent 供给被本地核心判定静默顶掉
 - **场景**：H2 让 Agent 供给整棵脉络树；供给文件与 `supply:*` 缓存用 `flowsBasis` 做文件级对账，本地 `flows:tree` 缓存也用同一个指纹。
 - **现象**：合并时 basis 取在 coreJudgment 之前；KEY 路径刷新时本地核心判定在装配中途改写了 `coreFunctionIds`（`flowsBasis` 原含此字段）。下一次读 `supply:flows` 时 basis 不符 → Agent 整棵树被判过期，本地生成接管；全程无报错，单测也全绿（缺 KEY-enabled 的集成路径）。

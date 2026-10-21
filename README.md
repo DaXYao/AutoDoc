@@ -44,10 +44,11 @@ AutoDoc 把函数级变更映射回业务图谱：
 
 ## 当前支持与边界
 
-- **语言**：目前注册 TypeScript（`.ts`）、TSX（`.tsx`）、JavaScript（`.js` / `.jsx` / `.mjs` / `.cjs`）、C#（`.cs`）与 Vue 单文件组件（`.vue`，解析 `<script>` / `<script setup>` 与模板事件引用）。Python、Java、Pug 等尚未接入；新增语言需要实现 `LanguageParser` 接口并在 `packages/core/src/parser/registry.ts` 注册。
+- **语言**：目前注册 TypeScript（`.ts`）、TSX（`.tsx`）、JavaScript（`.js` / `.jsx` / `.mjs` / `.cjs`）、C#（`.cs`）、Vue 单文件组件（`.vue`，解析 `<script>` / `<script setup>` 与模板事件引用）与 C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`，只解析有函数体的定义）。Python、Java、Pug 等尚未接入；新增语言需要实现 `LanguageParser` 接口并在 `packages/core/src/parser/registry.ts` 注册。
 - **AI 与追问**：KEY 链路读取 `DEEPSEEK_API_KEY`；未配置 key 时仍可做静态分析与外部 Agent 供给，但就地追问/函数级追问不可用（服务端按「未配置 AI」拒绝）。
 - **Agent 供给范围**：只覆盖语义层（十个洞察侧 pass + 变更侧 `changes`），不写批注、不写变更记录、不修改代码；AutoDoc 只校验结构、字段与引用，不对语义正确性背书。
 - **Vue SFC**：每个 `.vue` 生成一个合成 `[template]` 入口节点；模板事件里的函数调用/成员调用接入调用图，裸引用只接脚本函数或 import 名。模板表达式为轻量词法扫描，不支持 Pug 等非 HTML 模板；`<script>` 字符串中出现 `</script>` 会提前截断。
+- **C++**：只解析有函数体的定义（纯声明跳过）；命名空间通过 `className` 编码（如 `demo::Widget`），不单独进入稳定 ID；lambda 合成 `[lambda#N]` 条目。跨文件优先直接 quoted `#include`，其次唯一 basename，同名多候选不猜；不做传递 include、编译参数、宏展开与模板实例化；函数指针返回类型不产条目，转换运算符 `operator bool` 目前跳过。
 - **变更追踪**：每次生成都会记录工作区指纹快照；Git 可用时额外回填提交历史，两者并存。非 Git 仓库或 Git 不可用时只有快照，仍记录最近三次变更，但无法回溯提交叙事。合并提交中的 evil merge 与冲突解决改动不在覆盖范围内。
 - **静态导出**：`export` 生成只读站点，包含文件文档、三分类、批注与搜索；洞察、变更影响、Agent 供给依赖本地服务，导出站中不提供，写操作与供给入口也会隐藏。
 - **运行形态**：本地单机工具，服务默认监听 `127.0.0.1`，无多用户协作、远程同步与鉴权。
@@ -157,7 +158,7 @@ cp .env.example .env
 | 领域 | 选型 |
 | --- | --- |
 | 语言与仓库 | TypeScript（ESM、strict）、Node >= 22.13、pnpm workspace（11.24.0） |
-| 代码解析 | web-tree-sitter 0.25 + @vscode/tree-sitter-wasm 0.0.5；内置 TypeScript / TSX / JavaScript / C# grammar；Vue SFC 由内置 VueParser 复用 JS/TS 解析器并扫描模板事件 |
+| 代码解析 | web-tree-sitter 0.25 + @vscode/tree-sitter-wasm 0.0.5；内置 TypeScript / TSX / JavaScript / C# / C++ grammar；Vue SFC 由内置 VueParser 复用 JS/TS 解析器并扫描模板事件 |
 | 核心引擎 | `@autodoc/core`：分类、稳定 ID/指纹、调用图、注释块、变更 diff、存储适配 |
 | 本地服务 | Fastify 5 + @fastify/static、commander 13、chokidar 4 |
 | 存储 | `node:sqlite` 的 `DatabaseSync`（默认）；JSON 侧车适配器（`storage.type` = `sqlite` / `json`） |
@@ -175,7 +176,7 @@ cp .env.example .env
 AutoDoc/
 ├── packages/
 │   ├── core/
-│   │   ├── src/parser/          # ParserRegistry 与 JS/TS/TSX/C#/Vue 解析器
+│   │   ├── src/parser/          # ParserRegistry 与 JS/TS/TSX/C#/Vue/C++ 解析器
 │   │   ├── src/storage/         # SqliteStorage / JsonStorage
 │   │   ├── src/git/             # simple-git 变更回填
 │   │   ├── src/identity.ts      # 稳定 ID、参数签名哈希、函数体指纹

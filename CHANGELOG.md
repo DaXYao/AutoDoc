@@ -2,6 +2,27 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · C1 修复：C++ 接入初审（预处理容器 / 稳定 ID / 跨语言误连 / 嵌套边界）· core
+
+- **动机**：C1 初审发现 `#ifdef` include guard 头文件解析出 0 个函数；`const`/非 `const` 重载与重载父函数下的 `[lambda#N]` 稳定 ID 碰撞；C++ 全局回退会误连同名 TS 函数、`#include "x.h"` 会被同目录 `x.ts` 抢走；另有 receiver 语义、匿名命名空间可见性、嵌套 lambda、行尾注释、嵌套类等边界问题。
+- **解析器（cpp.ts）**：`walk`/`walkType` 递归遍历 `preproc_if/ifdef/elif/else`（类体内同理），ParseState 增加 className/name/params/限定符去重集合（`#if/#else` 重复定义保留首次）；限定名 receiver 改为 `::a` 前缀，与 `obj.foo()` 的 plain receiver 区分；匿名命名空间内的函数/方法强制 `module-local`/`exported=false`；递归收集嵌套 lambda（父函数排除全部 lambda 区间，各 lambda 跳过内部嵌套），lambda className 带上父函数参数签名与重载限定符（参数重载下的同名 lambda 也不撞 ID）；行尾注释不再配给下一条语句；`field_declaration` 包裹的嵌套类下钻；签名补齐 `&/&&/override/final` 等限定符；`operator bool` 解析出 ERROR 时跳过，不产出伪 `bool` 条目。
+- **稳定 ID（parser/identity.ts 新增 + identity.ts）**：`overloadQualifier` 从 signature 参数列表后提取 `const/volatile/&/&&/noexcept/override/final`；`makeStableId` 增可选第 5 参，非空时并入参数签名哈希；`generate.ts` 仅对 C++ 扩展名计算限定符，非 C++ 与无限定符函数既有 ID 不变。
+- **建图（generate.ts）**：共享 `resolveModule` 恢复仅 JS/TS/Vue 候选，新增 C++ 专用 `resolveCppModule`（仅 C++ 扩展名、精确命中优先），include 解析改走后者；C++ 全局回退经 `languageByFile` 只保留 `language === 'cpp'` 候选；`visible.length > 1` 时先按 `::` receiver 与当前 className 收窄再判多候选；C++ 自调用交给严格解析（唯一才连）；类声明在头文件、类外定义在 .cpp 的方法用全局已观测方法作用域回填 `kind='method'`（大写首段启发式，避免 namespace 自由函数误判）。
+- **测试**：`cppParser.test.ts`/`cppGenerate.test.ts` 新增 include guard、类体内预处理分支、const/ref 重载 ID、参数重载 lambda、跨语言同名、`x.h` vs `x.ts`、visible>1+receiver、plain receiver、匿名命名空间、嵌套 lambda、尾注释、嵌套类、C++ 自调用、类外定义 kind 回填等用例。`pnpm --filter @autodoc/core test` 225 项通过；全仓 `pnpm test` 920 项通过（core 225 / server 436 / web 259），`pnpm lint` 全绿。
+- **已知边界**：tree-sitter-cpp 当前 grammar 无法正确解析转换运算符 `operator bool`，解析器直接跳过该条目而不是以 `bool` 入库；函数指针返回类型 `int (*fp())(int)` 不产出条目；不做传递 include、编译参数、宏展开与模板实例化。
+- **关联 commit**：本次修复提交。
+
+## 2026-10-21 · C1a/C1b：C++ 语言接入（命名空间 / lambda / quoted include）· core
+
+- **动机**：AutoDoc 需要分析 C++ 项目；本次只接 C++（Python 留待下期），并选择「扩展版 + 零共享数据模型改动」。
+- **解析器**：新增 `CppParser`（`.cpp/.cc/.cxx/.h/.hpp/.hh/.hxx/.inl`），只解析有函数体的定义；覆盖自由函数、类/结构体方法（内联与类外）、构造/析构、运算符、函数模板、重载、命名空间、匿名命名空间、嵌套类；提取 params/returnType/signature/可见性/文档注释/调用点/注释块。
+- **零数据模型扩展**：命名空间复用 `className`（自由函数 `demo`、方法 `demo::Widget`）；lambda 合成 `[lambda#N]`（className=父函数作用域+参数+限定符）；quoted include 复用 `ParsedImport`（`__cpp_include__:N` 前缀 + `./` source）；cv/ref 限定符通过 `makeStableId` 可选第 5 参并入参数签名哈希。`shared-types`、UI、现有 JS/TS/C#/Vue ID 均未改。
+- **跨文件**：`generate.ts` 新增 C++ 专用 `resolveCppModule`（不复用 JS/TS 的共享解析器），直接 include 优先、唯一 basename/后缀兜底；include 候选必须 exported；同名多候选不猜；限定名 `a::foo()` 用 `::` receiver 选作用域；C++ 候选按 `languageByFile` 隔离，避免误连同名 TS/JS 函数。
+- **注册/缓存**：`PARSER_VERSION` 2→3，C++ 首入解析范围；默认 include 增加 8 个 C++ 扩展名。
+- **测试/实跑**：`cppParser.test.ts` + `cppGenerate.test.ts` 覆盖上述边界；core 225 / 全仓 920 项通过。临时 C++ 项目（include guard 头文件、类、const 重载、lambda、quoted include）实跑：头文件函数被解析、类外方法回填 `kind=method`、const/非 const ID 不同、include/限定名解析成功、同名多候选保持未解析。
+- **已知边界**：见上一条修复记录；Python、传递 include、宏展开、模板实例化不在本期。
+- **关联 commit**：本次代码提交。
+
 ## 2026-10-21 · A1：AutoDoc 自我分析（Agent-only）——797 函数 / 200 链路 / 15 模块全量供给
 
 - **目标**：用 AutoDoc 分析 AutoDoc 自身（非示例项目），验证 Agent-only 全链路，并把此前缺失的三分类、核心判定、内部步骤、外部库补全全部供上。
