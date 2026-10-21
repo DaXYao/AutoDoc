@@ -39,6 +39,7 @@
 - [ ] **Vue SFC 解析**：轻量块扫描（script 整块跳过、template 按嵌套深度配对）+ 复用既有 JS/TS 解析器并平移行号 + 合成 `[template]` 入口把模板事件接入调用图（见 2026-10-21 条）。
 - [ ] **外部库补全按符号供给**：`${module}::${symbol}` 复合对象 id + 按符号字段级合并 + 可选字段缺省保留本地值 + null-prototype 容器防原型污染（见 2026-10-21 E1 条）。
 - [ ] **C++ 零模型扩展**：命名空间复用 `className`、quoted include 复用 `ParsedImport`、lambda 合成 `[lambda#N]`、cv/ref 限定符并入稳定 ID、跨语言候选按 `languageByFile` 过滤；共享 `resolveModule` 不追加新语言候选（见 2026-10-21 C1 条）。
+- [ ] **Python 零模型扩展**：类/嵌套作用域复用 `className`、嵌套函数/lambda 合成条目、`ParsedImport` 复用 + Python 专用 resolver；import 解析按绑定语义（unaliased `import a.b` 绑定顶层包、named/namespace/receiver 分开处理），`self/cls` 只按当前类（见 2026-10-21 P1 条）。
 
 ---
 

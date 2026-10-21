@@ -2,6 +2,23 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · P1 修复：Python import 绑定与 receiver 误连/漏连 · core
+
+- **初审问题**：①命名 import 忽略 receiver（`from lib import save` + `self.save()` 误连 lib.save）；②模块导出表按名覆盖（模块 `def run` 被类方法 `run` 覆盖，`from lib import run` 漏连）；③namespace 源拼接错（`import foo.bar` 后 `foo.helper()` 误连 foo/bar.py，`import pkg.util` 拼出 pkg.util.util 伪候选）。
+- **修复**：解析顺序改为「本文件同名优先 → 无 receiver 的 named import → namespace → Python 全局唯一回退」；`exported` 只对模块级 public 函数为 true，模块导出查询改用 `allByName` 的 className=null 函数（显式 `_private` 导入也可解析）；namespace 按绑定语义生成唯一 source（unaliased `import a.b` 用 receiver 本身，别名/相对 import 用 source+后缀）；支持 `from . import helper`、`from pkg import sub` 子模块、`self/cls` 只按当前类解析；普通对象 receiver 的唯一同名方法可解析，但同名 named import 目标会被排除（`obj.save` 不被 lib.save 顶替）；未解析子模块成员不回退同名 import。
+- **测试**：`pythonParser.test.ts`/`pythonGenerate.test.ts` 补上述回归；core 269 项通过，全仓 964 项通过（core 269 / server 436 / web 259），`pnpm lint` 全绿。
+- **关联 commit**：本次修复提交。
+
+## 2026-10-21 · P1a/P1b：Python 语言接入（import / 嵌套 / lambda / 装饰器）· core
+
+- **动机**：完成 Python 语言接入（扩展版、零共享数据模型改动），覆盖函数/async/类/装饰器/嵌套结构/lambda 与相对/绝对 import。
+- **解析器**：新增 `PythonParser`（`.py`）；className 编码类/嵌套作用域（类方法 `Outer.Inner`、嵌套函数外层作用域）；嵌套函数/类与函数体内 lambda 均入库（lambda `[lambda#N]`）；装饰器（staticmethod/classmethod/property 等）、类型注解、默认值剥离、*args/**kwargs、docstring、`#` 注释块、调用点与 Python 语境角色齐备。
+- **import/跨文件**：复用 `ParsedImport`；Python 专用 `resolvePyModule`（相对点分上溯、绝对点分、`__init__.py`、唯一后缀、多候选不猜），不修改共享 resolveModule；named/namespace/子模块 import 解析，Python 候选按 language 隔离，未解析成员不回落同名 import。
+- **注册/缓存**：`PARSER_VERSION` 3→4；默认 include 增加 `**/*.py`；shared-types/UI/C++ 行为未改。
+- **测试/实跑**：core 269 / 全仓 964 项通过；临时 Python 包（相对/绝对 import、namespace 别名、子模块、类方法、装饰器、docstring、嵌套函数、lambda）实跑：跨文件调用解析、`fmt.format` 与 `_private` 解析、`self.helper` 按当前类、装饰器/docstring/注释块在文件页正常呈现。
+- **已知边界**：仅 `.py`（无 `.pyi`/Python 2）；类/模块级 lambda 暂不入库；不做动态 import、`sys.path`、re-export/`__all__`、继承/类型推断；`sub.deep.func()` 前缀子模块、同名多来源 import 不解析；async 标记暂未写入 signature（不影响 ID/解析）。
+- **关联 commit**：本次代码提交。
+
 ## 2026-10-21 · C1 修复：C++ 接入初审（预处理容器 / 稳定 ID / 跨语言误连 / 嵌套边界）· core
 
 - **动机**：C1 初审发现 `#ifdef` include guard 头文件解析出 0 个函数；`const`/非 `const` 重载与重载父函数下的 `[lambda#N]` 稳定 ID 碰撞；C++ 全局回退会误连同名 TS 函数、`#include "x.h"` 会被同目录 `x.ts` 抢走；另有 receiver 语义、匿名命名空间可见性、嵌套 lambda、行尾注释、嵌套类等边界问题。

@@ -46,10 +46,18 @@
 - [ ] 「无 KEY」不等于「无语义」：Agent-only 下 `aiEnabled=false` 但 `aiGenerated=true`、`agentSources` 非空；前端若只用 `aiEnabled` 判定「纯静态」就会给出误导横幅。展示层要把「本地 KEY 能力」与「语义是否已生效」拆成两个判定。
 - [ ] 对外主页/README 的事实声明（版本、依赖、语言支持、命令、数字）必须逐条对代码核查；产品价值与技术亮点分列，并单列「当前支持与边界」主动暴露限制——否则容易把需求文档误当现状（见 2026-10-21 R1）。
 - [ ] 外部供给的可选字段缺省 ≠ 清空：字段级合并必须保留本地已有值；外部可控的 module/symbol 键写入对象前用 null-prototype 容器或 Map，防 `__proto__` / `constructor` 原型污染。
+- [ ] Python import 解析必须按「绑定语义」而不是源码字符串拼接：unaliased `import a.b` 绑定顶层包 a；named import 不能覆盖带 receiver 的成员调用；模块导出只算 `className=null` 的模块级函数；未解析的子模块成员不得回退到同名 named import。
 
 ---
 
 ## 教训条目
+
+### 2026-10-21 · Python import 绑定的三处静默误连：receiver / 导出覆盖 / namespace 拼接
+- **场景**：P1 接入 Python 解析器后的初审与实跑。
+- **现象**：①`from lib import save` + `self.save()` 连到 lib.save；②模块 `def run` 后被类方法 `run` 覆盖，`from lib import run` 漏连；③`import foo.bar` 后 `foo.helper()` 误连 foo/bar.py，`import pkg.util` 拼出 pkg.util.util 伪候选；④`fmt.format()` 被「带 receiver 一律不回退」误挡。
+- **根因**：命名 import 没有检查 receiver；`exportedIndex` 按名字覆盖且方法/嵌套函数也标 exported；namespace 候选用 `imp.source` 与 receiver 后缀无条件拼接，没有区分「unaliased import 绑定顶层包」与「别名 import 绑定完整模块」；为防止 `self.save` 误连而一刀切禁止 receiver 回退，又漏掉了普通对象唯一方法的合法回退。
+- **正确做法**：解析顺序本文件同名优先 → 无 receiver 的 named import → namespace/子模块 → Python 全局唯一；`exported` 只标模块级 public 函数，导出查询按 `className=null`；namespace source 按绑定语义生成唯一候选；`self/cls` 只按当前类解析，普通对象 receiver 允许全局唯一但排除同名 named import 目标；未解析子模块成员不回退同名 import。
+- **预防措施**：接入带 import 的语言时，先画出「绑定 → 目标模块/符号」的映射表再写解析器；跨语言全局索引必须过滤 language；任何「为防止误连」的早退都要用正反例同时验证（`self.save` 不连 lib.save，`fmt.format` 仍能连到唯一方法）。
 
 ### 2026-10-21 · C++ 接入的三处静默失败：预处理容器 / 重载限定符 / 跨语言兜底
 - **场景**：C1 接入 C++ 解析器后的初审。
