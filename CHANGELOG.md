@@ -2,6 +2,13 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · S0：语义担保目标与边界（文档）· docs
+
+- **现状**：Agent 供给与洞察合并只校验结构、字段与引用，不担保语义正确性；可能出现 id 全对、字段合规但与代码事实不符的链路叙事。
+- **已确认设计**：覆盖全部语义断言并按 claim 拆分；硬事实静态证据、意图类 LLM/Agent 复核；等级 `verified`（系统静态 + KEY 第二遍 LLM）/ `declared`（Agent 自审）/ `unverified`；主叙事只展示前两档，未证实折叠；扫描/合并时验证并随快照持久化；缺证据存量供给照常合并但标未证实；共享模型只做新增可选字段/映射，Agent 信封新增可选 `guarantees`；KEY 增加第二遍 LLM 复核，Agent-only 以自审为准并标注来源。语言顺序：TypeScript/JavaScript/TSX → C# → Vue SFC → C++ → Python → Java → Go，第一轮 TypeScript。
+- **文档**：README 增加摘要，新增 `docs/SEMANTIC_GUARANTEE.md` 详版设计（claim/证据结构、状态机、失败策略、契约与每轮完成标准）。
+- **关联 commit**：本次 docs 提交。
+
 ## 2026-10-21 · G1 修复：Go 局部函数值/作用域/默认 import 名/init ID · core
 
 - **初审问题**：①`func run(work func()){work()}` 把局部函数值误连到同包 `work`；②单变量表被内层块覆盖，外层 `w.Do()` 误连内层类型，且 `a.Close(); b.Close()` 按 calledName 去重丢 B；③包名与 import 路径末段不一致（目录 tool/包 toolkit、/v2、gopkg.in/yaml.v3）时 receiver 变 `::?`；④同文件多个 init/_ 稳定 ID 相同。
