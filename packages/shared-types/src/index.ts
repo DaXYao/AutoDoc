@@ -1478,3 +1478,111 @@ export interface AgentSupplyExportResponse {
   /** 完整机器可读索引的落盘位置（团队模式为本机 team-supply-index.json） */
   indexPath: string
 }
+
+/* ------------------------- 一键 Agent 任务包（#206） ------------------------- */
+
+/**
+ * 任务包生成时每个 pass 的目标规模（创建时快照，供界面展示；校验时会按应用 partition 后的
+ * 图谱重新计算覆盖率，因为新划分可能改变模块/链路数量）。
+ */
+export interface AgentTaskPassTarget {
+  pass: AgentSupplyPass
+  /** 需要覆盖的对象数；partition/flows 固定为 1（整份） */
+  expected: number
+  /** 任务包期望 Agent 写入的答案文件名（`answers/` 下，`<pass>.<agent>.json`） */
+  file: string
+}
+
+/** `answers/` 中一个期望答案文件的检测状态 */
+export interface AgentTaskAnswerFile {
+  pass: AgentSupplyPass
+  file: string
+  exists: boolean
+  bytes: number
+  /** 文件 mtime（ISO）；不存在为 null */
+  modifiedAt: string | null
+}
+
+/** 任务包状态（GET /api/agent-task 与任务动作共用） */
+export interface AgentTaskInfo {
+  id: string
+  projectId: string
+  /** 答案文件名里的 Agent 标识（字母数字与 . _ -，≤64 字符） */
+  agent: string
+  /** 任务包根目录（本地缓存，位于本机 AutoDoc 数据目录下） */
+  dir: string
+  /** 给 Agent 的短提示文件（PROMPT.md） */
+  promptPath: string
+  /** PROMPT.md 内容：前端「复制提示」直接使用，避免让用户去文件夹里找 */
+  promptText: string
+  /** 详细任务说明（TASK.md） */
+  taskPath: string
+  /** 由现有供给契约生成的规则文本（不含两轮章节与变更侧） */
+  contractPath: string
+  /** 完整机器可读索引（全量函数/模块/链路/外部符号 + 行号与注释块） */
+  indexPath: string
+  answersDir: string
+  /** 答案期望写入目录（= answersDir，单独给出便于 Agent 读取） */
+  sourceRoot: string
+  createdAt: string
+  /** 生成时的划分指纹（用于识别结构漂移） */
+  basis: string
+  graphFingerprint: string
+  /** 生成后图谱/划分已变化：必须重新生成任务包，不能合并旧答案 */
+  stale: boolean
+  /** 已成功校验并合并：任务完成，不再允许重复合并 */
+  completed: boolean
+  completedAt: string | null
+  expected: AgentTaskPassTarget[]
+  answers: AgentTaskAnswerFile[]
+  /** 已检测到的答案文件数 */
+  answerCount: number
+  hasAnswers: boolean
+  /** 最近一次校验失败生成的修复提示文件；无则 null */
+  repairPath: string | null
+}
+
+/** 任务包校验问题（文件级；不返回裸栈） */
+export interface AgentTaskIssue {
+  file: string
+  pass?: AgentSupplyPass
+  reason: string
+}
+
+/** 一个 pass 的覆盖情况（covered < expected 表示未全量覆盖） */
+export interface AgentTaskCoverage {
+  pass: AgentSupplyPass
+  expected: number
+  covered: number
+  missing: number
+}
+
+/** POST /api/agent-task/:id/validate 响应；ok=false 时 repairPrompt 可直接交回 Agent */
+export interface AgentTaskValidation {
+  ok: boolean
+  task: AgentTaskInfo
+  issues: AgentTaskIssue[]
+  coverage: AgentTaskCoverage[]
+  /** 人类可读摘要（校验通过/未通过、缺失文件与覆盖数） */
+  summary: string
+  /** 修复提示（Markdown）；校验通过时为空串 */
+  repairPrompt: string
+  repairPath: string | null
+}
+
+/**
+ * POST /api/agent-task/:id/merge 响应。
+ * 校验失败时 mergeCode='failed'、不写任何供给；合并被回滚态拦截时为 'blocked'。
+ */
+export interface AgentTaskMergeResult {
+  validation: AgentTaskValidation
+  mergeCode: 'merged' | 'noop' | 'blocked' | 'failed'
+  merged: boolean
+  reason?: string
+  snapshotId?: string
+  winnerCount?: number
+  /** 本次写入的正规化供给文件（绝对路径） */
+  writtenFiles: string[]
+  /** 覆盖旧供给前的备份目录（任务包 previous/ 下）；无覆盖为 null */
+  backupDir: string | null
+}

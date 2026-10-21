@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import Fastify, { type FastifyInstance } from 'fastify'
+import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify'
 import fastifyStatic from '@fastify/static'
 import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AgentSupplyResponse, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse, TeamConflictChoice } from '@autodoc/shared-types'
 import { inspectParseCache, resolveShowRecent } from '@autodoc/core'
@@ -36,6 +36,14 @@ import {
   writeSupplyIndexFile
 } from './agentSupply.js'
 import { executeMerge } from './agentSupplyMerge.js'
+import {
+  AgentTaskError,
+  createAgentTask,
+  getAgentTask,
+  latestAgentTask,
+  mergeAgentTask,
+  validateAgentTask
+} from './agentTasks.js'
 import { collectChangesSupplyLight, resolveChangesAgentSemantics, scopeToSupplyId } from './agentSupplyChanges.js'
 import { getDeepSeekConfig } from './env.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
@@ -741,6 +749,86 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       return result
     } catch (error) {
       return reply.code(500).send({ error: `合并失败：${error instanceof Error ? error.message : String(error)}` })
+    }
+  })
+
+  /* ------------------------- 一键 Agent 任务包（#206） ------------------------- */
+
+  const agentTaskError = (reply: FastifyReply, error: unknown): unknown => {
+    if (error instanceof AgentTaskError) {
+      const status = error.code === 'not-found' ? 404 : error.code === 'blocked' ? 409 : 400
+      return reply.code(status).send({ error: error.message })
+    }
+    return reply
+      .code(500)
+      .send({ error: `任务包操作失败：${error instanceof Error ? error.message : String(error)}` })
+  }
+
+  app.get('/api/agent-task', async (_req, reply) => {
+    const service = manager.getActive()
+    const projectId = manager.getActiveId()
+    if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
+    try {
+      return { task: latestAgentTask(service, projectId) }
+    } catch (error) {
+      return agentTaskError(reply, error)
+    }
+  })
+
+  app.post('/api/agent-task', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    const projectId = manager.getActiveId()
+    if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
+    const body = (req.body ?? {}) as { agent?: unknown }
+    if (body.agent !== undefined && typeof body.agent !== 'string') {
+      return reply.code(400).send({ error: 'agent 必须是字符串' })
+    }
+    try {
+      return createAgentTask(service, projectId, body.agent)
+    } catch (error) {
+      return agentTaskError(reply, error)
+    }
+  })
+
+  app.get('/api/agent-task/:id', async (req, reply) => {
+    const service = manager.getActive()
+    const projectId = manager.getActiveId()
+    if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
+    const { id } = req.params as { id: string }
+    try {
+      return getAgentTask(service, projectId, id)
+    } catch (error) {
+      return agentTaskError(reply, error)
+    }
+  })
+
+  app.post('/api/agent-task/:id/validate', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    const projectId = manager.getActiveId()
+    if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
+    const { id } = req.params as { id: string }
+    try {
+      return validateAgentTask(service, projectId, id)
+    } catch (error) {
+      return agentTaskError(reply, error)
+    }
+  })
+
+  app.post('/api/agent-task/:id/merge', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    const projectId = manager.getActiveId()
+    if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
+    const { id } = req.params as { id: string }
+    try {
+      const result = mergeAgentTask(service, projectId, id)
+      if (result.mergeCode === 'blocked') return reply.code(409).send(result)
+      if (result.mergeCode === 'failed') return reply.code(400).send(result)
+      return result
+    } catch (error) {
+      return agentTaskError(reply, error)
     }
   })
 

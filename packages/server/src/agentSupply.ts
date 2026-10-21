@@ -3143,6 +3143,12 @@ export interface SupplyRulesInput {
   baseline: AgentSupplyBaseline
   /** G5：变更侧上下文（缺省时不生成变更章节） */
   changes?: ChangesSupplyContext
+  /**
+   * 是否追加「两轮契约」章节（默认 true）。
+   * 一键任务包把结构 + 语义合并为一次交接，由答案归一化层先应用 partition 再注入 basis，
+   * 故任务包契约不展示两轮说明，避免把 Agent 引回旧流程。
+   */
+  includeTwoRound?: boolean
 }
 
 /**
@@ -3175,7 +3181,9 @@ export function generateSupplyRulesText(input: SupplyRulesInput): AgentSupplyRul
     )
     rulesText = rulesText + '\n' + changesSection.join('\n')
   }
-  rulesText = rulesText + '\n' + twoRoundSection().join('\n')
+  if (input.includeTwoRound !== false) {
+    rulesText = rulesText + '\n' + twoRoundSection().join('\n')
+  }
   return {
     rulesText,
     generatedAt,

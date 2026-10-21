@@ -9,6 +9,8 @@
 - 已被 AGENTS.md 沉淀为硬规则的教训，在本文件保留一条链接即可，不重复展开。
 
 ## 避坑清单（快速扫描）
+- [ ] 「链路入口函数稳定 ID」不保证唯一：同一入口可能对应多条链路。任务包/契约用入口 ID 做链路符号引用时必须附加路径（如 path hash 的 symbolicKey），否则 narratives/flows 会无法唯一解析（一键任务包实跑发现）。
+- [ ] 任务包/缓存是否过期不能只看图谱指纹：图谱指纹只含节点与边，纯函数体改动不会变化；要补函数体指纹摘要（id: fingerprint 的哈希），否则旧答案会静默套到新代码上。
 - [ ] 团队数据仓库首次建立必须先在空目录（允许只有 `.git`）跑 AutoDoc 初始化并同步 manifest，其他人再 clone；不要先塞 README/普通文件——`TeamStorage` 对「非空且无 manifest」会拒绝接管（实跑双 clone 时踩过）。测试/演练里可手工补 `.autodoc-team.json` 再启动，但不要把它当成用户流程。
 - [ ] `git commit -- <目录>` 不能用于空/未跟踪目录（报 `pathspec ... did not match`）；团队仓库应先 add 已知目录，再用 `git diff --cached --name-only` 得到的具体文件作 commit pathspec。
 - [ ] server 新增入口模块时先检查循环依赖：`agentSupply → insight → supplyCache → agentSupply` 若 supplyCache 顶层从 agentSupply 取常量，换入口加载会 TDZ undefined；共享常量抽到无依赖模块，禁止依赖 import 顺序。

@@ -8,6 +8,7 @@
 - 记录标准：这个做法确实解决了问题、且以后可能再次用到。
 
 ## 经验索引（快速扫描）
+- [ ] **一键 Agent 任务包**：本地任务目录（短提示 + 完整索引 + answers/）+ partition 先应用得到新 basis + 符号引用（模块名 / 链路 symbolicKey / 函数稳定 ID）归一 + 复用既有 scan/merge + repair.md + 完成标记；任务过期要同时看图谱与函数体指纹（见 2026-10-22 条）。
 - [ ] **团队 Git 数据仓库同步**：独立 TeamGitClient（execFile 参数数组、显式 ok/error）+ 只提交已知路径（commit pathspec 取已暂存具体文件）+ fetch/merge/push 状态机 + 冲突两阶段版本（`:2:`/`:3:`/both 生成副本）+ 真实 bare remote 双 clone 测试（见 2026-10-21 条）。
 - [ ] **团队仓库安全加固**：`rev-parse --show-toplevel` realpath 必须等于 teamRoot（父仓库/bare 拒绝）+ 清 `GIT_DIR` 等环境变量并设 `GIT_CEILING_DIRECTORIES` + 托管目录 lstat/realpath containment + 冲突 stage 三态（ls-files 失败≠删除）+ 同目录临时文件 `wx`+rename + 每客户端缓存根校验（见 2026-10-22 条）。
 - [ ] 注释块提取：用 tree-sitter Query 把注释节点与紧随语句配对。
@@ -50,6 +51,15 @@
 ---
 
 ## 成功经验条目
+
+### 2026-10-22 · 一键 Agent 任务包：符号引用一次交接
+- **场景**：外部 Agent 供给需要同时完成整项目划分与多 pass 语义，旧两轮契约（先 partition、再重新导出）认知负担高。**适用条件**：需要把「结构层 + 语义层」交给一个外部 Agent 一次性产出，且服务端能复用严格校验/合并管线。
+- **做法**：
+  1. **任务包自包含**：本地缓存目录放短提示、任务说明、去掉两轮/变更侧的既有契约、全量索引（含行号/注释块）、空的 `answers/`；Agent 只写 answers。
+  2. **符号引用**：函数用稳定 ID；模块用名称；链路用 `symbolicKey`（入口唯一时等于 entryId，同入口多链路时 `entryId#pathHash`）；答案可只写 `values`，信封字段由服务端补。
+  3. **先结构后语义**：先单独校验 partition 并应用到请求私有图谱，得到新 basis/modules/chains；再把模块名/链路符号/稳定 ID 归一成 `mod:N` / `chain:N`，注入 basis，最后复用既有 `scanAgentSupply` 做完整校验。
+  4. **闭环**：全量覆盖才允许合并；失败写 `repair.md` 并返回 repairPrompt；通过后备份旧供给、写正式目录、调用既有 executeMerge，完成写 `completedAt`。
+  5. **过期判定**：图谱指纹 + 划分 basis + 函数体指纹摘要三者一起比；纯函数体改动也能识别。
 
 ### 2026-10-22 · 团队 Git 仓库安全加固：根校验、环境隔离、链接 containment、三态冲突读取
 - **场景**：AutoDoc 团队数据仓库（用户可配置 repoPath）后端初审 P0/P1。**适用条件**：任何把用户配置目录当作「独立 Git 工作树」读写、并与一个更大的源码仓库共存的功能。

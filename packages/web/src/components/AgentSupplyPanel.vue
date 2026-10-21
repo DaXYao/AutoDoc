@@ -1,22 +1,30 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import type {
   AgentSupplyPass,
   AgentSupplyRulesResult,
-  AgentSupplySuggestion
+  AgentSupplySuggestion,
+  AgentTaskInfo,
+  AgentTaskMergeResult,
+  AgentTaskValidation
 } from '@autodoc/shared-types'
 import {
+  createAgentTaskPackage,
   exportAgentSupplyRules,
   fetchAgentSupplyRules,
+  fetchAgentTask,
   getMode,
   isNoActiveProjectError,
+  mergeAgentTaskPackage,
+  validateAgentTaskPackage,
   type AgentSupplyMergeResponse
 } from '../data/api'
 import {
   appReady,
   appState,
   mergeAgentSupplyNow,
+  refreshInsight,
   rescanAgentSupply
 } from '../store/app'
 import { formatDate } from '../utils/format'
@@ -196,6 +204,204 @@ const MERGE_CODE_META: Record<
   blocked: { label: '合并被拒（回滚视图）', tone: 'warning' }
 }
 
+/* ------------------------- 一键任务包（#206/#207） ------------------------- */
+
+const TASK_AGENT_KEY = 'autodoc.agentName'
+const task = ref<AgentTaskInfo | null>(null)
+const taskError = ref<string | null>(null)
+const taskCreating = ref(false)
+const taskValidating = ref(false)
+const taskMerging = ref(false)
+const taskRefreshing = ref(false)
+const taskValidation = ref<AgentTaskValidation | null>(null)
+const taskMergeResult = ref<AgentTaskMergeResult | null>(null)
+const agentName = ref(localStorage.getItem(TASK_AGENT_KEY) ?? 'qoder')
+
+const taskBusy = computed(
+  () => taskCreating.value || taskValidating.value || taskMerging.value || taskRefreshing.value
+)
+const taskRows = computed(() => {
+  const current = task.value
+  if (!current) return []
+  return current.expected.map((target) => ({
+    ...target,
+    detected: current.answers.find((a) => a.file === target.file)?.exists ?? false
+  }))
+})
+const taskCoverageRows = computed(() => taskValidation.value?.coverage ?? [])
+const taskIssues = computed(() => taskValidation.value?.issues.slice(0, 20) ?? [])
+const taskCanWork = computed(
+  () =>
+    task.value !== null &&
+    !task.value.stale &&
+    !task.value.completed &&
+    task.value.hasAnswers &&
+    writeBlockedReason.value === null
+)
+
+let taskPoll: ReturnType<typeof setInterval> | null = null
+
+function stopTaskPoll(): void {
+  if (taskPoll) {
+    clearInterval(taskPoll)
+    taskPoll = null
+  }
+}
+
+/**
+ * 自动检测：面板打开且任务尚未收齐答案时轮询一次最新状态。
+ * collectAgentSupply 要重算图谱，故间隔取 5 秒；答案收齐/任务过期即停，避免无意义轮询。
+ */
+function startTaskPoll(): void {
+  stopTaskPoll()
+  if (isStatic.value) return
+  taskPoll = setInterval(() => {
+    const current = task.value
+    if (
+      !visible.value ||
+      !current ||
+      current.stale ||
+      current.completed ||
+      current.answerCount >= current.expected.length
+    ) {
+      stopTaskPoll()
+      return
+    }
+    void refreshTaskQuiet()
+  }, 5000)
+}
+
+async function loadTask(): Promise<void> {
+  if (isStatic.value) return
+  taskError.value = null
+  try {
+    task.value = await fetchAgentTask()
+    startTaskPoll()
+  } catch (error) {
+    task.value = null
+    taskError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+async function refreshTaskQuiet(): Promise<void> {
+  try {
+    const latest = await fetchAgentTask()
+    task.value = latest
+    if (!latest || latest.answerCount >= latest.expected.length) stopTaskPoll()
+  } catch {
+    // 自动检测失败不打断面板；用户可手动刷新
+  }
+}
+
+async function handleRefreshTask(): Promise<void> {
+  if (taskRefreshing.value) return
+  taskRefreshing.value = true
+  try {
+    const latest = await fetchAgentTask()
+    task.value = latest
+    if (!latest) {
+      message.info('当前还没有任务包')
+      return
+    }
+    if (latest.answerCount === 0) message.info('还没有检测到答案文件')
+    else message.success(`检测到 ${latest.answerCount} / ${latest.expected.length} 个答案文件`)
+    if (latest.answerCount >= latest.expected.length) stopTaskPoll()
+  } catch (error) {
+    if (!isNoActiveProjectError(error)) message.error(error instanceof Error ? error.message : String(error))
+  } finally {
+    taskRefreshing.value = false
+  }
+}
+
+async function handleCreateTask(): Promise<void> {
+  if (taskCreating.value) return
+  const name = agentName.value.trim() || 'qoder'
+  if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/.test(name)) {
+    message.error('Agent 标识只能包含字母、数字、点、下划线或连字符（1–64 字符）')
+    return
+  }
+  taskCreating.value = true
+  try {
+    const created = await createAgentTaskPackage(name)
+    localStorage.setItem(TASK_AGENT_KEY, name)
+    task.value = created
+    taskValidation.value = null
+    taskMergeResult.value = null
+    taskError.value = null
+    startTaskPoll()
+    message.success('任务包已生成：复制提示交给 Agent，答案写入 answers/')
+  } catch (error) {
+    if (!isNoActiveProjectError(error)) message.error(error instanceof Error ? error.message : String(error))
+  } finally {
+    taskCreating.value = false
+  }
+}
+
+async function handleCopyTaskPrompt(): Promise<void> {
+  if (!task.value) return
+  const ok = await copyText(task.value.promptText)
+  if (ok) message.success('任务提示已复制，直接交给你的 Agent')
+  else message.error('复制失败：请打开任务目录手动复制 PROMPT.md')
+}
+
+async function handleCopyTaskPath(path: string, label: string): Promise<void> {
+  const ok = await copyText(path)
+  if (ok) message.success(`${label}已复制`)
+  else message.error('复制失败：请手动选择路径')
+}
+
+async function handleValidateTask(): Promise<void> {
+  if (!task.value || taskValidating.value) return
+  taskValidating.value = true
+  try {
+    const result = await validateAgentTaskPackage(task.value.id)
+    taskValidation.value = result
+    task.value = result.task
+    taskMergeResult.value = null
+    if (result.ok) message.success(result.summary)
+    else message.warning(result.summary)
+  } catch (error) {
+    if (!isNoActiveProjectError(error)) message.error(error instanceof Error ? error.message : String(error))
+  } finally {
+    taskValidating.value = false
+  }
+}
+
+async function handleMergeTask(): Promise<void> {
+  if (!task.value || taskMerging.value) return
+  taskMerging.value = true
+  try {
+    const result = await mergeAgentTaskPackage(task.value.id)
+    taskMergeResult.value = result
+    taskValidation.value = result.validation
+    task.value = result.validation.task
+    if (result.mergeCode === 'merged') {
+      message.success(`已合并 ${result.winnerCount ?? 0} 项 Agent 供给并归档快照`)
+      await refreshInsight()
+    } else if (result.mergeCode === 'noop') {
+      message.info(result.reason ?? '校验通过，但没有产生新快照')
+    } else if (result.mergeCode === 'blocked') {
+      message.warning(result.reason ?? '回滚视图下拒绝合并，请先回到实时视图')
+    } else {
+      message.warning(result.reason ?? '校验未通过，供给目录未写入')
+    }
+    await rescanAgentSupply()
+    await refreshTaskQuiet()
+  } catch (error) {
+    if (!isNoActiveProjectError(error)) message.error(error instanceof Error ? error.message : String(error))
+  } finally {
+    taskMerging.value = false
+  }
+}
+
+async function handleCopyRepair(): Promise<void> {
+  const text = taskValidation.value?.repairPrompt
+  if (!text) return
+  const ok = await copyText(text)
+  if (ok) message.success('修复提示已复制，交回 Agent 修复答案文件')
+  else message.error('复制失败：请展开修复提示手动复制')
+}
+
 /* ------------------------- 契约文本（接入指南） ------------------------- */
 
 const rules = ref<AgentSupplyRulesResult | null>(null)
@@ -236,7 +442,12 @@ const rulesUnavailableText = computed(() => {
 watch(
   () => props.show,
   (open) => {
-    if (open && !isStatic.value) void loadRules()
+    if (open && !isStatic.value) {
+      void loadRules()
+      void loadTask()
+    } else {
+      stopTaskPoll()
+    }
   }
 )
 
@@ -245,9 +456,19 @@ watch(
   () => {
     rules.value = null
     rulesHint.value = null
-    if (props.show && !isStatic.value) void loadRules()
+    task.value = null
+    taskValidation.value = null
+    taskMergeResult.value = null
+    taskError.value = null
+    stopTaskPoll()
+    if (props.show && !isStatic.value) {
+      void loadRules()
+      void loadTask()
+    }
   }
 )
+
+onBeforeUnmount(stopTaskPoll)
 
 /**
  * 剪贴板写入：优先异步 clipboard API；不可用（非安全上下文/旧浏览器）或被拒时
@@ -391,7 +612,208 @@ function passLabel(pass: AgentSupplyPass): string {
       <p class="mb-3 text-xs text-[color:var(--ad-ink-3)]">
         订阅制外部 Agent（Codex / Qoder CN / ChatGPT）作为 AI 语义层的第二个生产者；
         与本地 KEY API 地位平等，冲突字段以 Agent 为准，合并后自动归档快照（可回滚）。
+        推荐直接用「一键任务包」：一份提示 + 一次回答 + 一次校验合并，不用先划分再第二轮。
       </p>
+
+      <!-- ============ 一键任务包（推荐） ============ -->
+      <section class="ad-card mb-4 px-4 py-3" aria-label="一键 Agent 任务包">
+        <div class="flex flex-wrap items-center gap-2">
+          <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">一键 Agent 任务包</h3>
+          <n-tag size="tiny" type="success" :bordered="false">推荐</n-tag>
+          <div v-if="!isStatic && task" class="ml-auto flex items-center gap-2">
+            <n-button
+              size="tiny"
+              quaternary
+              :loading="taskRefreshing"
+              aria-label="刷新检测 answers 目录中的答案文件"
+              @click="handleRefreshTask"
+            >
+              刷新回答
+            </n-button>
+          </div>
+        </div>
+        <p class="mt-1 text-xs text-[color:var(--ad-ink-3)]">
+          生成一个自包含任务目录（短提示 + 完整索引 + 答案目录），把提示复制给 Agent；
+          它只写 <code class="font-mono">answers/</code>，你回来点一次「校验并合并」。
+          模块用名称、链路用入口函数稳定 ID，AutoDoc 会先应用 partition 再统一解析。
+        </p>
+
+        <n-alert v-if="taskError" type="warning" title="任务包不可用" class="mt-2">
+          {{ taskError }}
+        </n-alert>
+
+        <div v-if="!task" class="mt-3 flex flex-wrap items-end gap-2">
+          <label class="flex flex-col gap-1 text-xs text-[color:var(--ad-ink-3)]">
+            Agent 标识（只用于答案文件名）
+            <n-input
+              v-model:value="agentName"
+              size="small"
+              placeholder="qoder"
+              :disabled="isStatic || taskBusy"
+              class="w-[180px]"
+              aria-label="Agent 标识"
+            />
+          </label>
+          <n-button
+            v-if="!isStatic"
+            size="small"
+            type="primary"
+            :loading="taskCreating"
+            :disabled="writeBlockedReason !== null"
+            :title="writeBlockedReason ?? '生成任务包目录（本地缓存，不写源码/团队仓库）'"
+            @click="handleCreateTask"
+          >
+            生成任务包
+          </n-button>
+          <span v-if="writeBlockedReason" class="text-xs text-[color:var(--ad-ink-3)]">
+            {{ writeBlockedReason }}
+          </span>
+        </div>
+
+        <template v-else>
+          <dl class="mt-3 grid gap-x-4 gap-y-1.5 text-xs sm:grid-cols-2">
+            <div class="min-w-0">
+              <dt class="text-[color:var(--ad-ink-3)]">任务</dt>
+              <dd class="font-mono break-all text-[color:var(--ad-ink-2)]">
+                {{ task.id }} · @{{ task.agent }}
+              </dd>
+            </div>
+            <div class="min-w-0">
+              <dt class="text-[color:var(--ad-ink-3)]">答案检测</dt>
+              <dd class="text-[color:var(--ad-ink-2)]">
+                {{ task.answerCount }} / {{ task.expected.length }} 个文件
+                <span v-if="task.completed" class="text-[color:var(--ad-ink-3)]"> · 已完成合并</span>
+                <span v-else-if="task.stale" class="text-[color:var(--ad-danger-ink)]"> · 已过期</span>
+              </dd>
+            </div>
+            <div class="min-w-0 sm:col-span-2">
+              <dt class="text-[color:var(--ad-ink-3)]">答案目录</dt>
+              <dd class="font-mono break-all text-[color:var(--ad-ink-2)]">{{ task.answersDir }}</dd>
+            </div>
+            <div class="min-w-0 sm:col-span-2">
+              <dt class="text-[color:var(--ad-ink-3)]">源码根目录（Agent 只读）</dt>
+              <dd class="font-mono break-all text-[color:var(--ad-ink-2)]">{{ task.sourceRoot }}</dd>
+            </div>
+          </dl>
+
+          <n-alert v-if="task.completed" type="success" title="任务包已完成合并" class="mt-2">
+            本次答案已校验、写入供给并归档{{ task.completedAt ? `（${formatDate(task.completedAt)}）` : '' }}。
+            需要继续补语义时请生成新任务包。
+          </n-alert>
+          <n-alert v-else-if="task.stale" type="warning" title="任务包已过期" class="mt-2">
+            生成后源码或划分发生了变化。请重新生成任务包，不要继续使用旧答案。
+          </n-alert>
+
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <n-button size="small" class="ad-btn-outline" :theme-overrides="adBtnOutlineOverrides" @click="handleCopyTaskPrompt">
+              复制提示
+            </n-button>
+            <n-button size="small" quaternary @click="handleCopyTaskPath(task.answersDir, '答案目录')">
+              复制答案目录
+            </n-button>
+            <n-button
+              v-if="!isStatic && !task.stale && !task.completed"
+              size="small"
+              class="ad-btn-outline"
+              :theme-overrides="adBtnOutlineOverrides"
+              :loading="taskValidating"
+              :disabled="!taskCanWork"
+              :title="task.hasAnswers ? '只校验，不写供给目录' : '先等 Agent 写入 answers/'"
+              @click="handleValidateTask"
+            >
+              校验
+            </n-button>
+            <n-button
+              v-if="!isStatic && !task.stale && !task.completed"
+              size="small"
+              type="primary"
+              :loading="taskMerging"
+              :disabled="!taskCanWork"
+              :title="task.hasAnswers ? '校验通过后写入正式供给目录并合并归档' : '先等 Agent 写入 answers/'"
+              @click="handleMergeTask"
+            >
+              校验并合并
+            </n-button>
+            <n-button
+              v-if="!isStatic"
+              size="small"
+              quaternary
+              :loading="taskCreating"
+              :disabled="writeBlockedReason !== null"
+              @click="handleCreateTask"
+            >
+              重新生成任务包
+            </n-button>
+          </div>
+
+          <div v-if="taskRows.length > 0" class="mt-2 flex flex-wrap gap-1.5">
+            <n-tag
+              v-for="row in taskRows"
+              :key="row.pass"
+              size="tiny"
+              :type="row.detected ? 'success' : 'default'"
+              :bordered="false"
+              :title="`${row.file}：期望覆盖 ${row.expected} 个对象`"
+            >
+              {{ passLabel(row.pass) }} {{ row.detected ? '已写' : '待写' }}
+            </n-tag>
+          </div>
+
+          <n-alert
+            v-if="taskValidation"
+            :type="taskValidation.ok ? 'success' : 'warning'"
+            :title="taskValidation.summary"
+            class="mt-3"
+          >
+            <ul v-if="taskIssues.length > 0" class="list-disc pl-4 text-xs">
+              <li v-for="(issue, index) in taskIssues" :key="`${issue.file}-${index}`" class="break-words">
+                <code class="font-mono">{{ issue.file }}</code>
+                <span v-if="issue.pass" class="text-[color:var(--ad-ink-3)]"> [{{ passLabel(issue.pass) }}]</span>
+                ：{{ issue.reason }}
+              </li>
+            </ul>
+            <div v-if="taskCoverageRows.length > 0" class="mt-2 flex flex-wrap gap-1.5">
+              <n-tag
+                v-for="row in taskCoverageRows"
+                :key="row.pass"
+                size="tiny"
+                :type="row.missing === 0 ? 'success' : 'warning'"
+                :bordered="false"
+              >
+                {{ passLabel(row.pass) }} {{ row.covered }}/{{ row.expected }}
+              </n-tag>
+            </div>
+            <div v-if="!taskValidation.ok" class="mt-2 flex flex-wrap items-center gap-2">
+              <n-button size="tiny" type="warning" secondary @click="handleCopyRepair">
+                复制修复提示给 Agent
+              </n-button>
+              <span class="text-[11px] text-[color:var(--ad-ink-3)]">
+                修复提示也写在任务目录的 repair.md
+              </span>
+            </div>
+          </n-alert>
+
+          <n-alert
+            v-if="taskMergeResult && taskMergeResult.mergeCode === 'merged'"
+            type="success"
+            title="已合并并归档新快照"
+            class="mt-3"
+          >
+            写入 {{ taskMergeResult.writtenFiles.length }} 个供给文件，生效
+            {{ taskMergeResult.winnerCount ?? 0 }} 项；可在洞察页历史版本里回滚。
+            <span v-if="taskMergeResult.backupDir" class="block break-all text-xs">
+              旧供给已备份到 {{ taskMergeResult.backupDir }}
+            </span>
+          </n-alert>
+        </template>
+      </section>
+
+      <!-- ============ 高级：旧契约与手工供给 ============ -->
+      <details class="mt-4">
+        <summary class="cursor-pointer select-none text-sm font-semibold text-[color:var(--ad-ink-2)]">
+          高级：手工契约 / 旧两轮流程 / 扫描与校验明细
+        </summary>
+        <div class="mt-3">
 
       <!-- ============ 接入指南 ============ -->
       <section class="ad-card mb-4 px-4 py-3">
@@ -882,6 +1304,8 @@ function passLabel(pass: AgentSupplyPass): string {
           让它按契约把供给文件写入 AutoDoc 侧目录，再回来「重新扫描」。
         </p>
       </div>
+        </div>
+      </details>
     </n-drawer-content>
   </n-drawer>
 </template>

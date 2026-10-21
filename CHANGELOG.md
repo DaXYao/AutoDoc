@@ -2,6 +2,19 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-22 · 一键 Agent 任务包（#206/#207）：符号引用一次交接 + 校验合并 · shared-types+server+web+docs
+
+- **后端（server/src/agentTasks.ts）**：新增本地任务目录 `<dataDir>/agent-tasks/<id>/`，生成 `PROMPT.md` / `TASK.md` / `contract.md` / `index.json` / `answers/` / `task.json`。契约复用现有 `generateSupplyRulesText`（新增 `includeTwoRound:false`，去掉变更侧与两轮章节），索引在 `buildSupplyIndexFile` 上补函数行号、代码块与链路 `symbolicKey`。任务清单记录 basis、图谱指纹与函数体内容指纹；生成后任一变化即 `stale`，拒绝旧答案。
+- **符号引用一次交接**：答案可只写 `values`；partition 先单独走既有 `scanAgentSupply` 原子校验并应用到请求私有图谱，再解析 modules（模块名）/ narratives 与 flows（`chains[].symbolicKey`）/ 函数稳定 ID，注入应用 partition 后的 basis，最后用新的图谱跑完整 `scanAgentSupply`。所有 pass 全量覆盖才 `ok`；未知引用/缺文件/覆盖缺口生成 `repair.md` 与 `repairPrompt`，不写供给。
+- **一键合并**：校验通过后写正式供给目录（同名旧文件先备份到任务包 `previous/`），调用既有 `executeMerge`；成功在 `task.json` 写 `completedAt`，完成后拒绝重复合并；回滚视图 `blocked` 返回 409 且任务保持未完成。
+- **链路歧义修复（实跑发现）**：同一入口函数可能对应多条链路，仅用 `entryId` 无法唯一解析。任务索引为每条链生成 `symbolicKey`：入口唯一时等于 `entryId`，同入口时追加 path 哈希；resolver 兼容 `chain:N`、`symbolicKey`、唯一 `entryId`，多义时给出明确修复提示。
+- **API**：GET/POST `/api/agent-task`、GET `/api/agent-task/:id`、POST `/api/agent-task/:id/validate`（纯读，失败也 200 带 validation）、POST `/api/agent-task/:id/merge`（400 校验失败/409 回滚拒绝，body 均含完整 validation）。README 以外新增 `docs/AGENT_TASK_PACKAGE.md`。
+- **前端（AgentSupplyPanel.vue）**：顶部新增「一键 Agent 任务包」主入口：生成/重新生成、复制提示、复制答案目录、刷新回答、校验、校验并合并；展示 9 类 pass 的待写/已写、覆盖数与问题清单、修复提示复制、完成态。面板打开时每 5 秒自动检测 answers，答案收齐/任务过期/完成即停。旧契约、两轮流程、手工合并与校验明细收进默认收起的「高级」区；`api.ts` 新增 4 个任务 API（merge 的 400/409 body 原样返回）。
+- **测试**：新增 `server/test/agentTasks.test.ts`（生成/无答案/全量符号答案合并/未知引用修复/stale/路由与 readOnly，含同入口多链路 symbolicKey）9 项；web `api.test.ts` 增补任务创建/校验/合并 400 与静态模式 3 项。server 667、web 323、core 427，全仓 1417 项通过；typecheck/build 通过。
+- **实跑**：临时 TS 项目（3 函数、2 条同入口链路），浏览器生成任务包 → 模拟 Agent 写 9 个答案 → 自动检测 9/9 → 校验覆盖 1/1、1/1、2/2、3/3、2/2 → 一键合并生效 18 项、`partitionSource=agent`、模块名/摘要/角色上屏、任务标记完成；临时数据已清理。第一次实跑暴露的「同入口多链路」歧义已修复并复跑通过。
+- **边界**：任务包不含变更侧 changes；不自动调用 Agent；任务目录是本机缓存，不随团队仓库共享；完成后需生成新包继续补语义。
+- **关联 commit**：随本批次提交。
+
 ## 2026-10-22 · 团队协作收尾（#205）：继续合并前端 + 双 clone 实跑 + 文档边界 · web+docs
 
 - **继续合并前端**：`data/api.ts` 新增 `continueTeamMerge()`（POST `/api/team/conflicts/continue`）；store 新增 `continueMerge()`，动作后写回状态并复用 `loadActiveDocs` 刷新；`TeamPanel.vue` 在 `merging && conflicts.length === 0`（上次提交中断或外部手动解决）时显示「继续合并」卡片与状态卡按钮，同时提供「放弃本次合并」；成功提示区分是否配置远端（推送失败由 `status.error` 原文提示）。`utils/team.ts` 的胶囊新增「合并待完成」档位（冲突计数仍优先），避免合并中断被误显示为普通未同步。

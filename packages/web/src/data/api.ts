@@ -3,6 +3,9 @@ import type {
   AgentSupplyPass,
   AgentSupplyResponse,
   AgentSupplyRulesResult,
+  AgentTaskInfo,
+  AgentTaskMergeResult,
+  AgentTaskValidation,
   Annotation,
   AnnotationKind,
   AskResponse,
@@ -513,6 +516,58 @@ export async function exportAgentSupplyRules(): Promise<AgentSupplyExportRespons
   const res = await fetch('/api/agent-supply-rules/export', { method: 'POST' })
   if (!res.ok) throw await errorFromResponse(res, '导出供给契约失败')
   return (await res.json()) as AgentSupplyExportResponse
+}
+
+/* ------------------------- 一键 Agent 任务包 ------------------------- */
+
+/** 最新任务包；未生成或静态模式返回 null（不当作错误）。 */
+export async function fetchAgentTask(): Promise<AgentTaskInfo | null> {
+  if (mode !== 'api') return null
+  const res = await fetch('/api/agent-task')
+  if (!res.ok) throw await errorFromResponse(res, '读取任务包失败')
+  const body = (await res.json()) as { task: AgentTaskInfo | null }
+  return body.task
+}
+
+/** 生成任务包（写操作；重复生成会新建一个，不覆盖旧包）。 */
+export async function createAgentTaskPackage(agent: string): Promise<AgentTaskInfo> {
+  if (mode !== 'api') throw new Error('任务包仅本地服务可用')
+  const res = await fetch('/api/agent-task', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ agent })
+  })
+  if (!res.ok) throw await errorFromResponse(res, '生成任务包失败')
+  return (await res.json()) as AgentTaskInfo
+}
+
+/** 显式校验任务包答案（不写供给；ok=false 也是正常响应）。 */
+export async function validateAgentTaskPackage(id: string): Promise<AgentTaskValidation> {
+  if (mode !== 'api') throw new Error('任务包仅本地服务可用')
+  const res = await fetch(`/api/agent-task/${encodeURIComponent(id)}/validate`, {
+    method: 'POST'
+  })
+  if (!res.ok) throw await errorFromResponse(res, '校验任务包失败')
+  return (await res.json()) as AgentTaskValidation
+}
+
+/**
+ * 校验并合并（写操作）。400=校验失败、409=回滚视图拒绝：两者都带完整
+ * AgentTaskMergeResult（含 validation 与 repairPrompt），必须原样返回给面板展示；
+ * 其余失败（403/500/无活动项目）才抛 ApiError。
+ */
+export async function mergeAgentTaskPackage(id: string): Promise<AgentTaskMergeResult> {
+  if (mode !== 'api') throw new Error('任务包仅本地服务可用')
+  const res = await fetch(`/api/agent-task/${encodeURIComponent(id)}/merge`, {
+    method: 'POST'
+  })
+  const body = (await res.json().catch(() => null)) as
+    | (AgentTaskMergeResult & { error?: string })
+    | null
+  if (body && typeof body.mergeCode === 'string' && body.validation) {
+    return body
+  }
+  throw apiError(res, body?.error ?? `校验并合并失败：${res.status}`)
 }
 
 /* ------------------------- 团队协作（team） ------------------------- */

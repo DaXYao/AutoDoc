@@ -3,7 +3,9 @@ import {
   ApiError,
   addAnnotation,
   continueTeamMerge,
+  createAgentTaskPackage,
   exportAgentSupplyRules,
+  fetchAgentTask,
   fetchAgentSupply,
   fetchAgentSupplyRules,
   fetchMeta,
@@ -13,11 +15,13 @@ import {
   isHubEnabled,
   isNoActiveProjectError,
   mergeAgentSupply,
+  mergeAgentTaskPackage,
   requestInsightAI,
   requestInsightPartition,
   resolveTeamConflict,
   setNoActiveProjectHandler,
-  syncTeamRepo
+  syncTeamRepo,
+  validateAgentTaskPackage
 } from '../src/data/api'
 
 const SERVER_META = {
@@ -379,6 +383,77 @@ describe('团队接口的错误口径', () => {
     expect(methods).toEqual(['POST'])
     expect((error as ApiError).status).toBe(400)
     expect((error as Error).message).toBe('仍有未解决的冲突文件，不能继续合并')
+  })
+
+  it('一键任务包：create POST body / validate / merge 400 原样返回 validation', async () => {
+    await enterHubMode()
+    const task = {
+      id: '20261022-010000-abcdef',
+      projectId: 'p1',
+      agent: 'qoder',
+      dir: 'E:/tmp/task',
+      promptPath: 'E:/tmp/task/PROMPT.md',
+      promptText: 'prompt',
+      taskPath: 'E:/tmp/task/TASK.md',
+      contractPath: 'E:/tmp/task/contract.md',
+      indexPath: 'E:/tmp/task/index.json',
+      answersDir: 'E:/tmp/task/answers',
+      sourceRoot: 'E:/src',
+      createdAt: '2026-10-22T01:00:00.000Z',
+      basis: 'basis',
+      graphFingerprint: 'fp',
+      stale: false,
+      expected: [],
+      answers: [],
+      answerCount: 0,
+      hasAnswers: false,
+      repairPath: null
+    }
+    const bodies: string[] = []
+    stubRoutes({
+      '/api/agent-task': (init) => {
+        bodies.push(String(init?.body ?? ''))
+        return json(task)
+      },
+      [`/api/agent-task/${task.id}/validate`]: () =>
+        json({ ok: true, task, issues: [], coverage: [], summary: 'ok', repairPrompt: '', repairPath: null }),
+      [`/api/agent-task/${task.id}/merge`]: () =>
+        json({
+          mergeCode: 'failed',
+          merged: false,
+          validation: { ok: false, task, issues: [], coverage: [], summary: 'no', repairPrompt: 'fix', repairPath: 'E:/tmp/repair.md' },
+          writtenFiles: [],
+          backupDir: null
+        }, 400)
+    })
+
+    const created = await createAgentTaskPackage('qoder')
+    expect(created.id).toBe(task.id)
+    expect(JSON.parse(bodies[0])).toEqual({ agent: 'qoder' })
+
+    const validation = await validateAgentTaskPackage(task.id)
+    expect(validation.ok).toBe(true)
+
+    const merge = await mergeAgentTaskPackage(task.id)
+    expect(merge.mergeCode).toBe('failed')
+    expect(merge.validation.repairPrompt).toBe('fix')
+  })
+
+  it('一键任务包：merge 500 抛 ApiError；静态模式 fetch 返回 null、写操作抛错', async () => {
+    await enterHubMode()
+    stubRoutes({ '/api/agent-task/t1/merge': () => json({ error: '磁盘只读' }, 500) })
+    const error = await mergeAgentTaskPackage('t1').catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as Error).message).toBe('磁盘只读')
+
+    stubRoutes({
+      '/api/projects': () => json({ error: 'not found' }, 404),
+      '/api/meta': () => json({ error: 'not found' }, 404),
+      'autodoc-data.json': () => json(EXPORT_DATA)
+    })
+    await initDataSource()
+    expect(await fetchAgentTask()).toBeNull()
+    await expect(createAgentTaskPackage('qoder')).rejects.toThrow('任务包仅本地服务可用')
   })
 
   it('静态模式团队接口直接抛错且不发请求（团队模式仅本地服务可用）', async () => {
