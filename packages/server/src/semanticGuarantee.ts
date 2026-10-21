@@ -1,4 +1,5 @@
 import type {
+  AgentSupplyChangesValue,
   AgentSupplyGuaranteeInput,
   AgentSupplyPass,
   AgentSupplyWinner,
@@ -119,6 +120,19 @@ export function isTsFamilyFile(fileId: string): boolean {
 
 /* ------------------------- 上下文与结果 ------------------------- */
 
+/**
+ * SG3：变更侧担保的 scope（由该 scopeId 的供给值推导）。
+ * 证据只能指向本次变更的函数/链路，避免拿「图谱里恰好存在」的任意对象担保变更叙事。
+ */
+export interface ChangesGuaranteeScope {
+  /** changeRoles 的函数 + affectedChains 各链路 path 上的函数（仅图谱中真实存在的） */
+  functionIds: Set<string>
+  /** affectedChains 的键（仅图谱中真实存在的链路） */
+  chainIds: Set<string>
+  /** scope 内函数所属文件（去重，用于语言闸门） */
+  files: string[]
+}
+
 interface EdgeRef {
   callerId: string
   edge: CallEdge
@@ -138,11 +152,13 @@ interface FactContext {
   externalCalls: Map<string, EdgeRef[]>
   /** flows 树节点 id → 节点（claims 可引用当前树内节点） */
   flowNodeById: Map<string, FlowNode>
+  /** changes 侧：本 scope 的变更函数/链路范围（其它 pass 缺省） */
+  changesScope?: ChangesGuaranteeScope
 }
 
 /** 断言主体解析结果：真实对象 + 其涉及的文件（用于语言闸门） */
 interface SubjectRef {
-  kind: 'function' | 'chain' | 'module' | 'external' | 'file' | 'flow' | 'root'
+  kind: 'function' | 'chain' | 'module' | 'external' | 'file' | 'flow' | 'root' | 'changes'
   id: string
   files: string[]
 }
@@ -440,6 +456,16 @@ function resolveSubjectRef(ctx: FactContext, id: string): SubjectRef | null {
     if (ctx.pass !== 'partition' && ctx.pass !== 'flows') return null
     return { kind: 'root', id, files: [...ctx.fileIds] }
   }
+  // changes 的 scope 本身不是图谱对象：只允许 pass='changes' 且 id 等于当前 scopeId。
+  // workspace scope 额外接受 `workspace` / `workspace:latest` 别名（供给文件常用写法），
+  // 规范 `workspace:<batchDate>` 仍原样支持。
+  if (ctx.pass === 'changes' && ctx.changesScope !== undefined) {
+    const workspaceAlias =
+      ctx.objectId.startsWith('workspace:') && (id === 'workspace' || id === 'workspace:latest')
+    if (id === ctx.objectId || workspaceAlias) {
+      return { kind: 'changes', id, files: [...ctx.changesScope.files] }
+    }
+  }
   if (ctx.fnById(id)) {
     return { kind: 'function', id, files: fileOfFunction(ctx.graph, id) }
   }
@@ -478,11 +504,20 @@ function languageGateOf(
   pass: AgentSupplyPass,
   objectId: string,
   insight: ProjectInsight,
-  graph: ProjectGraph
+  graph: ProjectGraph,
+  changesScope?: ChangesGuaranteeScope
 ): LanguageGate {
   switch (pass) {
-    case 'changes':
-      return { blocked: true, reason: '变更侧语义担保本轮尚未接入' }
+    case 'changes': {
+      if (!changesScope || changesScope.functionIds.size === 0) {
+        return {
+          blocked: true,
+          reason:
+            '变更范围没有可定位的函数/链路证据（需在 changeRoles 或 affectedChains 中给出变更函数/链路）'
+        }
+      }
+      return nonTsGate(changesScope.files, '变更范围包含非 TypeScript/JavaScript 文件')
+    }
     case 'categories':
     case 'coreJudgment':
     case 'coreRoles':
@@ -604,6 +639,58 @@ function checkEvidenceAnchors(
   return { kind: 'ok' }
 }
 
+/**
+ * SG3：变更侧证据必须整体落在 scope 内。
+ *
+ * scope 由供给值（changeRoles / affectedChains）声明，服务端不反查 git diff 成员；
+ * 这里只证明「Agent 声明范围内的证据彼此一致」，任一条证据出现 scope 外强锚点即整条 claim 违规，
+ * 不降级放行。moduleId 不属于变更 scope（变更只覆盖函数/链路），一律违规；
+ * symbol / line / detail / snippet 只能作补充，不能单独作为变更证据。
+ */
+function changesEvidenceViolation(evidence: SemanticEvidence[], ctx: FactContext): string | null {
+  const scope = ctx.changesScope
+  if (!scope) {
+    return '变更担保缺少变更范围（changeRoles / affectedChains），无法校验证据'
+  }
+  let anchored = false
+  for (let i = 0; i < evidence.length; i++) {
+    const e = evidence[i]
+    const at = `evidence[${i}]`
+    if (e.functionId !== undefined) {
+      if (!scope.functionIds.has(e.functionId)) {
+        return `${at}.functionId 不在本次变更范围内：${e.functionId}`
+      }
+      anchored = true
+    }
+    if (e.chainId !== undefined) {
+      if (!scope.chainIds.has(e.chainId)) {
+        return `${at}.chainId 不在本次变更范围内：${e.chainId}`
+      }
+      anchored = true
+    }
+    if (e.stepId !== undefined) {
+      const ref = ctx.edgeByStep.get(e.stepId)
+      if (!ref || !scope.functionIds.has(ref.callerId)) {
+        return `${at}.stepId 的调用方不在本次变更范围内（或该调用边不存在）：${e.stepId}`
+      }
+      anchored = true
+    }
+    if (e.fileId !== undefined) {
+      if (!scope.files.includes(e.fileId)) {
+        return `${at}.fileId 不在本次变更范围内：${e.fileId}`
+      }
+      anchored = true
+    }
+    if (e.moduleId !== undefined) {
+      return `${at}.moduleId 不能作为变更担保证据（变更范围只覆盖函数/链路）：${e.moduleId}`
+    }
+  }
+  if (!anchored) {
+    return '变更担保至少需要一条 scope 内的 functionId/chainId/stepId/fileId 证据'
+  }
+  return null
+}
+
 function hasEvidence(evidence: SemanticEvidence[], predicate: (e: SemanticEvidence) => boolean): boolean {
   return evidence.some(predicate)
 }
@@ -700,6 +787,20 @@ function matchesTypeText(fn: FunctionDoc, object: string): boolean {
 function evidenceAnchorsSubject(claim: ClaimShape, subject: SubjectRef, ctx: FactContext): boolean {
   const evidence = claim.evidence
   switch (subject.kind) {
+    case 'changes': {
+      const scope = ctx.changesScope
+      if (!scope) return false
+      return evidence.some((e) => {
+        if (e.functionId !== undefined && scope.functionIds.has(e.functionId)) return true
+        if (e.chainId !== undefined && scope.chainIds.has(e.chainId)) return true
+        if (e.stepId !== undefined) {
+          const ref = ctx.edgeByStep.get(e.stepId)
+          if (ref && scope.functionIds.has(ref.callerId)) return true
+        }
+        if (e.fileId !== undefined && scope.files.includes(e.fileId)) return true
+        return false
+      })
+    }
     case 'root':
     case 'flow':
       return evidence.some(
@@ -1211,6 +1312,27 @@ function claimReferencesObject(
   pass: AgentSupplyPass,
   objectId: string
 ): boolean {
+  if (pass === 'changes') {
+    // 变更侧：引用 scope 本身（含 workspace / workspace:latest 别名）、scope 内的函数/链路，
+    // 或证据命中 scope（函数/链路/步骤 caller/文件）即算覆盖。
+    if (claim.subject === objectId || claim.object === objectId) return true
+    if (resolveSubjectRef(ctx, claim.subject)?.kind === 'changes') return true
+    const scope = ctx.changesScope
+    if (!scope) return false
+    const inScope = (id: string | undefined): boolean =>
+      id !== undefined && (scope.functionIds.has(id) || scope.chainIds.has(id))
+    if (inScope(claim.subject) || inScope(claim.object)) return true
+    return claim.evidence.some((e) => {
+      if (e.functionId !== undefined && scope.functionIds.has(e.functionId)) return true
+      if (e.chainId !== undefined && scope.chainIds.has(e.chainId)) return true
+      if (e.fileId !== undefined && scope.files.includes(e.fileId)) return true
+      if (e.stepId !== undefined) {
+        const ref = ctx.edgeByStep.get(e.stepId)
+        if (ref && scope.functionIds.has(ref.callerId)) return true
+      }
+      return false
+    })
+  }
   if (pass === 'partition' || pass === 'flows') {
     // root 是显式的整项目对象；其余必须引用当前树/划分里的真实对象，不能恒 true
     if (claim.subject === objectId || claim.object === objectId) return true
@@ -1275,6 +1397,28 @@ function emptyGuarantee(
 }
 
 /**
+ * changes 侧的 subject 约束：硬事实只能以 scope 内的真实函数/链路为主体；
+ * scope 本身（commit:... / workspace:...）只适合 intent（硬事实规则会因主体不是函数/链路而失败）。
+ */
+function changesSubjectViolation(
+  pass: AgentSupplyPass,
+  scope: ChangesGuaranteeScope | undefined,
+  subject: SubjectRef
+): string | null {
+  if (pass !== 'changes' || !scope) return null
+  switch (subject.kind) {
+    case 'changes':
+      return null
+    case 'function':
+      return scope.functionIds.has(subject.id) ? null : `断言主体不在本次变更范围内：${subject.id}`
+    case 'chain':
+      return scope.chainIds.has(subject.id) ? null : `断言主体不在本次变更范围内：${subject.id}`
+    default:
+      return `变更侧 claim 的主体必须是本次变更范围内的函数或链路（scope 本身仅用于 intent）：${subject.id}`
+  }
+}
+
+/**
  * 校验一份 Agent 担保（claims + 自审），返回带 staticStatus / reviewStatus / status 的担保结果。
  *
  * 规则：
@@ -1283,13 +1427,15 @@ function emptyGuarantee(
  * - intent 类 staticStatus=not-applicable，由 review 担保；
  * - 所有 claim 静态通过（含 intent）且 review.verdict='pass' → declared，否则 unverified；
  *   本函数只做 Agent 静态校验；KEY 的 verified 由 semanticVerifier.ts 组装。
+ * - SG3：pass='changes' 时额外接收 changesScope——证据/主体必须落在该 scope 的变更函数/链路内。
  */
 export function validateGuaranteeClaims(
   insight: ProjectInsight,
   graph: ProjectGraph,
   pass: AgentSupplyPass,
   objectId: string,
-  guarantee: AgentSupplyGuaranteeInput
+  guarantee: AgentSupplyGuaranteeInput,
+  changesScope?: ChangesGuaranteeScope
 ): SemanticGuarantee {
   const rawGuarantee = guarantee as unknown
   if (!isPlainObject(rawGuarantee)) {
@@ -1328,10 +1474,11 @@ export function validateGuaranteeClaims(
     edgeByStep,
     fileIds: new Set(graph.fileOf.values()),
     externalCalls: collectExternalCalls(graph),
-    flowNodeById: collectFlowNodes(insight.flows)
+    flowNodeById: collectFlowNodes(insight.flows),
+    ...(changesScope ? { changesScope } : {})
   }
 
-  const gate = languageGateOf(pass, objectId, insight, graph)
+  const gate = languageGateOf(pass, objectId, insight, graph, changesScope)
   const shapeReasons: string[] = []
   const claims: SemanticClaim[] = []
   const seenIds = new Set<string>()
@@ -1364,12 +1511,20 @@ export function validateGuaranteeClaims(
       status = 'unverified'
       reason = gate.reason
     } else {
+      // changes：证据必须整体落在 scope 内（先于 subject 解析，任何 scope 外强锚点整条违规）。
+      const changesEvidenceReason =
+        pass === 'changes' ? changesEvidenceViolation(claim.evidence, ctx) : null
       // 所有 claim 的 subject 必须是当前图谱/洞察里真实存在的对象；引用函数必须属 TS/JS 家族。
       const subject = resolveSubjectRef(ctx, claim.subject)
       const subjectGate = subject ? subjectLanguageGate(subject) : null
+      const scopeViolation = subject ? changesSubjectViolation(pass, changesScope, subject) : null
       const objectRef = claim.object !== undefined ? resolveSubjectRef(ctx, claim.object) : null
       const objectGate = objectRef ? subjectLanguageGate(objectRef) : null
-      if (!subject) {
+      if (changesEvidenceReason !== null) {
+        staticStatus = 'fail'
+        status = 'unverified'
+        reason = changesEvidenceReason
+      } else if (!subject) {
         staticStatus = 'fail'
         status = 'unverified'
         reason = `断言主体不在当前图谱/洞察的真实对象中：${claim.subject}`
@@ -1377,6 +1532,10 @@ export function validateGuaranteeClaims(
         staticStatus = 'not-applicable'
         status = 'unverified'
         reason = subjectGate.reason
+      } else if (scopeViolation !== null) {
+        staticStatus = 'fail'
+        status = 'unverified'
+        reason = scopeViolation
       } else if (objectGate?.blocked) {
         staticStatus = 'not-applicable'
         status = 'unverified'
@@ -1470,6 +1629,64 @@ export function validateGuaranteeClaims(
     claims,
     ...(review.reviewedAt ? { reviewedAt: review.reviewedAt } : {}),
     ...(reason ? { reason } : {})
+  }
+}
+
+/**
+ * SG3：由变更侧供给值推导担保 scope。
+ * - changeRoles 的键（仅保留图谱中真实存在的函数）；
+ * - affectedChains 的键（仅保留图谱中真实存在的链路）及其 path 上的函数；
+ * - files = scope 函数所属文件（去重）。
+ */
+function changesGuaranteeScopeOf(
+  graph: ProjectGraph,
+  value: AgentSupplyChangesValue
+): ChangesGuaranteeScope {
+  const functionIds = new Set<string>()
+  const chainIds = new Set<string>()
+  for (const fnId of Object.keys(value.changeRoles ?? {})) {
+    if (graph.nodes.has(fnId)) functionIds.add(fnId)
+  }
+  const chainById = new Map(graph.chains.map((c) => [c.id, c]))
+  for (const chainId of Object.keys(value.affectedChains ?? {})) {
+    const chain = chainById.get(chainId)
+    if (!chain) continue
+    chainIds.add(chainId)
+    for (const fnId of chain.path) {
+      if (graph.nodes.has(fnId)) functionIds.add(fnId)
+    }
+  }
+  const files = new Set<string>()
+  for (const fnId of functionIds) {
+    const file = graph.fileOf.get(fnId) ?? fileIdOfFunctionId(fnId)
+    if (file) files.add(file)
+  }
+  return { functionIds, chainIds, files: [...files].sort() }
+}
+
+/**
+ * SG3：校验变更侧单条语义对象的担保（读请求时实时校验，不写洞察快照）。
+ * scope 由该 scopeId 的 value 推导；异常一律降级为 unverified，不抛。
+ */
+export function validateChangesGuarantee(
+  insight: ProjectInsight,
+  graph: ProjectGraph,
+  scopeId: string,
+  value: AgentSupplyChangesValue,
+  guarantee: AgentSupplyGuaranteeInput
+): SemanticGuarantee {
+  try {
+    const scope = changesGuaranteeScopeOf(graph, value)
+    return validateGuaranteeClaims(insight, graph, 'changes', scopeId, guarantee, scope)
+  } catch (e) {
+    return {
+      pass: 'changes',
+      objectId: scopeId,
+      status: 'unverified',
+      source: 'agent',
+      claims: [],
+      reason: `变更担保校验异常：${e instanceof Error ? e.message : String(e)}`
+    }
   }
 }
 

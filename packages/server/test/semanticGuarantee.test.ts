@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type {
+  AgentSupplyChangesValue,
   AgentSupplyClaimInput,
   AgentSupplyGuaranteeInput,
   AgentSupplyPass,
@@ -27,6 +28,7 @@ import {
   applyAgentGuaranteesToInsight,
   isTsFamilyFile,
   semanticGuaranteeStats,
+  validateChangesGuarantee,
   validateGuaranteeClaims
 } from '../src/semanticGuarantee.js'
 
@@ -317,6 +319,264 @@ describe('语言判定', () => {
     ])
     expect(flows.status).toBe('unverified')
     expect(flows.reason).toContain('项目级混合对象')
+  })
+})
+
+/* ------------------------- 变更侧担保（SG3） ------------------------- */
+
+function changesValue(opts: {
+  functions?: string[]
+  chains?: string[]
+  narrativeOnly?: boolean
+}): AgentSupplyChangesValue {
+  const value: AgentSupplyChangesValue = {
+    narrative: { what: '这次变更改了什么。', why: '为了测试。', risks: [] }
+  }
+  if (opts.narrativeOnly) return value
+  if (opts.functions?.length) {
+    value.changeRoles = {}
+    for (const id of opts.functions) value.changeRoles[id] = '本次变更中的角色。'
+  }
+  if (opts.chains?.length) {
+    value.affectedChains = {}
+    for (const id of opts.chains) {
+      const chain = GRAPH.chains.find((c) => c.id === id)
+      if (chain) value.affectedChains[id] = { entryId: chain.entryId, impact: '受本次变更影响。' }
+    }
+  }
+  return value
+}
+
+describe('变更侧担保（SG3：scope 证据）', () => {
+  it('scope 内 functionId / chainId / stepId 证据 → declared', () => {
+    const value = changesValue({ functions: [ALPHA], chains: [CHAIN] })
+    const cases: SemanticEvidence[][] = [
+      [{ functionId: ALPHA }],
+      [{ chainId: CHAIN }],
+      [{ stepId: `${ALPHA}>beta` }]
+    ]
+    for (const evidence of cases) {
+      const res = validateChangesGuarantee(
+        INSIGHT,
+        GRAPH,
+        'commit:abc',
+        value,
+        guaranteeOf([
+          claim('intent', 'commit:abc', evidence, { text: '这次变更的核心意图。' })
+        ])
+      )
+      expect(res.status, JSON.stringify(evidence)).toBe('declared')
+      expect(res.pass, JSON.stringify(evidence)).toBe('changes')
+      expect(res.objectId, JSON.stringify(evidence)).toBe('commit:abc')
+      expect(res.source, JSON.stringify(evidence)).toBe('agent')
+    }
+  })
+
+  it('affectedChains 的 path 函数自动进入 scope', () => {
+    const res = validateChangesGuarantee(
+      INSIGHT,
+      GRAPH,
+      'commit:abc',
+      changesValue({ chains: [CHAIN] }),
+      guaranteeOf([claim('intent', 'commit:abc', [{ functionId: BETA }], { text: '链路中的 beta。' })])
+    )
+    expect(res.status).toBe('declared')
+  })
+
+  it('scope 外证据 → unverified', () => {
+    const res = validateChangesGuarantee(
+      INSIGHT,
+      GRAPH,
+      'commit:abc',
+      changesValue({ functions: [ALPHA] }),
+      guaranteeOf([claim('intent', 'commit:abc', [{ functionId: EPSILON }], { text: '引用 scope 外的函数。' })])
+    )
+    expect(res.status).toBe('unverified')
+    expect(res.claims[0].status).toBe('unverified')
+    expect(res.reason).toContain('不在本次变更范围内')
+  })
+
+  it('🔴1 subject 在 scope 内但链路证据在 scope 外 → 整条 claim 违规（不降级放行）', () => {
+    // changeRoles 只声明 ALPHA，没有 affectedChains：CHAIN 虽真实存在但不属于本 scope
+    const res = validateChangesGuarantee(
+      INSIGHT,
+      GRAPH,
+      'commit:abc',
+      changesValue({ functions: [ALPHA] }),
+      guaranteeOf([claim('intent', ALPHA, [{ chainId: CHAIN }], { text: '拿图谱里的现成链路作证。' })])
+    )
+    expect(res.status).toBe('unverified')
+    expect(res.claims[0].staticStatus).toBe('fail')
+    expect(res.claims[0].status).toBe('unverified')
+    expect(res.claims[0].reason).toContain('不在本次变更范围内')
+    expect(res.reason).toContain('不在本次变更范围内')
+  })
+
+  it('🔴1 moduleId 证据（即使模块真实存在）→ 违规', () => {
+    const byFunction = validateChangesGuarantee(
+      INSIGHT,
+      GRAPH,
+      'commit:abc',
+      changesValue({ functions: [ALPHA] }),
+      guaranteeOf([
+        claim('intent', ALPHA, [{ moduleId: MOD_SRC }], { text: '模块是当前模块。' })
+      ])
+    )
+    expect(byFunction.status).toBe('unverified')
+    expect(byFunction.claims[0].staticStatus).toBe('fail')
+    expect(byFunction.claims[0].reason).toContain('moduleId')
+
+    // subject 是 scope 内链路时同样不接受 moduleId 证据
+    const byChain = validateChangesGuarantee(
+      INSIGHT,
+      GRAPH,
+      'commit:abc',
+      changesValue({ chains: [CHAIN] }),
+      guaranteeOf([
+        claim('intent', CHAIN, [{ moduleId: MOD_SRC }], { text: '链路所在模块。' })
+      ])
+    )
+    expect(byChain.status).toBe('unverified')
+    expect(byChain.claims[0].staticStatus).toBe('fail')
+    expect(byChain.claims[0].reason).toContain('moduleId')
+  })
+
+  it('🔴1 stepId 的 caller / fileId 在 scope 外 → 违规', () => {
+    const value = changesValue({ functions: [ALPHA] })
+    const byStep = validateChangesGuarantee(
+      INSIGHT,
+      GRAPH,
+      'commit:abc',
+      value,
+      guaranteeOf([
+        claim('intent', ALPHA, [{ stepId: `${BETA}>gamma` }], { text: '借 BETA 的调用边。' })
+      ])
+    )
+    expect(byStep.status).toBe('unverified')
+    expect(byStep.claims[0].staticStatus).toBe('fail')
+    expect(byStep.claims[0].reason).toContain('stepId')
+
+    const missingStep = validateChangesGuarantee(
+      INSIGHT,
+      GRAPH,
+      'commit:abc',
+      value,
+      guaranteeOf([
+        claim('intent', ALPHA, [{ stepId: `${ALPHA}>ghost` }], { text: '不存在的调用边。' })
+      ])
+    )
+    expect(missingStep.claims[0].staticStatus).toBe('fail')
+    expect(missingStep.claims[0].reason).toContain('stepId')
+
+    const byFile = validateChangesGuarantee(
+      INSIGHT,
+      GRAPH,
+      'commit:abc',
+      value,
+      guaranteeOf([
+        claim('intent', ALPHA, [{ fileId: 'src/util/c.ts' }], { text: 'scope 外文件。' })
+      ])
+    )
+    expect(byFile.status).toBe('unverified')
+    expect(byFile.claims[0].staticStatus).toBe('fail')
+    expect(byFile.claims[0].reason).toContain('fileId')
+  })
+
+  it('🔴1 scope 内 functionId / stepId / fileId 证据 → declared', () => {
+    const value = changesValue({ functions: [ALPHA] })
+    const cases: SemanticEvidence[][] = [
+      [{ functionId: ALPHA }],
+      [{ stepId: `${ALPHA}>beta` }],
+      [{ fileId: 'src/a.ts' }],
+      [{ functionId: ALPHA, line: 12, detail: '补充上下文。' }]
+    ]
+    for (const evidence of cases) {
+      const res = validateChangesGuarantee(
+        INSIGHT,
+        GRAPH,
+        'commit:abc',
+        value,
+        guaranteeOf([claim('intent', ALPHA, evidence, { text: '这次变更改的是 alpha。' })])
+      )
+      expect(res.status, JSON.stringify(evidence)).toBe('declared')
+      expect(res.claims[0].status, JSON.stringify(evidence)).toBe('declared')
+    }
+  })
+
+  it('🔴1 只有 symbol / detail 等补充锚点 → 违规（至少一条 scope 强锚点）', () => {
+    const res = validateChangesGuarantee(
+      INSIGHT,
+      GRAPH,
+      'commit:abc',
+      changesValue({ functions: [ALPHA] }),
+      guaranteeOf([
+        claim('intent', ALPHA, [{ symbol: 'alpha' }, { detail: '自由文本。' }], {
+          text: '只有补充锚点。'
+        })
+      ])
+    )
+    expect(res.status).toBe('unverified')
+    expect(res.claims[0].staticStatus).toBe('fail')
+    expect(res.claims[0].reason).toBe(
+      '变更担保至少需要一条 scope 内的 functionId/chainId/stepId/fileId 证据'
+    )
+  })
+
+  it('🟡2 workspace scope 接受 workspace / workspace:latest 主体别名', () => {
+    const scopeId = 'workspace:2026-10-21T00:00:00.000Z'
+    for (const subject of [scopeId, 'workspace', 'workspace:latest']) {
+      const res = validateChangesGuarantee(
+        INSIGHT,
+        GRAPH,
+        scopeId,
+        changesValue({ functions: [ALPHA] }),
+        guaranteeOf([claim('intent', subject, [{ functionId: ALPHA }], { text: '工作区变更意图。' })])
+      )
+      expect(res.status, subject).toBe('declared')
+      expect(res.claims[0].status, subject).toBe('declared')
+    }
+  })
+
+  it('scope 为空（narrative-only）→ unverified 且原因含「没有可定位」', () => {
+    const res = validateChangesGuarantee(
+      INSIGHT,
+      GRAPH,
+      'commit:abc',
+      changesValue({ narrativeOnly: true }),
+      guaranteeOf([claim('intent', 'commit:abc', [{ detail: '自由文本。' }], { text: '只有叙事。' })])
+    )
+    expect(res.status).toBe('unverified')
+    expect(res.reason).toContain('没有可定位')
+  })
+
+  it('混合语言 scope → unverified 且原因含「非 TypeScript」', () => {
+    const res = validateChangesGuarantee(
+      INSIGHT,
+      GRAPH,
+      'commit:abc',
+      changesValue({ functions: [DELTA] }),
+      guaranteeOf([claim('intent', 'commit:abc', [{ functionId: DELTA }], { text: 'Python 函数。' })])
+    )
+    expect(res.status).toBe('unverified')
+    expect(res.reason).toContain('非 TypeScript')
+  })
+
+  it('硬事实 claim 的 subject 在 scope 外 → unverified（不借用图谱里的任意对象）', () => {
+    const res = validateChangesGuarantee(
+      INSIGHT,
+      GRAPH,
+      'commit:abc',
+      changesValue({ functions: [ALPHA] }),
+      guaranteeOf([
+        claim('visibility', EPSILON, [{ functionId: EPSILON }], {
+          object: 'exported',
+          text: 'epsilon 是导出的。'
+        })
+      ])
+    )
+    expect(res.status).toBe('unverified')
+    expect(res.claims[0].status).toBe('unverified')
+    expect(res.claims[0].reason).toContain('不在本次变更范围内')
   })
 })
 

@@ -1,6 +1,6 @@
 # 语义担保（Semantic Guarantee）
 
-> 状态：设计已确认，按语言逐轮落地。第一轮：TypeScript / JavaScript / TSX（同族规则共享）。
+> 状态：TypeScript / JavaScript / TSX 第一轮已落地（SG1 静态证据、SG2 KEY 逐片段复核、SG3 洞察/变更 UI 与变更侧担保）。下一轮：C#。
 
 ## 1. 现状与目标
 
@@ -75,7 +75,13 @@ Agent 供给与洞察合并目前只校验**结构、字段与引用**：id 存�
   - `ProjectInsight.semanticGuarantees?: Record<string, SemanticGuarantee>`（key = `${pass}:${objectId}`）；
   - 快照内容哈希纳入担保映射，保证历史版本可回滚、同内容不重复存储。
 - Agent 供给信封新增可选 `guarantees`（按 objectId），值形状不变；缺少 `guarantees` 的条目按未证实处理。
-- 变更侧语义担保本轮尚未接入：`changes` 供给文件提交 `guarantees` 会被拒绝，变更侧响应也不携带担保结构。
+- 变更侧 `changes` 文件同样支持 `guarantees`（键 = scopeId），Agent 自审最高 `declared`；scope 证据必须来自 `affectedChains` 的 path 函数/链路或 `changeRoles` 的函数。变更侧担保在 `GET /api/impact/changeset` 读取时按当前图谱静态校验并随响应返回，不写入洞察快照。
+- `guarantees` 的键可用 `workspace:latest`；claims 的 `subject` 推荐用规范 `workspace:<batchDate>`，服务端也接受 `workspace` / `workspace:latest` 别名。
+- **变更侧 scope 边界**：
+  - 变更侧 scope 由供给值（`changeRoles` / `affectedChains`）声明，服务端**不反查 git diff 成员**；
+  - changeset 的「变更函数 / 受影响链路」仍以存储的变更记录为准，担保只证明 Agent 声明范围内的证据一致；
+  - 变更侧最高 `declared`，不产生 `verified`；
+  - 证据只认 scope 内 `functionId` / `chainId` / `stepId`（其 caller 在 scope）/ `fileId`；`moduleId` / `symbol` / `line` 不能单独作证（`moduleId` 不属于变更 scope，直接判违规）。
 - 结构化证据与复核字段必须经过 schema 校验，禁止把自由文本塞进证据字段。
 
 ## 7. UI
@@ -83,6 +89,7 @@ Agent 供给与洞察合并目前只校验**结构、字段与引用**：id 存�
 - 每个语义对象显示担保徽标：`已担保` / `Agent 声明已复核` / `未证实`。
 - 展开可看 claim 列表、证据锚点（可跳转函数/链路/行）、复核原因。
 - 主叙事只显示 `verified` / `declared`；未证实内容收进同级「未证实（N）」折叠区。
+- 结构导航（flows 树、模块卡片）保留可见、只挂徽标；未证实的是节点/职责文本，避免折叠后无法导航。模块卡片本身是按钮，徽标不可交互（`interactive=false`，仅 title 提示），详情在模块页查看。
 - Agent 供给抽屉增加担保统计（已担保 / 声明 / 未证实 / 缺证据），错误清单区分「结构错误」与「语义未证实」。
 
 ## 8. 语言顺序与每轮完成标准

@@ -12,20 +12,32 @@ import type {
   AgentSupplySuggestionKind,
   AgentSupplyWinner,
   ImpactChangesetAgentSemantics,
-  InsightChain
+  InsightChain,
+  ProjectInsight
 } from '@autodoc/shared-types'
 import type { DocService } from './context.js'
 import { flowsBasis } from './flow.js'
 import type { ProjectGraph } from './graph.js'
 import { groupImpactCommits, latestSnapshotBatch } from './impact.js'
-import { cutEcho, echoValue, errorMessage, isPlainObject, pathOf, pickWinners, safeProjectSegment } from './agentSupply.js'
+import {
+  cutEcho,
+  echoValue,
+  errorMessage,
+  isPlainObject,
+  parseGuarantees,
+  pathOf,
+  pickWinners,
+  safeProjectSegment
+} from './agentSupply.js'
+import { validateChangesGuarantee } from './semanticGuarantee.js'
 
 /**
  * G5：变更侧 Agent 语义供给（第二期后端）。
  *
  * 外部 Agent 按契约把变更语义写成 JSON 放进：
  *   `<dirname(storage.dataPath)>/supply/<projectId>/changes/changes.<agent>.json`
- * 信封：`{ pass:'changes', agent, writtenAt, basis?, values: { <scopeId>: <AgentSupplyChangesValue> } }`
+ * 信封：`{ pass:'changes', agent, writtenAt, basis?, values: { <scopeId>: <AgentSupplyChangesValue> }, guarantees? }`
+ * （SG3：guarantees 键 = 原始 scopeId，读取时按 scope 证据静态校验，最高 declared）
  *
  * scopeId 口径：
  * - `commit:<完整hash>`：hash 必须在 git 来源变更记录的 commit.hash 里逐字找到
@@ -362,14 +374,9 @@ function parseChangesFile(
     reject('顶层必须是 JSON 对象')
     return { entries, errors }
   }
-  const extraKeys = Object.keys(data).filter((k) => !['pass', 'agent', 'writtenAt', 'basis', 'values'].includes(k))
-  if (extraKeys.includes('guarantees')) {
-    reject(
-      'changes 文件暂不支持 guarantees：变更侧语义担保在后续轮次（SG3）接入；guarantees 目前只用于洞察侧 pass 文件',
-      'guarantees'
-    )
-    return { entries, errors }
-  }
+  const extraKeys = Object.keys(data).filter(
+    (k) => !['pass', 'agent', 'writtenAt', 'basis', 'values', 'guarantees'].includes(k)
+  )
   if (extraKeys.length > 0) {
     reject(`存在契约外字段 ${echoValue(extraKeys.join(','))}`, extraKeys[0])
     return { entries, errors }
@@ -434,6 +441,11 @@ function parseChangesFile(
     // 纯稳定 id 供给带了 basis：不报错（宽容），但也不校验
   }
 
+  // SG3：变更侧 guarantees 与洞察侧同一套结构；坏 guarantee 只进 errors，不废整份文件/其它条目。
+  // 键按 values 的**原始** scopeId 绑定（workspace:latest 归一化后仍用它取 guarantee）。
+  const guaranteeResult = parseGuarantees(data.guarantees, valuesMap, 'changes', file, CHANGES_ENTRY_MAX_BYTES)
+  for (const e of guaranteeResult.errors) errors.push({ ...e, pass: 'changes' })
+  const guarantees = guaranteeResult.guarantees
   const writtenAt = data.writtenAt
   for (const scopeId of ids) {
     if (scopeId.trim().length === 0) {
@@ -502,14 +514,18 @@ function parseChangesFile(
     // 至少有一层有效内容才产出条目
     if (!value.narrative && !value.affectedChains && !value.changeRoles) continue
 
-    entries.push({
+    const entry: ChangesEntry = {
       pass: 'changes',
       objectId: normalizedId,
       value,
       agent: fileAgent,
       writtenAt,
       file
-    })
+    }
+    // guarantee 按原始 values 键绑定；objectId 可能是归一化后的 workspace:<date>。
+    const guarantee = guarantees.get(scopeId)
+    if (guarantee) entry.guarantee = guarantee
+    entries.push(entry)
   }
   return { entries, errors }
 }
@@ -617,7 +633,10 @@ export function buildChangesScopeIndex(
   const commits = groupImpactCommits(gitRecords).slice(0, INDEX_COMMITS_LIMIT)
   for (const c of commits) {
     const fnIds = [...new Set(
-      gitRecords.filter((r) => r.commit?.hash === c.hash).map((r) => r.functionId)
+      gitRecords
+        .filter((r) => r.commit?.hash === c.hash)
+        .map((r) => r.functionId)
+        .filter((id) => graph.nodes.has(id))
     )]
     const chains = collectChainInfos(fnIds, graph)
     scopes.push({
@@ -631,7 +650,9 @@ export function buildChangesScopeIndex(
   const batch = latestSnapshotBatch(snapshotRecords)
   if (batch.length > 0) {
     const batchDate = batch[0].date
-    const fnIds = [...new Set(batch.map((r) => r.functionId))]
+    const fnIds = [...new Set(
+      batch.map((r) => r.functionId).filter((id) => graph.nodes.has(id))
+    )]
     const chains = collectChainInfos(fnIds, graph)
     scopes.push({
       scopeId: `workspace:${batchDate}`,
@@ -646,13 +667,16 @@ export function buildChangesScopeIndex(
 
 function collectChainInfos(fnIds: string[], graph: ProjectGraph): ChangesScopeChainInfo[] {
   const chainSet = new Set<string>()
+  // 索引只列当前图谱里真实存在的链路：已删除函数/陈旧 chainId 不得进入示例或索引。
+  const chainMap = new Map(graph.chains.map((c) => [c.id, c]))
   for (const fnId of fnIds) {
     const insight = graph.insights.get(fnId)
     if (insight) {
-      for (const cid of insight.chainIds) chainSet.add(cid)
+      for (const cid of insight.chainIds) {
+        if (chainMap.has(cid)) chainSet.add(cid)
+      }
     }
   }
-  const chainMap = new Map(graph.chains.map((c) => [c.id, c]))
   return [...chainSet].sort().map((cid) => ({
     chainId: cid,
     entryId: chainMap.get(cid)?.entryId ?? ''
@@ -718,10 +742,17 @@ export function suggestChangesTasks(
 
 /* ------------------------- 读时合并（changeset 接口用） ------------------------- */
 
+/**
+ * 读时合并（changeset 接口用）。
+ * 若 winner 带 guarantee 且调用方提供 insight+graph，则按当前图谱实时校验并写入 `guarantee`
+ * （不写洞察快照）；未提供 insight/graph 或没有 guarantee 时不写该字段（UI 视为未证实）。
+ */
 export function resolveChangesAgentSemantics(
   scopeId: string,
   winners: AgentSupplyWinner[],
-  entries: ChangesEntry[]
+  entries: ChangesEntry[],
+  insight?: ProjectInsight,
+  graph?: ProjectGraph
 ): ImpactChangesetAgentSemantics | undefined {
   const winner = winners.find((w) => w.pass === 'changes' && w.objectId === scopeId)
   if (!winner) return undefined
@@ -737,6 +768,10 @@ export function resolveChangesAgentSemantics(
   if (val.narrative) result.narrative = val.narrative
   if (val.affectedChains) result.affectedChains = val.affectedChains
   if (val.changeRoles) result.changeRoles = val.changeRoles
+  if (winner.guarantee && insight && graph) {
+    // validateChangesGuarantee 内部逐对象 try/catch：异常只降级该 scope 的担保，不影响语义值本身。
+    result.guarantee = validateChangesGuarantee(insight, graph, scopeId, val, winner.guarantee)
+  }
   return result
 }
 
@@ -855,7 +890,13 @@ export function buildChangesRulesSection(
   L.push('  - `workspace:latest`（**推荐**）：服务端解析为当前批次，永不漂移。')
   L.push('  - `workspace:<batchDate>`：精确写法，batchDate 必须在当前批次 60s 窗口内（否则判错）。')
   L.push('  - `range:` scope 暂不接受变更侧供给。')
-  L.push('- **guarantees**：变更侧文件暂不支持（后续轮次接入）；信封里出现 `guarantees` 会整份拒绝并给出明确原因。')
+  L.push('- **guarantees（SG3）**：支持，结构与洞察侧相同（`{ claims, review }`，键 = scopeId 且须同时出现在 `values` 中）。')
+  L.push('  - Agent 自审最高 `declared`；系统按该 scope 的证据静态校验，变更侧不会升级为 `verified`。')
+  L.push('  - `guarantees` 的键可用 `workspace:latest`（与 `values` 的原始键一致）；claims 的 `subject` 推荐用规范 `workspace:<batchDate>`，服务端也接受 `workspace` / `workspace:latest` 别名。')
+  L.push('  - 变更侧 scope 由供给值（`changeRoles` / `affectedChains`）声明，服务端**不反查 git diff 成员**；changeset 的「变更函数 / 受影响链路」仍以存储的变更记录为准，担保只证明 Agent 声明范围内的证据一致。')
+  L.push('  - 证据只认 scope 内的 `functionId` / `chainId` / `stepId`（其 caller 在 scope）/ `fileId`；`moduleId` 不属于变更 scope，`symbol` / `line` / `detail` / `snippet` 只能作补充，不能单独作证。任一条证据出现 scope 外强锚点或 moduleId，整条 claim 判未证实。')
+  L.push('  - `scopeId` 本身（`commit:...` / `workspace:...`）只适合 `intent` claim；硬事实 claim 的 subject 必须是 scope 内的真实函数/链路。')
+  L.push('  - 缺省 = 该 scope 未证实；坏 guarantee 只进错误清单，不影响同文件其它条目。')
   L.push('')
   L.push('### 9.2 值形状（三层皆可选，至少提供一层）')
   L.push('')
@@ -872,6 +913,7 @@ export function buildChangesRulesSection(
   L.push('### 9.3 生效方式')
   L.push('')
   L.push('- **读时合并**：校验通过的语义由 `GET /api/impact/changeset` 在下发时合并进响应的 `agentSemantics` 字段。')
+  L.push('- **担保读取时校验**：`guarantees` 同样在 changeset 请求时按当前图谱校验，结果写入 `agentSemantics.guarantee`；不写入 `insight.semanticGuarantees` 或历史快照。')
   L.push('- **不归档快照、不写缓存**：撤回供给文件后自然消失。')
   L.push('- 多家 Agent 供给同一 scopeId 时按 `writtenAt` 最新者赢。')
   L.push('')
@@ -945,13 +987,39 @@ export function buildChangesRulesSection(
     if (exampleFn) {
       exampleValue.changeRoles = { [exampleFn]: '本次变更的核心：新中间件入口。' }
     }
+    // SG3：最小担保示例——intent claim + scope 内的 functionId/chainId 证据（stepId 同口径可用）
+    const exampleEvidence: Record<string, unknown>[] = []
+    if (exampleFn) exampleEvidence.push({ functionId: exampleFn, detail: '该函数在本次变更中被修改。' })
+    if (exampleChain) exampleEvidence.push({ chainId: exampleChain.chainId, detail: '受影响的链路。' })
+    const guarantees =
+      exampleEvidence.length > 0
+        ? {
+            [exampleScope.scopeId]: {
+              claims: [
+                {
+                  id: 'c1',
+                  kind: 'intent',
+                  subject: exampleScope.scopeId,
+                  text: '这次变更的核心意图与影响范围。',
+                  evidence: exampleEvidence
+                }
+              ],
+              review: {
+                verdict: 'pass',
+                reason: '已对照变更函数与受影响链路逐条核对。',
+                reviewedAt: '2026-01-01T00:00:00.000Z'
+              }
+            }
+          }
+        : undefined
     L.push('```json')
     L.push(JSON.stringify({
       pass: 'changes',
       agent: 'qoder',
       writtenAt: '2026-01-01T00:00:00.000Z',
       basis,
-      values: { [exampleScope.scopeId]: exampleValue }
+      values: { [exampleScope.scopeId]: exampleValue },
+      ...(guarantees ? { guarantees } : {})
     }, null, 2))
     L.push('```')
   }

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
+import type { FlowNode } from '@autodoc/shared-types'
 import { getMode, isNoActiveProjectError } from '../data/api'
 import {
   appReady,
@@ -20,11 +21,14 @@ import { fnJumpQuery } from '../utils/nav'
 import { drillTargetId, toggleGraphGroup } from '../utils/flow'
 import { flowTreeModel } from '../utils/graphModel'
 import { getGraphCfg, patchGraphCfg, setGraphCfg } from '../utils/graphPersist'
+import { lookupGuarantee, isGeneratedModuleDescription } from '../utils/semanticGuarantee'
 import AgentSourceBadge from '../components/AgentSourceBadge.vue'
 import AgentSupplyPanel from '../components/AgentSupplyPanel.vue'
 import FlowTree from '../components/FlowTree.vue'
 import GraphView from '../components/graph/GraphView.vue'
+import GuaranteedBlock from '../components/GuaranteedBlock.vue'
 import InsightHistory from '../components/InsightHistory.vue'
+import SemanticGuaranteeBadge from '../components/SemanticGuaranteeBadge.vue'
 
 const router = useRouter()
 const message = useMessage()
@@ -98,6 +102,21 @@ const hasAgentSupply = computed(() => {
 /** 递归脉络树：有多条主线根时逐条渲染；缺失则回退扁平呈现 */
 const flows = computed(() => insight.value?.flows ?? [])
 const hasFlows = computed(() => flows.value.length > 0)
+
+/** 是否存在 AI/Agent 生成的脉络节点：纯启发式树不挂 flows 担保徽标 */
+function flowHasSemanticNode(nodes: FlowNode[] | undefined): boolean {
+  for (const node of nodes ?? []) {
+    if (node.source === 'ai' || node.source === 'agent') return true
+    if (flowHasSemanticNode(node.children)) return true
+  }
+  return false
+}
+const hasSemanticFlowNodes = computed(() => flowHasSemanticNode(flows.value))
+
+/** partition 已有担保时也挂载（例如划分回退目录后仍保留旧摘要担保），与全局挂载口径一致 */
+const partitionGuaranteed = computed(() =>
+  Boolean(lookupGuarantee(appState.insight?.semanticGuarantees, 'partition', 'root'))
+)
 
 /** 脉络树默认自动展开深度（可配置，不写死；缺省 0 = 默认全收起，逐层手动展开） */
 const flowAutoExpandDepth = computed(
@@ -373,8 +392,16 @@ watch(
         </span>
       </n-alert>
 
-      <!-- 项目概述 -->
-      <p v-if="insight.summary" class="text-sm text-[color:var(--ad-ink-2)] mb-4">{{ insight.summary }}</p>
+      <!-- 项目概述（partition 语义，root 对象）：未证实时只折叠这段文本，不折叠整页 -->
+      <GuaranteedBlock
+        v-if="insight.summary && (insight.partitionSource !== 'dir' || partitionGuaranteed)"
+        pass="partition"
+        object-id="root"
+        :show-missing="true"
+      >
+        <p class="text-sm text-[color:var(--ad-ink-2)] mb-4">{{ insight.summary }}</p>
+      </GuaranteedBlock>
+      <p v-else-if="insight.summary" class="text-sm text-[color:var(--ad-ink-2)] mb-4">{{ insight.summary }}</p>
 
       <!-- AI 各段执行状态 + 来源四态：一眼看出哪段未生效、以及是谁给的（@agent / KEY API） -->
       <section v-if="aiPasses.length" class="mb-4">
@@ -430,9 +457,18 @@ watch(
       <!-- ============ 业务脉络：树/图双视图（树=递归渐进披露；图=V1 GraphView） ============ -->
       <section v-if="hasFlows || graphOn" class="mb-5">
         <div class="flex items-center justify-between mb-2">
-          <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">
-            业务脉络<template v-if="hasFlows">（{{ flows.length }} 条主线）</template>
-          </h3>
+          <div class="flex items-center gap-2">
+            <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">
+              业务脉络<template v-if="hasFlows">（{{ flows.length }} 条主线）</template>
+            </h3>
+            <!-- flows 是整树语义；结构导航常显，未证实只在徽标 title 中说明节点文本未证实 -->
+            <SemanticGuaranteeBadge
+              v-if="hasFlows && hasSemanticFlowNodes"
+              pass="flows"
+              object-id="root"
+              :show-missing="true"
+            />
+          </div>
           <n-radio-group v-model:value="flowViewMode" size="small">
             <n-radio-button value="tree">树</n-radio-button>
             <n-radio-button value="graph">图</n-radio-button>
@@ -524,6 +560,14 @@ watch(
             <div class="mt-1 flex items-start gap-1.5">
               <p class="min-w-0 flex-1 text-xs text-[color:var(--ad-ink-2)]">{{ mod.description }}</p>
               <AgentSourceBadge pass="modules" :object-id="mod.id" />
+              <!-- 卡片本身是 button：此处不折叠 description（details 不能嵌套在 button 内），只挂徽标；
+                   徽标不可交互（interactive=false），详情在 ModuleDetail 页查看 -->
+              <SemanticGuaranteeBadge
+                pass="modules"
+                :object-id="mod.id"
+                :show-missing="isGeneratedModuleDescription(mod)"
+                :interactive="false"
+              />
             </div>
             <div v-if="mod.coreFunctionIds.length" class="mt-2 flex flex-wrap gap-1">
               <span

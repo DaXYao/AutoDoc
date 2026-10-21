@@ -10,6 +10,7 @@ import { formatAskMeta } from '../utils/ask'
 import { externalSymbolInfo } from '../utils/externals'
 import { renderMarkdown } from '../utils/markdown'
 import { fnJumpQuery } from '../utils/nav'
+import GuaranteedBlock from './GuaranteedBlock.vue'
 
 const props = defineProps<{
   edge: CallEdge
@@ -27,6 +28,17 @@ const readOnly = computed(() => appState.meta?.readOnly ?? false)
 
 /** 外部库 AI 补全信息（洞察层，命中才展示；未命中回退既有「外部/未解析」文案） */
 const externalInfo = computed(() => externalSymbolInfo(appState.insight, props.edge))
+
+/**
+ * externals pass 的对象 id：`${externalModule}::${symbol}`（与后端 winners / 担保键同口径）。
+ * 模块或符号不完整时不构造（不猜 id，也就不挂担保徽标）。
+ */
+const externalId = computed(() => {
+  if (props.edge.calleeCategory !== 'external') return ''
+  const module = props.edge.externalModule?.trim() ?? ''
+  const symbol = props.edge.calleeName?.trim() ?? ''
+  return module && symbol ? `${module}::${symbol}` : ''
+})
 
 /* ------------------------- 就地追问面板（本地态，不持久化） ------------------------- */
 
@@ -160,16 +172,19 @@ async function handleDeleteFollowup(followup: Annotation): Promise<void> {
         v-else-if="externalInfo"
         class="text-xs text-[color:var(--ad-ink-2)] mt-0.5 flex flex-wrap items-center gap-1.5"
       >
-        <span>作用：{{ externalInfo.purpose }}</span>
-        <!-- AI 凭公开库知识推断，醒目标注以区别于项目内已确证用途 -->
-        <n-tag size="tiny" :bordered="false" type="warning">外部·AI 推断</n-tag>
-        <span
-          v-if="externalInfo.signature"
-          class="font-mono text-[color:var(--ad-ink-3)]"
-          :title="externalInfo.signature"
-        >
-          {{ externalInfo.signature }}
-        </span>
+        <!-- 外部用途/签名是 AI/Agent 语义：未证实时折叠文本，但调用边本身（节点/行号/角色）始终可见 -->
+        <GuaranteedBlock pass="externals" :object-id="externalId" :show-missing="Boolean(externalId)">
+          <span>作用：{{ externalInfo.purpose }}</span>
+          <!-- AI 凭公开库知识推断，醒目标注以区别于项目内已确证用途 -->
+          <n-tag size="tiny" :bordered="false" type="warning">外部·AI 推断</n-tag>
+          <span
+            v-if="externalInfo.signature"
+            class="font-mono text-[color:var(--ad-ink-3)]"
+            :title="externalInfo.signature"
+          >
+            {{ externalInfo.signature }}
+          </span>
+        </GuaranteedBlock>
       </div>
       <div v-else-if="edge.calleeCategory === 'external'" class="text-xs text-[color:var(--ad-ink-3)] mt-0.5">
         作用：外部/未解析调用（不在本项目索引内）

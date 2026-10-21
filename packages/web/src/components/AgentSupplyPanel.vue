@@ -33,6 +33,7 @@ import {
   summarizeAgentSupply,
   supplyErrorPassLabel
 } from '../utils/agentSupply'
+import { lookupGuarantee, summarizeGuarantees } from '../utils/semanticGuarantee'
 
 /**
  * G3：Agent 语义供给抽屉面板（由洞察页状态条打开）。
@@ -69,6 +70,64 @@ const errorGroups = computed(() => groupErrorsByFile(supply.value?.errors ?? [])
 const ignored = computed(() => supply.value?.ignored ?? [])
 const suggestionGroups = computed(() => groupSuggestionsByPass(supply.value?.suggestions ?? []))
 const merge = computed(() => appState.agentSupplyMerge)
+
+/* ------------------------- SG3：语义担保统计 + 语义未证实清单 ------------------------- */
+
+/** 洞察侧状态计数 + 变更侧提交/未提交担保计数（changes 单独成列，实际等级在影响页校验） */
+const guaranteeSummary = computed(() =>
+  summarizeGuarantees(appState.insight?.semanticGuarantees, supply.value?.winners ?? [])
+)
+
+/** 语义未证实清单最多展示条数（其余只报总数，避免抽屉里塞进数百行） */
+const GUARANTEE_ROWS_LIMIT = 20
+
+function truncateId(id: string, max = 56): string {
+  if (id.length <= max) return id
+  const head = Math.ceil((max - 1) / 2)
+  const tail = max - 1 - head
+  return `${id.slice(0, head)}…${id.slice(-tail)}`
+}
+
+/**
+ * 语义未证实清单（与结构错误分开）：洞察侧 winners 中
+ * - 未提交 guarantee（未提交 guarantees）；
+ * - 有 guarantee 但尚未写进当前洞察（未合并/未刷新）；
+ * - 或当前洞察里的担保明确为 unverified。
+ */
+const unverifiedRows = computed(() => {
+  const map = appState.insight?.semanticGuarantees
+  const rows: {
+    key: string
+    passLabel: string
+    objectId: string
+    objectShort: string
+    agent: string
+    reason: string
+  }[] = []
+  for (const winner of supply.value?.winners ?? []) {
+    if (winner.pass === 'changes') continue
+    const guarantee = lookupGuarantee(map, winner.pass, winner.objectId)
+    const submitted = Boolean(winner.guarantee)
+    if (guarantee && guarantee.status !== 'unverified') continue
+    let reason: string
+    if (!submitted) reason = '未提交 guarantees'
+    else if (!guarantee) reason = 'guarantee 已提交，尚未合并/刷新'
+    else reason = guarantee.reason ?? '语义未证实（暂无原因）'
+    rows.push({
+      key: `${winner.pass}:${winner.objectId}`,
+      passLabel: SUPPLY_PASS_LABELS[winner.pass],
+      objectId: winner.objectId,
+      objectShort: truncateId(winner.objectId),
+      agent: winner.agent,
+      reason
+    })
+  }
+  return rows
+})
+
+const visibleUnverifiedRows = computed(() =>
+  unverifiedRows.value.slice(0, GUARANTEE_ROWS_LIMIT)
+)
 
 /** 各 pass 生效条目明细（按 SUPPLY_PASS_ORDER 定序；洞察侧与变更侧混在同一个 perPass 里） */
 const perPassRows = computed(() => sortedPerPass(supply.value?.stats.perPass))
@@ -472,6 +531,55 @@ function passLabel(pass: AgentSupplyPass): string {
           <span class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-surface)] px-2 py-1 text-[color:var(--ad-ink-2)]">
             建议 <span class="font-semibold text-[color:var(--ad-ink)]">{{ summary.suggestionCount }}</span>
           </span>
+          <!-- SG3：语义担保统计（洞察侧状态计数 + 变更侧提交担保计数；未加载洞察时隐藏，不显示误导性的 0） -->
+          <template v-if="appState.insight">
+            <n-tag
+              size="tiny"
+              type="success"
+              :bordered="false"
+              title="语义担保已验证（KEY 第二遍复核或静态硬事实全部通过）"
+            >
+              已担保 {{ guaranteeSummary.verified }}
+            </n-tag>
+            <n-tag
+              size="tiny"
+              type="info"
+              :bordered="false"
+              title="Agent 供给自带证据与自审结论；系统仅验证证据结构与硬事实"
+            >
+              Agent 声明 {{ guaranteeSummary.declared }}
+            </n-tag>
+            <n-tag
+              size="tiny"
+              type="warning"
+              :bordered="false"
+              title="缺证据、证据不合格、复核否定或语言尚未接入；正文默认折叠"
+            >
+              未证实 {{ guaranteeSummary.unverified }}
+            </n-tag>
+            <n-tag
+              size="tiny"
+              :bordered="false"
+              title="guarantee 已提交但尚未合并/刷新到当前洞察"
+            >
+              待合并 {{ guaranteeSummary.pendingEvidence }}
+            </n-tag>
+            <n-tag
+              size="tiny"
+              :bordered="false"
+              title="洞察侧有生效供给但未提交 guarantees 的对象数（按对象去重）"
+            >
+              缺证据 {{ guaranteeSummary.missingEvidence }}
+            </n-tag>
+            <n-tag
+              v-if="guaranteeSummary.changesWithGuarantee + guaranteeSummary.changesMissing > 0"
+              size="tiny"
+              :bordered="true"
+              title="变更侧 winners 是否提交 guarantees 的提交数（本页不校验等级）；实际等级在影响页按 scope 证据校验后展示"
+            >
+              变更侧提交担保 {{ guaranteeSummary.changesWithGuarantee }} / 缺证据 {{ guaranteeSummary.changesMissing }}
+            </n-tag>
+          </template>
           <span v-if="summary.agents.length" class="flex items-center gap-1">
             <n-tag
               v-for="agent in summary.agents"
@@ -593,10 +701,10 @@ function passLabel(pass: AgentSupplyPass): string {
         </div>
       </section>
 
-      <!-- ============ 错误清单 ============ -->
+      <!-- ============ 结构/校验错误 ============ -->
       <section v-if="supply && supply.errors.length > 0" class="ad-card mb-4 px-4 py-3" role="status">
         <h3 class="text-sm font-semibold text-[color:var(--ad-danger-ink)] mb-1">
-          校验错误（{{ supply.errors.length }}）
+          结构/校验错误（{{ supply.errors.length }}）
         </h3>
         <p class="text-xs text-[color:var(--ad-ink-3)] mb-2">
           以下供给不符合契约，未被采纳（逐条列出，不静默丢弃）；修正后「重新扫描」。
@@ -634,6 +742,47 @@ function passLabel(pass: AgentSupplyPass): string {
             </tbody>
           </table>
         </div>
+      </section>
+
+      <!-- ============ 语义未证实（与结构错误分开） ============ -->
+      <section
+        v-if="unverifiedRows.length > 0"
+        class="ad-card mb-4 px-4 py-3"
+        role="status"
+        aria-label="语义未证实清单"
+      >
+        <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)] mb-1">
+          语义未证实（{{ unverifiedRows.length }}）
+        </h3>
+        <p class="text-xs text-[color:var(--ad-ink-3)] mb-2">
+          供给已通过结构与 id 校验，但未提交 guarantees、复核未通过，或 guarantee 已提交但尚未合并/刷新；
+          这些对象的正文在界面中默认折叠，展开后仍可查看。与上方结构/校验错误分开统计。
+        </p>
+        <ul class="flex flex-col gap-1.5 text-xs">
+          <li
+            v-for="(row, i) in visibleUnverifiedRows"
+            :key="`${row.key}-${i}`"
+            class="flex flex-wrap items-center gap-2 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-2.5 py-1.5"
+          >
+            <n-tag size="tiny" :bordered="false">{{ row.passLabel }}</n-tag>
+            <code
+              class="min-w-0 flex-1 truncate font-mono text-[color:var(--ad-ink-2)]"
+              :title="row.objectId"
+            >
+              {{ row.objectShort }}
+            </code>
+            <n-tag size="tiny" :bordered="true" :color="adAgentTagSkin" :title="`供给 Agent：${row.agent}`">
+              @{{ row.agent }}
+            </n-tag>
+            <span class="w-full break-words text-[color:var(--ad-ink-3)] sm:w-auto">{{ row.reason }}</span>
+          </li>
+        </ul>
+        <p
+          v-if="unverifiedRows.length > visibleUnverifiedRows.length"
+          class="mt-1.5 text-[11px] text-[color:var(--ad-ink-3)]"
+        >
+          共 {{ unverifiedRows.length }} 条，仅显示前 {{ GUARANTEE_ROWS_LIMIT }} 条。
+        </p>
       </section>
 
       <!-- ============ 忽略清单 ============ -->

@@ -21,6 +21,7 @@ import { fnJumpQuery } from '../utils/nav'
 import { indexChangesSemantics } from '../utils/agentSupply'
 import GraphView from '../components/graph/GraphView.vue'
 import ChangesSourceBadge from '../components/ChangesSourceBadge.vue'
+import GuaranteedBlock from '../components/GuaranteedBlock.vue'
 
 /**
  * C2：变更影响分析独立视图。
@@ -388,6 +389,20 @@ const semantics = computed(() => indexChangesSemantics(changeset.value?.agentSem
 const semanticsAgent = computed(() => semantics.value?.agent ?? '')
 const semanticsWrittenAt = computed(() => semantics.value?.writtenAt ?? '')
 
+/**
+ * SG3：变更侧整份 scope 担保（读请求时后端按当前图谱校验，不写入洞察快照）。
+ * 显式传给 GuaranteedBlock：undefined 会触发洞察映射回查，而变更侧担保不在那份映射里；
+ * 无担保/未提交 → null，由 showMissing=true 统一按「未证实」折叠。
+ */
+const changesGuarantee = computed(() => changeset.value?.agentSemantics?.guarantee ?? null)
+/**
+ * 担保对象 id：优先用 guarantee 自己的规范 objectId（workspace scope 会归一为 workspace:<date>），
+ * 否则退回 changeset.scope，避免详情头部对象 id 与 guarantee 的规范 id 不一致。
+ */
+const changesScopeId = computed(
+  () => changesGuarantee.value?.objectId ?? changeset.value?.scope ?? 'changes'
+)
+
 const affected = computed(() => affectedChains(chains.value, changedIds.value))
 const ripple = computed(() => upstreamRipple(insightFunctions.value, changedIds.value))
 const rippleIds = computed(() => new Set(ripple.value.map((r) => r.functionId)))
@@ -698,25 +713,33 @@ function goFunction(id: string): void {
               读时生效 · 不进洞察快照 · Agent 撤回供给文件后自动消失
             </span>
           </div>
-          <p class="mt-2 text-sm text-[color:var(--ad-ink)]">{{ semantics.narrative.what }}</p>
-          <p class="mt-1 text-xs text-[color:var(--ad-ink-2)]">
-            <span class="font-semibold">为什么改：</span>{{ semantics.narrative.why }}
-          </p>
-          <div v-if="semantics.narrative.risks.length > 0" class="mt-2">
-            <p class="text-xs font-semibold text-[color:var(--ad-ink-2)]">
-              风险点（{{ semantics.narrative.risks.length }}）
+          <!-- SG3：三层共享同一份 scope 担保；未证实/缺担保时正文折叠，警告与来源徽标留在折叠块外 -->
+          <GuaranteedBlock
+            pass="changes"
+            :object-id="changesScopeId"
+            :guarantee="changesGuarantee"
+            :show-missing="true"
+          >
+            <p class="mt-2 text-sm text-[color:var(--ad-ink)]">{{ semantics.narrative.what }}</p>
+            <p class="mt-1 text-xs text-[color:var(--ad-ink-2)]">
+              <span class="font-semibold">为什么改：</span>{{ semantics.narrative.why }}
             </p>
-            <ul class="mt-1 grid gap-1">
-              <li
-                v-for="(risk, i) in semantics.narrative.risks"
-                :key="`${risk}-${i}`"
-                class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-warning-soft)] px-2 py-1 text-xs text-[color:var(--ad-ink-2)]"
-              >
-                {{ risk }}
-              </li>
-            </ul>
-          </div>
-          <!-- G6：供给生效但在当前 scope 无落点时不得静默（🔴2） -->
+            <div v-if="semantics.narrative.risks.length > 0" class="mt-2">
+              <p class="text-xs font-semibold text-[color:var(--ad-ink-2)]">
+                风险点（{{ semantics.narrative.risks.length }}）
+              </p>
+              <ul class="mt-1 grid gap-1">
+                <li
+                  v-for="(risk, i) in semantics.narrative.risks"
+                  :key="`${risk}-${i}`"
+                  class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-warning-soft)] px-2 py-1 text-xs text-[color:var(--ad-ink-2)]"
+                >
+                  {{ risk }}
+                </li>
+              </ul>
+            </div>
+          </GuaranteedBlock>
+          <!-- G6：供给生效但在当前 scope 无落点时不得静默（🔴2）；警告必须常显，不随正文折叠 -->
           <p v-if="unmatchedHint" class="mt-2 text-xs text-[color:var(--ad-ink-3)]">
             {{ unmatchedHint }}
           </p>
@@ -818,7 +841,8 @@ function goFunction(id: string): void {
                     重要性 {{ card.importance }}
                   </n-tag>
                 </div>
-                <!-- G6 层二：Agent 给的这条链路受此变更的业务解释（按 chainId 匹配，未供给则整块不出现） -->
+                <!-- G6 层二：Agent 给的这条链路受此变更的业务解释（按 chainId 匹配，未供给则整块不出现）。
+                     SG3：解释正文随 scope 担保折叠；来源徽标常显，未证实时仍能看清 Agent 归属 -->
                 <div
                   v-if="card.impact"
                   class="mt-2 flex flex-wrap items-start gap-1.5 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-2 py-1.5"
@@ -826,9 +850,18 @@ function goFunction(id: string): void {
                   <span class="shrink-0 text-xs font-semibold text-[color:var(--ad-accent-ink)]">
                     变更影响解释
                   </span>
-                  <span class="min-w-0 flex-1 text-xs text-[color:var(--ad-ink-2)]">
-                    {{ card.impact }}
-                  </span>
+                  <div class="min-w-0 flex-1">
+                    <GuaranteedBlock
+                      pass="changes"
+                      :object-id="changesScopeId"
+                      :guarantee="changesGuarantee"
+                      :show-missing="true"
+                    >
+                      <span class="text-xs text-[color:var(--ad-ink-2)]">
+                        {{ card.impact }}
+                      </span>
+                    </GuaranteedBlock>
+                  </div>
                   <ChangesSourceBadge
                     label="链路影响解释"
                     :agent="semanticsAgent"
@@ -912,14 +945,22 @@ function goFunction(id: string): void {
                   <span v-else class="text-xs text-[color:var(--ad-ink-3)]">无项目内下游</span>
                 </div>
                 <!-- G6 层三：本次变更角色（按 functionId 匹配）。措辞与配色都刻意区别于
-                     链路里的「调用点角色」（核心实现/参数校验/异常处理，绿/灰/红圆点）——两者语义不同源 -->
+                     链路里的「调用点角色」（核心实现/参数校验/异常处理，绿/灰/红圆点）——两者语义不同源。
+                     SG3：角色文本随 scope 担保折叠；来源徽标在折叠块外常显 -->
                 <div v-if="group.changeRole" class="mt-1.5 flex flex-wrap items-center gap-1.5">
-                  <span
-                    class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-accent-soft)] px-1.5 py-0.5 text-[11px] text-[color:var(--ad-accent-ink)]"
-                    title="Agent 供给的变更上下文角色：该函数在这次变更里承担什么；与文件页调用链里的调用点角色（核心实现 / 参数/状态校验 / 异常处理）不是同一个东西"
+                  <GuaranteedBlock
+                    pass="changes"
+                    :object-id="changesScopeId"
+                    :guarantee="changesGuarantee"
+                    :show-missing="true"
                   >
-                    本次变更角色 · {{ group.changeRole }}
-                  </span>
+                    <span
+                      class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-accent-soft)] px-1.5 py-0.5 text-[11px] text-[color:var(--ad-accent-ink)]"
+                      title="Agent 供给的变更上下文角色：该函数在这次变更里承担什么；与文件页调用链里的调用点角色（核心实现 / 参数/状态校验 / 异常处理）不是同一个东西"
+                    >
+                      本次变更角色 · {{ group.changeRole }}
+                    </span>
+                  </GuaranteedBlock>
                   <ChangesSourceBadge
                     label="变更函数角色"
                     :agent="semanticsAgent"

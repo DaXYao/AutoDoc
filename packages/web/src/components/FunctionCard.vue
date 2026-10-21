@@ -20,6 +20,8 @@ import AgentSourceBadge from './AgentSourceBadge.vue'
 import AnnotationPanel from './AnnotationPanel.vue'
 import CallNode from './CallNode.vue'
 import GraphView from './graph/GraphView.vue'
+import GuaranteedBlock from './GuaranteedBlock.vue'
+import SemanticGuaranteeBadge from './SemanticGuaranteeBadge.vue'
 
 const props = defineProps<{ fn: FunctionDocView }>()
 
@@ -332,11 +334,18 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
           核心{{ fi.coreSource === 'ai' ? '(AI)' : '' }}
         </n-tag>
         <!-- G3 决策④：对象级 @agent 徽标（核心判定），objectId 用函数稳定 ID（与后端 winners 同口径）。
-             不能只看 isCore：Agent 供给 core:false（负供给）合并同样生效，coreSource='agent' 时也要给出归属 -->
+             不能只看 isCore：Agent 供给 core:false（负供给）合并同样生效，coreSource='agent' 时也要给出归属；
+             静态中心度 coreSource='static' 不挂担保徽标（未证实只针对生成语义，静态对象不误报） -->
         <AgentSourceBadge
-          v-if="fi && (fi.isCore || fi.coreSource === 'agent')"
+          v-if="fi && (fi.coreSource === 'ai' || fi.coreSource === 'agent')"
           pass="coreJudgment"
           :object-id="fn.id"
+        />
+        <SemanticGuaranteeBadge
+          v-if="fi && (fi.coreSource === 'ai' || fi.coreSource === 'agent')"
+          pass="coreJudgment"
+          :object-id="fn.id"
+          :show-missing="Boolean(fi && (fi.coreSource === 'ai' || fi.coreSource === 'agent'))"
         />
         <n-tag v-if="fn.visibility === 'private'" size="tiny" type="warning" :bordered="false">
           private
@@ -351,6 +360,12 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
           AI 判定: {{ CATEGORY_LABELS[fi.aiCategory] }}
         </n-tag>
         <AgentSourceBadge v-if="fi?.aiCategory" pass="categories" :object-id="fn.id" />
+        <SemanticGuaranteeBadge
+          v-if="fi?.aiCategory"
+          pass="categories"
+          :object-id="fn.id"
+          :show-missing="Boolean(fi?.aiCategory)"
+        />
         <n-tag
           v-for="decorator in fn.decorators"
           :key="decorator"
@@ -377,6 +392,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
       <p v-if="fi?.systemRole" class="mt-1 flex items-start gap-1.5 text-xs text-green-700">
         <span class="min-w-0">系统角色：{{ fi.systemRole }}</span>
         <AgentSourceBadge pass="coreRoles" :object-id="fn.id" />
+        <SemanticGuaranteeBadge pass="coreRoles" :object-id="fn.id" :show-missing="true" />
       </p>
       <details v-if="fn.docComment" class="mt-1 text-xs text-[color:var(--ad-ink-2)]">
         <summary class="cursor-pointer select-none">文档注释</summary>
@@ -407,6 +423,8 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
         </div>
       </template>
       <template v-else>
+        <!-- blocks 由 AI/Agent 归纳：未证实时整个大纲默认折叠，回退模式（原文平铺）不挂担保 -->
+        <GuaranteedBlock pass="blocks" :object-id="fn.id" :show-missing="true">
         <div class="flex items-center gap-1.5">
           <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(stepsKey(), expandDefault('internalSteps'))">
             内部步骤（{{ stepsGroup.steps.length }}）
@@ -507,6 +525,7 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
             </li>
           </ul>
         </div>
+        </GuaranteedBlock>
       </template>
     </div>
 
@@ -528,20 +547,27 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
         <p v-if="keyStepsMissing && callChain.length > 0" class="mb-2 text-xs text-[color:var(--ad-ink-3)]">
           注意：主干识别未生成/失败，当前显示全部调用
         </p>
-        <!-- 主干调用：节点（着色点 + 名称 + 角色 + 分类 + 用途）之间用箭头连接 -->
-        <ol class="flex flex-col">
-          <template v-for="(edge, i) in mainChain" :key="chainKey(edge, i)">
-            <CallNode
-              :edge="edge"
-              :followups="fn.callAnnotations?.[edge.stepId] ?? []"
-              @changed="emit('changed')"
-            />
-            <li v-if="i < mainChain.length - 1" class="flex gap-2 py-0.5" aria-hidden="true">
-              <span class="w-2.5 flex justify-center text-[color:var(--ad-line-strong)] text-xs leading-none">↓</span>
-              <span />
-            </li>
-          </template>
-        </ol>
+        <!-- 主干调用：节点（着色点 + 名称 + 角色 + 分类 + 用途）之间用箭头连接。
+             keySteps 由 AI/Agent 判定，未证实时主干正文默认折叠（次要调用列表仍常显）。 -->
+        <GuaranteedBlock
+          pass="keySteps"
+          :object-id="fn.id"
+          :show-missing="fi?.keyCallIndexes !== undefined"
+        >
+          <ol class="flex flex-col">
+            <template v-for="(edge, i) in mainChain" :key="chainKey(edge, i)">
+              <CallNode
+                :edge="edge"
+                :followups="fn.callAnnotations?.[edge.stepId] ?? []"
+                @changed="emit('changed')"
+              />
+              <li v-if="i < mainChain.length - 1" class="flex gap-2 py-0.5" aria-hidden="true">
+                <span class="w-2.5 flex justify-center text-[color:var(--ad-line-strong)] text-xs leading-none">↓</span>
+                <span />
+              </li>
+            </template>
+          </ol>
+        </GuaranteedBlock>
         <!-- 次要调用：可折叠（默认折叠，展开状态持久化到 localStorage） -->
         <div v-if="noiseChain.length > 0" class="mt-2">
           <button class="text-xs text-[color:var(--ad-ink-2)] hover:text-[color:var(--ad-ink)]" @click="toggle(callsNoiseKey(), expandDefault('callChainNoise'))">
@@ -584,9 +610,13 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
               <n-tag type="error" size="tiny" :bordered="false">含变更</n-tag>
             </span>
           </div>
-          <!-- ① AI 链路叙事：缺失时灰字标注，静态路径骨架照画，不伪造句子（AI 失败降级） -->
+          <!-- ① AI 链路叙事：未证实时正文默认折叠；@agent 来源徽标属元信息，折叠时仍常显 -->
           <div v-if="chain.narrative" class="flex items-start gap-1.5">
-            <p class="min-w-0 flex-1 text-[color:var(--ad-ink-2)]">{{ chain.narrative }}</p>
+            <div class="min-w-0 flex-1">
+              <GuaranteedBlock pass="narratives" :object-id="chain.id">
+                <p class="text-[color:var(--ad-ink-2)]">{{ chain.narrative }}</p>
+              </GuaranteedBlock>
+            </div>
             <AgentSourceBadge pass="narratives" :object-id="chain.id" />
           </div>
           <p v-else class="text-[color:var(--ad-ink-3)]">叙事未生成</p>
@@ -595,6 +625,17 @@ const followupsKey = (): string => `card:${props.fn.id}:followups`
             <span class="text-[color:var(--ad-ink-2)]">我的角色：</span>
             <span v-if="chainRole(chain)" class="text-[color:var(--ad-ink-2)]">{{ chainRole(chain) }}</span>
             <span v-else class="text-[color:var(--ad-ink-3)]">角色未生成</span>
+            <!-- 叙事为空但 stepRoles 有内容时，担保仍属于 narratives 对象：角色行旁挂一次徽标 -->
+            <span
+              v-if="!chain.narrative && Object.keys(chain.stepRoles).length > 0"
+              class="ml-1.5 inline-flex align-middle"
+            >
+              <SemanticGuaranteeBadge
+                pass="narratives"
+                :object-id="chain.id"
+                :show-missing="true"
+              />
+            </span>
           </p>
           <!-- ③ 紧凑路径：头尾窗口 + gap 省略，me 加粗高亮；行尾可展开该链完整路径 -->
           <div class="mt-1.5 flex flex-wrap items-center gap-y-1">

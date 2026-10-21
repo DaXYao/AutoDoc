@@ -5,11 +5,14 @@ import { afterAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type {
   AgentSupplyResponse,
+  AgentSupplyChangesValue,
+  AgentSupplyGuaranteeInput,
   ChangeType,
   FileDoc,
   ImpactChangeset,
   CallEdge,
-  FunctionDoc
+  FunctionDoc,
+  ProjectInsight
 } from '@autodoc/shared-types'
 import { createStorage, loadConfig } from '@autodoc/core'
 import { buildApp } from '../src/app.js'
@@ -26,6 +29,7 @@ import {
   scopeToSupplyId,
   buildChangesRulesSection
 } from '../src/agentSupplyChanges.js'
+import { validateChangesGuarantee } from '../src/semanticGuarantee.js'
 
 /**
  * G5：变更侧 Agent 语义供给测试。
@@ -113,6 +117,22 @@ const FIXTURE = buildGraph(fixtureFiles())
 const BASIS = flowsBasis(FIXTURE)
 const CHAIN0 = FIXTURE.chains[0]
 
+/** 变更侧担保只做 intent/证据范围校验，洞察可用最小结构（functions/modules/chains 为空） */
+function fixtureInsight(): ProjectInsight {
+  return {
+    generatedAt: '2026-10-19T00:00:00.000Z',
+    graphFingerprint: FIXTURE.fingerprint,
+    aiEnabled: false,
+    aiGenerated: false,
+    partitionSource: FIXTURE.partition.source,
+    partitionFeedback: '',
+    summary: '',
+    modules: [],
+    chains: [],
+    functions: {}
+  }
+}
+
 /* ------------------------- 变更记录夹具 ------------------------- */
 
 const COMMIT_HASH = 'abc123def456'
@@ -183,18 +203,130 @@ describe('scanChangesSupply（信封校验 + 文件名纪律）', () => {
     expect(res.fileCount).toBe(1)
   })
 
-  it('guarantees 在变更侧文件不受支持：整份拒绝并给明确原因', () => {
+  it('guarantees：合法担保随条目与赢家生效', () => {
     const dir = freshDir()
     const envelope = JSON.parse(changesEnvelope('qoder', {
-      [`commit:${COMMIT_HASH}`]: { narrative: { what: '做了什么', why: '为什么', risks: [] } }
+      [`commit:${COMMIT_HASH}`]: {
+        narrative: { what: '做了什么', why: '为什么', risks: [] },
+        changeRoles: { [FN_A]: '核心改动' }
+      }
     })) as Record<string, unknown>
-    envelope.guarantees = { [`commit:${COMMIT_HASH}`]: { claims: [], review: { verdict: 'pass', reason: 'ok' } } }
+    envelope.guarantees = {
+      [`commit:${COMMIT_HASH}`]: {
+        claims: [
+          {
+            kind: 'intent',
+            subject: `commit:${COMMIT_HASH}`,
+            text: '这次提交重构了 alpha。',
+            evidence: [{ functionId: FN_A }]
+          }
+        ],
+        review: { verdict: 'pass', reason: '已对照变更函数核对。' }
+      }
+    }
     writeChanges(dir, 'changes.qoder.json', JSON.stringify(envelope))
     const res = scanChanges(dir)
-    expect(res.entries).toEqual([])
-    expect(res.errors).toHaveLength(1)
-    expect(res.errors[0].path).toBe('guarantees')
-    expect(res.errors[0].reason).toContain('暂不支持 guarantees')
+    expect(res.errors).toEqual([])
+    expect(res.entries).toHaveLength(1)
+    expect(res.entries[0].guarantee?.claims[0].subject).toBe(`commit:${COMMIT_HASH}`)
+    expect(res.winners).toHaveLength(1)
+    expect(res.winners[0].guarantee?.claims).toHaveLength(1)
+  })
+
+  it('guarantees：workspace:latest 的担保挂到归一化 workspace:<date> 条目', () => {
+    const dir = freshDir()
+    const envelope = JSON.parse(changesEnvelope('qoder', {
+      'workspace:latest': { narrative: { what: '工作区变更', why: '测试', risks: [] } }
+    })) as Record<string, unknown>
+    envelope.guarantees = {
+      'workspace:latest': {
+        claims: [
+          {
+            kind: 'intent',
+            subject: 'workspace:latest',
+            text: '工作区批次的变更意图。',
+            evidence: [{ functionId: FN_C }]
+          }
+        ],
+        review: { verdict: 'pass', reason: '已核对。' }
+      }
+    }
+    writeChanges(dir, 'changes.qoder.json', JSON.stringify(envelope))
+    const res = scanChanges(dir)
+    expect(res.errors).toEqual([])
+    expect(res.entries).toHaveLength(1)
+    expect(res.entries[0].objectId).toBe(`workspace:${BATCH_DATE}`)
+    expect(res.entries[0].guarantee?.claims).toHaveLength(1)
+    expect(res.winners[0].guarantee?.claims).toHaveLength(1)
+  })
+
+  it('guarantees：坏担保只进 errors，条目照用（空 claims / 未知键 / 非法 kind）', () => {
+    const dir = freshDir()
+    const envelope = JSON.parse(changesEnvelope('qoder', {
+      [`commit:${COMMIT_HASH}`]: { narrative: { what: 'a', why: 'b', risks: [] } },
+      'workspace:latest': { changeRoles: { [FN_A]: '角色' } }
+    })) as Record<string, unknown>
+    envelope.guarantees = {
+      [`commit:${COMMIT_HASH}`]: {
+        claims: [],
+        review: { verdict: 'pass', reason: 'ok' }
+      },
+      'workspace:latest': {
+        claims: [
+          {
+            kind: 'bogus-kind',
+            subject: 'workspace:latest',
+            text: '非法 kind。',
+            evidence: [{ functionId: FN_A }]
+          }
+        ],
+        review: { verdict: 'pass', reason: 'ok' }
+      },
+      'commit:missing': {
+        claims: [
+          {
+            kind: 'intent',
+            subject: 'commit:missing',
+            text: '键不在 values 中。',
+            evidence: [{ functionId: FN_A }]
+          }
+        ],
+        review: { verdict: 'pass', reason: 'ok' }
+      }
+    }
+    writeChanges(dir, 'changes.qoder.json', JSON.stringify(envelope))
+    const res = scanChanges(dir)
+    expect(res.entries).toHaveLength(2)
+    expect(res.entries.every((e) => e.guarantee === undefined)).toBe(true)
+    expect(res.errors.some((e) => e.reason.includes('claims 必须是非空数组'))).toBe(true)
+    expect(res.errors.some((e) => e.reason.includes('kind 必须是'))).toBe(true)
+    expect(res.errors.some((e) => e.reason.includes('必须同时出现在本文件 values 中'))).toBe(true)
+    expect(res.errors.every((e) => e.pass === 'changes')).toBe(true)
+    expect(res.errors.every((e) => e.path?.startsWith('guarantees') ?? false)).toBe(true)
+  })
+
+  it('guarantees：超体积只丢该条担保，条目照用', () => {
+    const dir = freshDir()
+    const envelope = JSON.parse(changesEnvelope('qoder', {
+      [`commit:${COMMIT_HASH}`]: { narrative: { what: 'a', why: 'b', risks: [] } }
+    })) as Record<string, unknown>
+    const claims = []
+    for (let i = 0; i < 20; i++) {
+      claims.push({
+        kind: 'intent',
+        subject: `commit:${COMMIT_HASH}`,
+        text: `断言 ${i}：${'x'.repeat(1900)}`,
+        evidence: [{ functionId: FN_A }]
+      })
+    }
+    envelope.guarantees = {
+      [`commit:${COMMIT_HASH}`]: { claims, review: { verdict: 'pass', reason: 'ok' } }
+    }
+    writeChanges(dir, 'changes.qoder.json', JSON.stringify(envelope))
+    const res = scanChanges(dir)
+    expect(res.entries).toHaveLength(1)
+    expect(res.entries[0].guarantee).toBeUndefined()
+    expect(res.errors.some((e) => e.reason.includes('合计超过单条目'))).toBe(true)
   })
 
   it('坏 JSON / 顶层非对象：整份判错', () => {
@@ -540,6 +672,104 @@ describe('resolveChangesAgentSemantics（读时合并）', () => {
     expect(semantics!.agent).toBe('qoder')
     expect(semantics!.narrative?.what).toBe('做了什么')
     expect(semantics!.changeRoles?.[FN_A]).toBe('核心改动')
+    // 未提供 insight/graph 且没有 guarantee：不写 guarantee 字段
+    expect(semantics!.guarantee).toBeUndefined()
+  })
+
+  it('winner.guarantee + insight/graph：scope 内证据 → declared', () => {
+    const dir = freshDir()
+    const envelope = JSON.parse(changesEnvelope('qoder', {
+      [`commit:${COMMIT_HASH}`]: {
+        narrative: { what: '重构 alpha', why: '测试', risks: [] },
+        changeRoles: { [FN_A]: '核心改动' }
+      }
+    })) as Record<string, unknown>
+    envelope.guarantees = {
+      [`commit:${COMMIT_HASH}`]: {
+        claims: [
+          {
+            kind: 'intent',
+            subject: `commit:${COMMIT_HASH}`,
+            text: '这次提交的核心意图是重构 alpha。',
+            evidence: [{ functionId: FN_A }]
+          }
+        ],
+        review: { verdict: 'pass', reason: '已对照变更函数核对。' }
+      }
+    }
+    writeChanges(dir, 'changes.qoder.json', JSON.stringify(envelope))
+    const res = scanChanges(dir)
+    const semantics = resolveChangesAgentSemantics(
+      `commit:${COMMIT_HASH}`,
+      res.winners,
+      res.entries,
+      fixtureInsight(),
+      FIXTURE
+    )
+    expect(semantics?.guarantee?.status).toBe('declared')
+    expect(semantics?.guarantee?.source).toBe('agent')
+    expect(semantics?.guarantee?.pass).toBe('changes')
+    expect(semantics?.guarantee?.objectId).toBe(`commit:${COMMIT_HASH}`)
+  })
+
+  it('winner.guarantee：证据在 scope 外 → unverified，但语义值仍返回', () => {
+    const dir = freshDir()
+    const envelope = JSON.parse(changesEnvelope('qoder', {
+      [`commit:${COMMIT_HASH}`]: {
+        narrative: { what: '重构 alpha', why: '测试', risks: [] },
+        changeRoles: { [FN_A]: '核心改动' }
+      }
+    })) as Record<string, unknown>
+    envelope.guarantees = {
+      [`commit:${COMMIT_HASH}`]: {
+        claims: [
+          {
+            kind: 'intent',
+            subject: `commit:${COMMIT_HASH}`,
+            text: '这次提交影响了 gamma。',
+            evidence: [{ functionId: FN_C }]
+          }
+        ],
+        review: { verdict: 'pass', reason: '已核对。' }
+      }
+    }
+    writeChanges(dir, 'changes.qoder.json', JSON.stringify(envelope))
+    const res = scanChanges(dir)
+    const semantics = resolveChangesAgentSemantics(
+      `commit:${COMMIT_HASH}`,
+      res.winners,
+      res.entries,
+      fixtureInsight(),
+      FIXTURE
+    )
+    expect(semantics?.narrative?.what).toBe('重构 alpha')
+    expect(semantics?.guarantee?.status).toBe('unverified')
+    expect(semantics?.guarantee?.claims[0].status).toBe('unverified')
+  })
+
+  it('winner.guarantee 但未提供 insight/graph：保持原行为（无 guarantee 字段）', () => {
+    const dir = freshDir()
+    const envelope = JSON.parse(changesEnvelope('qoder', {
+      [`commit:${COMMIT_HASH}`]: { changeRoles: { [FN_A]: '核心改动' } }
+    })) as Record<string, unknown>
+    envelope.guarantees = {
+      [`commit:${COMMIT_HASH}`]: {
+        claims: [
+          {
+            kind: 'intent',
+            subject: `commit:${COMMIT_HASH}`,
+            text: '意图。',
+            evidence: [{ functionId: FN_A }]
+          }
+        ],
+        review: { verdict: 'pass', reason: 'ok' }
+      }
+    }
+    writeChanges(dir, 'changes.qoder.json', JSON.stringify(envelope))
+    const res = scanChanges(dir)
+    const semantics = resolveChangesAgentSemantics(`commit:${COMMIT_HASH}`, res.winners, res.entries)
+    expect(semantics).toBeDefined()
+    expect(semantics!.guarantee).toBeUndefined()
   })
 
   it('无赢家时返回 undefined', () => {
@@ -592,6 +822,10 @@ describe('buildChangesRulesSection', () => {
     expect(text).toContain('changeRoles')
     expect(text).toContain('不得编造')
     expect(text).toContain('workspace:latest')
+    // SG3：契约声明变更侧支持 guarantees，并在完整示例里给出最小担保
+    expect(text).toContain('guarantees（SG3）')
+    expect(text).toContain('"guarantees"')
+    expect(text).toContain('"kind": "intent"')
   })
 
   it('🔴2 索引正文含链路 entryId 锚点', () => {
@@ -617,6 +851,53 @@ describe('buildChangesRulesSection', () => {
     const text = lines.join('\n')
     expect(text).toContain('没有变更记录')
     expect(text).not.toContain('commit:<从上方索引')
+  })
+
+  it('🟡5 9.6 示例的 guarantee 可执行：直接 validateChangesGuarantee → declared', () => {
+    const scopes = buildChangesScopeIndex(makeGitRecords(), makeSnapshotRecords(), FIXTURE)
+    const sugs = suggestChangesTasks(scopes, [], [])
+    const text = buildChangesRulesSection(scopes, sugs, [], BASIS, '/tmp/changes').join('\n')
+    const section = text.slice(text.indexOf('### 9.6 完整示例'))
+    const match = /```json\n([\s\S]*?)\n```/.exec(section)
+    expect(match).not.toBeNull()
+    const example = JSON.parse(match![1]) as {
+      values: Record<string, AgentSupplyChangesValue>
+      guarantees: Record<string, AgentSupplyGuaranteeInput>
+    }
+    const keys = Object.keys(example.guarantees)
+    expect(keys).toHaveLength(1)
+    for (const scopeId of keys) {
+      expect(example.values[scopeId], scopeId).toBeDefined()
+      const result = validateChangesGuarantee(
+        fixtureInsight(),
+        FIXTURE,
+        scopeId,
+        example.values[scopeId],
+        example.guarantees[scopeId]
+      )
+      expect(result.status, scopeId).toBe('declared')
+      expect(result.claims.length, scopeId).toBeGreaterThan(0)
+      for (const c of result.claims) expect(c.status, `${scopeId}/${c.id}`).toBe('declared')
+    }
+  })
+
+  it('🟡5 索引过滤已删除函数：example/索引不出现不在图谱中的 functionId', () => {
+    const records = makeGitRecords()
+    records.push({
+      id: 'r3',
+      targetId: 'src/gone.ts::-::gone@gggggggggggg',
+      functionId: 'src/gone.ts::-::gone@gggggggggggg',
+      date: '2026-10-01T00:00:00.000Z',
+      type: 'deleted',
+      description: '',
+      source: 'git',
+      commit: { hash: COMMIT_HASH, author: 'dev', subject: 'feat: add alpha' }
+    })
+    const scopes = buildChangesScopeIndex(records, makeSnapshotRecords(), FIXTURE)
+    const commitScope = scopes.find((s) => s.scopeId === `commit:${COMMIT_HASH}`)
+    expect(commitScope?.functionIds).not.toContain('src/gone.ts::-::gone@gggggggggggg')
+    const text = buildChangesRulesSection(scopes, [], [], BASIS, '/tmp/changes').join('\n')
+    expect(text).not.toContain('gone@gggggggggggg')
   })
 
   it('🟡6 commit subject 含换行/反引号时被截断清理', () => {
@@ -697,6 +978,42 @@ describe('GET /api/impact/changeset（G5 读时合并）', () => {
     await app.close()
   })
 
+  it('changes 文件带 guarantees：响应 agentSemantics.guarantee.status=declared', async () => {
+    const dir = freshDir()
+    const service = await makeService(dir, fixtureFiles())
+    seedGit(service, COMMIT_HASH, '2026-10-01T00:00:00.000Z', [FN_A])
+    const changesDir = changesSupplyDirOf(join(dir, 'autodoc.json'), 'p1')
+    const envelope = JSON.parse(changesEnvelope('qoder', {
+      [`commit:${COMMIT_HASH}`]: {
+        narrative: { what: '做了 alpha 的改动', why: '测试', risks: [] },
+        changeRoles: { [FN_A]: '核心改动' }
+      }
+    }, '2026-10-19T00:00:00.000Z', null)) as Record<string, unknown>
+    envelope.guarantees = {
+      [`commit:${COMMIT_HASH}`]: {
+        claims: [
+          {
+            kind: 'intent',
+            subject: `commit:${COMMIT_HASH}`,
+            text: '这次提交的核心意图是改动 alpha。',
+            evidence: [{ functionId: FN_A }]
+          }
+        ],
+        review: { verdict: 'pass', reason: '已对照变更函数核对。' }
+      }
+    }
+    writeChanges(changesDir, 'changes.qoder.json', JSON.stringify(envelope))
+    const app = await makeApp(service)
+    const res = await app.inject({ method: 'GET', url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}` })
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as ImpactChangeset
+    expect(body.agentSemantics?.guarantee).toBeDefined()
+    expect(body.agentSemantics?.guarantee?.status).toBe('declared')
+    expect(body.agentSemantics?.guarantee?.source).toBe('agent')
+    expect(body.agentSemantics?.guarantee?.claims[0].evidence[0].functionId).toBe(FN_A)
+    await app.close()
+  })
+
   it('撤回供给文件后 agentSemantics 消失', async () => {
     const dir = freshDir()
     const service = await makeService(dir, fixtureFiles())
@@ -729,6 +1046,38 @@ describe('GET /api/impact/changeset（G5 读时合并）', () => {
     const body = res.json() as ImpactChangeset
     expect(body.agentSemantics).toBeDefined()
     expect(body.agentSemantics!.narrative?.what).toBe('工作区变更')
+    await app.close()
+  })
+
+  it('🟡2 workspace:latest 作为 subject 别名端到端 → guarantee declared', async () => {
+    const dir = freshDir()
+    const service = await makeService(dir, fixtureFiles())
+    seedSnapshot(service, BATCH_DATE, [FN_C])
+    const changesDir = changesSupplyDirOf(join(dir, 'autodoc.json'), 'p1')
+    const envelope = JSON.parse(changesEnvelope('qoder', {
+      'workspace:latest': { changeRoles: { [FN_C]: '工作区变更的核心函数' } }
+    }, '2026-10-19T13:00:00.000Z', null)) as Record<string, unknown>
+    envelope.guarantees = {
+      'workspace:latest': {
+        claims: [
+          {
+            kind: 'intent',
+            subject: 'workspace:latest',
+            text: '这次工作区变更的核心是 gamma。',
+            evidence: [{ functionId: FN_C }]
+          }
+        ],
+        review: { verdict: 'pass', reason: '已对照变更函数核对。' }
+      }
+    }
+    writeChanges(changesDir, 'changes.qoder.json', JSON.stringify(envelope))
+    const app = await makeApp(service)
+    const res = await app.inject({ method: 'GET', url: '/api/impact/changeset?scope=workspace' })
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as ImpactChangeset
+    expect(body.agentSemantics?.guarantee?.status).toBe('declared')
+    expect(body.agentSemantics?.guarantee?.objectId).toBe(`workspace:${BATCH_DATE}`)
+    expect(body.agentSemantics?.guarantee?.claims[0].status).toBe('declared')
     await app.close()
   })
 

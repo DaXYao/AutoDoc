@@ -3,7 +3,10 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { appState, findFunctionEntry } from '../store/app'
 import { fnJumpQuery } from '../utils/nav'
+import { isGeneratedModuleDescription } from '../utils/semanticGuarantee'
 import AgentSourceBadge from '../components/AgentSourceBadge.vue'
+import GuaranteedBlock from '../components/GuaranteedBlock.vue'
+import SemanticGuaranteeBadge from '../components/SemanticGuaranteeBadge.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -46,6 +49,11 @@ function goFile(fileId: string): void {
       <p class="min-w-0 flex-1 text-sm text-[color:var(--ad-ink-2)]">{{ module.description }}</p>
       <!-- G3：模块职责的对象级 @agent 徽标（objectId = mod:i，与后端 winners 同口径） -->
       <AgentSourceBadge pass="modules" :object-id="module.id" />
+      <SemanticGuaranteeBadge
+        pass="modules"
+        :object-id="module.id"
+        :show-missing="module !== null && isGeneratedModuleDescription(module)"
+      />
     </div>
 
     <n-empty v-if="!module" description="模块不存在" class="my-8" />
@@ -63,8 +71,21 @@ function goFile(fileId: string): void {
             class="ad-card px-4 py-3"
           >
             <div v-if="chain.narrative" class="mb-2 flex items-start gap-1.5">
-              <p class="min-w-0 flex-1 text-xs text-[color:var(--ad-ink-2)]">{{ chain.narrative }}</p>
+              <div class="min-w-0 flex-1">
+                <GuaranteedBlock pass="narratives" :object-id="chain.id">
+                  <p class="text-xs text-[color:var(--ad-ink-2)]">{{ chain.narrative }}</p>
+                </GuaranteedBlock>
+              </div>
+              <!-- @agent 来源属元信息：未证实折叠叙事时仍常显 -->
               <AgentSourceBadge pass="narratives" :object-id="chain.id" />
+            </div>
+            <!-- 叙事为空但 stepRoles 有内容：担保仍属于 narratives 对象，只挂一次徽标 -->
+            <div v-else-if="Object.keys(chain.stepRoles).length > 0" class="mb-2">
+              <SemanticGuaranteeBadge
+                pass="narratives"
+                :object-id="chain.id"
+                :show-missing="true"
+              />
             </div>
             <ol class="flex flex-col">
               <template v-for="(fid, i) in chain.path" :key="`${chain.id}-${fid}-${i}`">

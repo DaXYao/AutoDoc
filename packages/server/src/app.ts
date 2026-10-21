@@ -297,20 +297,33 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     }
     try {
       const changeset = getChangeset(service, scope)
-      // 🟡5：轻量读时合并——复用 changeset 已取到的 snapshotRecords，供给目录无文件即早退
-      const snapshotRecords = service.storage.listChangeRecords({ source: 'snapshot' })
-      const supplyId = scopeToSupplyId(scope, snapshotRecords)
-      if (supplyId) {
-        const { graph } = loadInsight(service, '', {
-          ignoreSnapshot: true,
-          supplyOverlay: false,
-          guarantees: false
-        })
-        const light = collectChangesSupplyLight(service, projectId, graph, snapshotRecords)
-        if (light) {
-          const semantics = resolveChangesAgentSemantics(supplyId, light.winners, light.entries)
-          if (semantics) changeset.agentSemantics = semantics
+      // 🟡5：轻量读时合并——复用 changeset 已取到的 snapshotRecords，供给目录无文件即早退。
+      // 供给叠加属附加产物：读取洞察/扫描/担保校验任一步失败只降级为「无 Agent 语义」，不拖垮静态变更集。
+      try {
+        const snapshotRecords = service.storage.listChangeRecords({ source: 'snapshot' })
+        const supplyId = scopeToSupplyId(scope, snapshotRecords)
+        if (supplyId) {
+          const { insight, graph } = loadInsight(service, '', {
+            ignoreSnapshot: true,
+            supplyOverlay: false,
+            guarantees: false
+          })
+          const light = collectChangesSupplyLight(service, projectId, graph, snapshotRecords)
+          if (light) {
+            const semantics = resolveChangesAgentSemantics(
+              supplyId,
+              light.winners,
+              light.entries,
+              insight,
+              graph
+            )
+            if (semantics) changeset.agentSemantics = semantics
+          }
         }
+      } catch (error) {
+        console.warn(
+          `[autodoc] 变更侧 Agent 语义合并失败（已忽略，仅返回静态变更集）：${error instanceof Error ? error.message : String(error)}`
+        )
       }
       return changeset
     } catch (error) {

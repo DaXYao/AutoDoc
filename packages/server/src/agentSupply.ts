@@ -1211,12 +1211,14 @@ function parseGuaranteeValue(raw: unknown): GuaranteeOutcome<AgentSupplyGuarante
  * 解析文件级 guarantees：key 必须同时出现在本文件 values 中。
  * 坏 guarantee 只进 errors（不废整份文件、不影响其它条目）；缺省/空对象均为无担保。
  * guarantee 体积计入该条目的单条目上限（值 + guarantee 合计），文件上限由读前体积闸口自然覆盖。
+ * `entryMax` 缺省按 pass 取（洞察侧 32KB / 整项目 pass 8MB）；变更侧传自己的单条目上限。
  */
-function parseGuarantees(
+export function parseGuarantees(
   raw: unknown,
   values: Record<string, unknown>,
   pass: AgentSupplyPass,
-  file: string
+  file: string,
+  entryMax: number = entryMaxBytesOf(pass)
 ): { guarantees: Map<string, AgentSupplyGuaranteeInput>; errors: AgentSupplyError[] } {
   const guarantees = new Map<string, AgentSupplyGuaranteeInput>()
   const errors: AgentSupplyError[] = []
@@ -1231,7 +1233,6 @@ function parseGuarantees(
     return { guarantees, errors }
   }
   const valuesIds = new Set(Object.keys(values))
-  const entryMax = entryMaxBytesOf(pass)
   for (const objectId of ids) {
     const at = guaranteePath(objectId)
     if (objectId.trim().length === 0) {
@@ -2299,7 +2300,7 @@ function buildRulesText(
   )
   L.push('| values | 是 | 非空 map：键 = 对象 id（partition / flows 只能是 `root`；其余为 moduleId / chainId / functionId / externals 的 `module::symbol`），值 = 该 pass 的内容 |')
   L.push(
-    '| guarantees | 否 | 可选 map：键必须同时出现在本文件 `values` 中；值 = `{ claims, review }`（见 4.10）。缺省 = 该条目未证实；坏 guarantee 只进错误清单，不废整份文件/其它条目 |'
+    '| guarantees | 否 | 可选 map：键必须同时出现在本文件 `values` 中；值 = `{ claims, review }`（见 4.10）。缺省 = 该条目未证实；坏 guarantee 只进错误清单，不废整份文件/其它条目。变更侧 changes 文件同样适用（见第 9 节） |'
   )
   L.push('')
   L.push(
@@ -2582,8 +2583,13 @@ function buildRulesText(
   L.push('  - 外部符号主体：`symbol`；或该外部调用的 `stepId`；或 caller 的 `functionId` + 精确调用行号。')
   L.push('  - 文件主体：`fileId`；partition / flows 的 `root`：任意可定位锚点。')
   L.push(
-    `- **本轮限制**：\`import\` 允许出现，但静态校验尚未接入 → 一律 \`unverified\`（原因「${IMPORT_UNSUPPORTED_REASON}」）；` +
-      '变更侧 `changes` 文件暂不支持 `guarantees`（后续轮次接入）。'
+    `- **本轮限制**：\`import\` 允许出现，但静态校验尚未接入 → 一律 \`unverified\`（原因「${IMPORT_UNSUPPORTED_REASON}」）。`
+  )
+  L.push(
+    '- **变更侧 `changes`**：文件同样支持 `guarantees`（键 = scopeId，须与 values 键一致；键可用 `workspace:latest`）。Agent 自审最高 `declared`，变更侧不产生 `verified`；' +
+      'scope 由供给值（`changeRoles` / `affectedChains`）声明，服务端不反查 git diff 成员，changeset 的变更函数/链路仍以存储的变更记录为准。' +
+      '证据只认 scope 内 `functionId` / `chainId` / `stepId`（caller 在 scope）/ `fileId`；`moduleId` 不属于变更 scope，`symbol` / `line` / `detail` / `snippet` 不能单独作证。' +
+      'scope 本身（`commit:...` / `workspace:...`）只适合 intent claim，claims 的 subject 推荐规范 `workspace:<batchDate>`（也接受 `workspace` / `workspace:latest` 别名）；硬事实 claim 的 subject 必须是 scope 内的真实函数/链路。示例见第 9 节。'
   )
   L.push('')
   L.push('**claim 形状**')

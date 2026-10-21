@@ -2,6 +2,48 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · SG3 初审修复：变更侧证据 scope / workspace 别名 / 待合并 / 静态对象徽标 · server+web+docs
+
+- **🔴1 变更侧证据落在 scope 内**：`semanticGuarantee.ts` 新增 `changesEvidenceViolation`，在 subject 解析前逐条检查变更证据——functionId/chainId/stepId(caller)/fileId 必须在 scope 内，moduleId 直接违规，symbol/line/detail/snippet 不能单独作证，且至少一条 scope 内强锚点；任一条 scope 外强锚点整条 claim 记 `staticStatus=fail`/`unverified`，不降级放行。`claimReferencesObject` 的 changes 分支把解析为 changes 主体的 subject（含别名）也算引用。
+- **🟡2 别名与展示**：`resolveSubjectRef` 在 workspace scope 下接受 `workspace` / `workspace:latest` 主体别名；契约 9.1 与 `docs/SEMANTIC_GUARANTEE.md` 写明 guarantees 键可用 `workspace:latest`、subject 推荐规范 id；`ImpactView.changesScopeId` 优先 `guarantee.objectId`，避免头部对象 id 与担保规范 id 不一致。
+- **🟡3 供给抽屉「待合并」**：`GuaranteeSummary` 新增 `pendingEvidence`（已提交 guarantee 但当前洞察映射无条目），与 `missingEvidence` 分列不重复；面板新增「待合并 X」tag，未证实清单区分「guarantee 已提交，尚未合并/刷新」「未提交 guarantees」与现有 unverified 原因；变更侧仍只显示提交/缺证据，实际等级在影响页校验。
+- **🟡4 静态对象不误挂未证实**：FunctionCard 的 coreJudgment 徽标仅在 `coreSource` 为 ai/agent 时挂载；新增纯函数 `isGeneratedModuleDescription`（dir/空描述/「目录 」前缀/占位文案返回 false），InsightHome/ModuleDetail 据此决定 `show-missing`；`SemanticGuaranteeBadge` 新增 `interactive`（默认 true），模块卡片内传 false，只渲染带 title 的 n-tag（无 role/tabindex/popover）。
+- **🟡5 契约示例可执行**：`buildChangesScopeIndex` 的 functionIds / 链路索引过滤为当前图谱真实存在的对象，9.6 示例使用过滤后的函数/链路证据；新增「从 9.6 JSON 直接走 `validateChangesGuarantee` → declared」与「已删除函数不进索引」测试。
+- **🟡6 changeset 降级**：`/api/impact/changeset` 的读取洞察 + 扫描供给 + 担保校验整段 try/catch，失败仅 `console.warn` 并返回静态 changeset，不 500。
+- **🟡7 文档边界**：明确变更 scope 由供给值声明、服务端不反查 git diff；changeset 变更函数/链路仍以存储记录为准；变更侧最高 declared；证据只认 scope 内 functionId/chainId/stepId/fileId。
+- **测试**：server 556 项（新增 9）、web 279 项（新增 4）、core 366 项；全仓 1201 项通过，`pnpm lint` 全绿。
+- **范围/已知边界**：未做循环依赖重构、未加组件挂载测试；未改 README、未引入依赖、未提交 git。
+- **关联 commit**：随 SG3 一并提交。
+
+## 2026-10-21 · SG3 前端：变更侧语义担保接线（ImpactView 三层 + 显式 guarantee） · web
+
+- **组件扩展**：`SemanticGuaranteeBadge.vue` / `GuaranteedBlock.vue` 新增可选 `guarantee?: SemanticGuarantee | null`；显式传入（含 `null`）时直接使用，不再回查 `insight.semanticGuarantees`，未传（`undefined`）保持既有 lookup。显式 `null` 与缺担保同口径：`showMissing=true` 才显示「未证实」，`GuaranteedBlock` 同时折叠正文；显式担保照常传入 `GuaranteeDetails`。
+- **纯函数**：`utils/semanticGuarantee.ts` 新增 `resolveGuarantee(explicit, map, pass, objectId)` 统一上述优先/回退口径；供给抽屉统计注释同步为「变更侧提交/未提交担保」口径（不再称变更侧未接入）。
+- **ImpactView 接线**：新增 `changesGuarantee`（`agentSemantics.guarantee ?? null`）与 `changesScopeId`（`changeset.scope`）。层一叙事正文（what/why/risks）包进 `GuaranteedBlock`，header 与 `unmatchedHint` 留在折叠块外；层二 impact 文本包进同一 pass/objectId/guarantee，来源徽标常显；层三角色文本同样包裹，来源徽标常显。三层共享一份 scope 担保，未证实时各自显示「未证实（N）· 展开查看」，声明/已担保常显正文；无语义时仍不渲染任何 badge/fold。
+- **供给抽屉文案**：`AgentSupplyPanel.vue` 的变更侧统计改为「变更侧提交担保 A / 缺证据 B」，title 说明仅为提交数、实际等级在影响页按 scope 证据校验后展示。
+- **测试**：`web/test/semanticGuarantee.utils.test.ts` 新增 3 项 `resolveGuarantee` 用例（未传回查、显式 null 不回查、显式担保优先）；web 275 项通过，`pnpm --filter @autodoc/web typecheck/build`、`pnpm lint` 全绿。
+- **范围/已知取舍**：同一 scope 在多层重复出现徽标（title 已含 pass/对象/原因）可接受；未改后端协议、README、依赖，未提交 git。
+- **关联 commit**：随 SG3 一并提交。
+
+## 2026-10-21 · SG3 后端：变更侧语义担保（guarantees / scope 校验 / 读时合并） · server
+
+- **新增**：`changes.<agent>.json` 信封支持可选 `guarantees`（键 = 原始 scopeId，须同时出现在 `values` 中）；`parseGuarantees` 导出并支持自定义单条目体积上限（变更侧传 32KB），坏 guarantee 只进错误清单，不影响其它条目/文件。`workspace:latest` 的担保按原始键绑定、挂到归一化 `workspace:<date>` 条目。
+- **校验**：新增 `ChangesGuaranteeScope` 与 `validateChangesGuarantee`。scope 由 `changeRoles` 函数 + `affectedChains` 链路 path 函数推导；证据只认 scope 内 functionId / chainId / stepId 的 caller / fileId；scope 本身只适合 intent claim，硬事实 claim 的 subject 必须是 scope 内真实函数/链路；scope 为空或含非 TS/JS 文件时整条 unverified。逐对象 try/catch，最高 `declared`。
+- **读时合并**：`resolveChangesAgentSemantics` 新增可选 `insight/graph`，按当前图谱校验 winner.guarantee 并写入 `agentSemantics.guarantee`；不写洞察快照/缓存，未传 insight/graph 或没有 guarantee 时不写字段，保持旧调用行为。
+- **类型/契约**：`ImpactChangesetAgentSemantics.guarantee?`；共享类型注释删除「变更侧暂不支持」；全局契约 4.10 与变更章节 9.1/9.3/9.6 同步 scope 规则与最小示例（intent + functionId/chainId 证据）；`docs/SEMANTIC_GUARANTEE.md` 更新为变更侧支持 guarantees、最高 declared、读取时校验不入快照。
+- **测试**：新增 changes 担保解析/归一化/坏担保隔离/超体积、读时 declared/scope 外 unverified/无 guarantee 字段、changeset API 端到端，以及变更侧 scope 证据矩阵（functionId/chainId/stepId、path 函数、scope 空、混合语言、scope 外硬事实 subject）。server 547 项、全仓 1185 项（core 366 / web 272 / server 547）通过，`pnpm lint` 全绿。
+- **范围/已知边界**：本轮只做后端 + 共享类型 + 契约/文档/测试，未做 ImpactView UI、未改 README、未提交 git；变更侧不生成 `verified`（仅 Agent `declared`），不做 git diff 成员复核，scope 以供给值推导而非变更记录反查。
+- **关联 commit**：随 SG3 一并提交。
+
+## 2026-10-21 · SG3 前端：洞察侧语义担保 UI + 供给抽屉担保统计 · web
+
+- **新增**：`packages/web/src/utils/semanticGuarantee.ts`（担保键/查询、三档状态元信息、主叙事判定、洞察侧统计、claim/evidence 中文标签纯函数）；`SemanticGuaranteeBadge.vue`（已担保/Agent 声明/未证实三档徽标 + 可键盘操作的 popover 详情）、`GuaranteeDetails.vue`（claim/证据列表，锚点跳函数/链路/模块/文件/源码，纯文本插值防 XSS）、`GuaranteedBlock.vue`（verified/declared 常显；unverified/缺证据正文默认折叠）。
+- **挂载**：FunctionCard（categories / coreJudgment / coreRoles / narratives / keySteps / blocks）、CallNode（externals）、InsightHome（partition summary / flows / modules）、ModuleDetail（modules / narratives）。只在 AI/Agent 生成的语义对象上出现；分类、核心判定与结构导航保留可见并打「未证实」徽标，避免整页无法导航。
+- **供给抽屉**：统计区新增「已担保 X / Agent 声明 Y / 未证实 Z / 缺证据 M」，变更侧单列「声明 / 缺证据」；新增「语义未证实」清单（pass、对象 id、agent、原因，最多 20 条并显示总数），原校验错误表改称「结构/校验错误」。
+- **测试**：新增 `packages/web/test/semanticGuarantee.utils.test.ts`（13 项，覆盖状态映射、缺省查询、计数去重、changes 排除、missingEvidence）；web 272 项通过，`pnpm --filter @autodoc/web typecheck`、`pnpm lint`、web build 全绿。
+- **范围/已知取舍**：本轮仅洞察侧；变更侧（ImpactView / changes 担保）未接入，留待下一小步；未改后端与 README，未提交 git。
+- **关联 commit**：随 SG3 一并提交。
+
 ## 2026-10-21 · SG2 收尾门禁：移除被调方分类通道 / narrative 锚点同源 / 证据与 null 口径回归 · server
 
 - **修复**：`FunctionPack.calls` 删除 `calleeCategory`，证据包不再经调用边带出被调函数分类（函数自身分类此前已移除，这是最后一条分类值通道）；`buildIntentObject` 的 `narrativeAllowed.moduleIds` 与 `addChainAnchor` 同源，只有 `graph.modules` 中真实存在的 `chain.moduleId` 才进入 allowed；`finalizeKeyGuarantees` 把 `null` 与 `undefined` 同口径，本轮无对象/无担保时不再把 `null` 写成 `{}`。

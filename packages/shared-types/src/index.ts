@@ -715,6 +715,11 @@ export interface ImpactChangesetAgentSemantics {
   affectedChains?: Record<string, AgentSupplyChangesChainImpact>
   /** 层三：变更函数角色（与 coreRoles/stepRoles/CallEdge.role 语义不同：表达本次变更上下文角色） */
   changeRoles?: Record<string, string>
+  /**
+   * SG3：变更侧语义担保（读请求时按当前图谱静态校验，不写入洞察快照）。
+   * 缺省 = 未提交 guarantee（UI 视为未证实，不写该字段）。
+   */
+  guarantee?: SemanticGuarantee
   /** 生效的 Agent 标识 */
   agent: string
   /** 供给文件写入时间 */
@@ -1149,7 +1154,8 @@ export interface AgentSupplyFile<P extends AgentSupplyPass = AgentSupplyPass> {
    * 可选：对象 id → 语义担保输入（claims + 自审）。key 必须同时出现在 `values` 中；
    * 缺省 = 该条目未证实（不报错、不阻塞合并）。SG1 仅 TypeScript/JavaScript 家族参与静态校验；
    * guarantee 体积计入单条目（值 + guarantee）与单文件上限。
-   * 变更侧 `changes.<agent>.json` 暂不支持 `guarantees`（后续轮次接入）。
+   * 变更侧 `changes.<agent>.json` 同样支持：键 = scopeId，Agent 自审最高 `declared`，
+   * 系统按该 scope 的证据静态校验（证据须来自 affectedChains 的 path 函数/链路或 changeRoles 的函数）。
    */
   guarantees?: Record<string, AgentSupplyGuaranteeInput>
 }
