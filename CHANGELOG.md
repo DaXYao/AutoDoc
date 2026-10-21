@@ -2,6 +2,24 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · J1 修复：Java receiver/构造器/通配符误连 + 关键边界 · core
+
+- **初审问题**：①链式/cast/class literal 等复杂 receiver 被当成无 receiver，`getB().work()`、`A.class.getName()` 误连本类；②`new com.util.Helper()` 丢全限定类型，按同包/唯一名回退误连；③`import java.util.*` 后项目同名类被唯一简单名兜底误连。
+- **修复**：复杂/未知 object 一律写 `::?` 哨兵，Java 解析中直接 unresolved；`new` 写 `::<类型>`（保留全限定/嵌套类型）并精确找构造器；移除 Java 简单类名全局唯一兜底，类解析只允许全限定名 / 显式 import（含 static/嵌套）/ 同包 / import 前缀+嵌套后缀；无 receiver 先本类方法再 static import。
+- **关键边界**：嵌套 import 与 `new Inner()`；注解 varargs 正确取类型/名称；抽象/接口/native 声明指纹去掉方法名（重命名可迁移）；匿名类变量不再泄漏到外层，补 try-with-resources/catch/pattern 变量；接口方法隐式 public/exported。
+- **测试**：core 316 项通过，全仓 1011 项通过（core 316 / server 436 / web 259），`pnpm lint` 全绿。
+- **关联 commit**：本次修复提交。
+
+## 2026-10-21 · J1a/J1b：Java 语言接入（类索引 / 类型推断 / import / lambda）· core
+
+- **动机**：完成 Java 语言接入（扩展版、零共享数据模型改动），覆盖类/接口/枚举/记录/嵌套类型、类型推断、lambda 与 import/类索引。
+- **解析器**：新增 `JavaParser`（`.java`）；包+类路径写入 `className`（`com.example.Widget`、`com.example.Outer.Inner`）；方法/构造器/抽象/接口/native 声明条目、注解/泛型/重载/varargs/throws、Javadoc/注释块、调用点；局部变量/字段/参数/enhanced_for/catch/try 资源/`var new` 类型推断，receiver 用 `::Type`；lambda 合成 `[lambda#N]`（className=`类路径#方法名(参数)`，父函数排除）。
+- **跨文件**：Java 类索引（类全名/简单名/包）、普通/static/嵌套 import、同包/全限定名、`::this`、构造器；重载/多构造器/外部 JDK/未知 receiver unresolved，无全局同名回退，跨语言隔离；继承/`::super` 不建模。
+- **注册/缓存**：`PARSER_VERSION` 4→5；默认 include 增加 `**/*.java`；shared-types/UI/C++/Python 行为未改。
+- **测试/实跑**：core 316 / 全仓 1011 项通过；临时 Java 多包项目（普通/static/嵌套 import、同包类、字段类型推断、构造器、this、lambda、接口/记录、Javadoc）实跑：静态/实例/构造器/同包/嵌套调用解析，`this` 与 lambda 正常，接口方法 public，外部 JDK/重载保持未解析；Java 文件页正常呈现。
+- **已知边界**：空类无 FunctionDoc 不入类索引（无法解析、不误连）；`::super`/继承、method reference、`this()`/`super()`、匿名类方法独立条目、record 隐式构造器、注解类型元素、类级 lambda 不产出；`::Type` 的 externalModule 仍为 null。
+- **关联 commit**：本次代码提交。
+
 ## 2026-10-21 · P1 修复：Python import 绑定与 receiver 误连/漏连 · core
 
 - **初审问题**：①命名 import 忽略 receiver（`from lib import save` + `self.save()` 误连 lib.save）；②模块导出表按名覆盖（模块 `def run` 被类方法 `run` 覆盖，`from lib import run` 漏连）；③namespace 源拼接错（`import foo.bar` 后 `foo.helper()` 误连 foo/bar.py，`import pkg.util` 拼出 pkg.util.util 伪候选）。

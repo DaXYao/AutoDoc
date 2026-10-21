@@ -47,10 +47,18 @@
 - [ ] 对外主页/README 的事实声明（版本、依赖、语言支持、命令、数字）必须逐条对代码核查；产品价值与技术亮点分列，并单列「当前支持与边界」主动暴露限制——否则容易把需求文档误当现状（见 2026-10-21 R1）。
 - [ ] 外部供给的可选字段缺省 ≠ 清空：字段级合并必须保留本地已有值；外部可控的 module/symbol 键写入对象前用 null-prototype 容器或 Map，防 `__proto__` / `constructor` 原型污染。
 - [ ] Python import 解析必须按「绑定语义」而不是源码字符串拼接：unaliased `import a.b` 绑定顶层包 a；named import 不能覆盖带 receiver 的成员调用；模块导出只算 `className=null` 的模块级函数；未解析的子模块成员不得回退到同名 named import。
+- [ ] 静态类型语言的成员调用：复杂/未知 receiver 必须用哨兵（如 `::?`）阻断「无 receiver」兜底；`new` 必须保留全限定类型；外部/通配符 import 不能靠「简单类名全局唯一」兜底。
 
 ---
 
 ## 教训条目
+
+### 2026-10-21 · Java 接入的三类误连：无 receiver 哨兵 / new 丢类型 / 唯一名兜底
+- **场景**：J1 接入 Java 解析器后的初审与实跑。
+- **现象**：①`getB().work()`、`A.class.getName()` 误连本类同名方法；②`new com.util.Helper()` 按同包/唯一名误连；③`import java.util.*` 后项目同名类被唯一简单名兜底误连；④接口方法被标 module-local；⑤抽象方法重命名判删除+新增；⑥匿名类局部变量泄漏到外层。
+- **根因**：复杂 object 返回 undefined receiver，被解析链当成「无 receiver」；object_creation_expression 只留简单名；Java 类解析保留了「简单名全局唯一」兜底，而 Java 跨包必须 import/限定；接口成员缺省 public 未特判；无 body 声明指纹用了含方法名的整段文本；匿名类变量收集与外层共用一个 Map。
+- **正确做法**：有 object 但无法推断类型时写 `::?` 哨兵并一律 unresolved；`new` 写全限定/嵌套类型 receiver；移除简单名全局兜底，只允许 FQN/显式 import/同包/import 前缀+嵌套后缀；无 receiver 先本类再 static import；接口方法隐式 public；声明型指纹去掉方法名；匿名类/局部类变量用独立作用域，补 try 资源/catch/pattern 变量。
+- **预防措施**：接入静态类型语言先列出「receiver 形态 → 解析路径」矩阵（this/super/类/变量/链式/class literal/new），每种都要有正反例；任何全局唯一兜底都要先问「语言是否允许无 import 的跨包引用」；声明型条目和无 body 条目的指纹必须与名字解耦。
 
 ### 2026-10-21 · Python import 绑定的三处静默误连：receiver / 导出覆盖 / namespace 拼接
 - **场景**：P1 接入 Python 解析器后的初审与实跑。
