@@ -3,6 +3,7 @@ import type { LanguageParser } from './types.js'
 import { JsFamilyParser } from './jsFamily.js'
 import { CSharpParser } from './csharp.js'
 import { CppParser } from './cpp.js'
+import { GoParser } from './go.js'
 import { JavaParser } from './java.js'
 import { PythonParser } from './python.js'
 import { VueParser } from './vue.js'
@@ -34,22 +35,24 @@ export class ParserRegistry {
 /**
  * 解析层产物版本（手动维护），参与增量解析缓存 versionKey。
  * 任何会改变「同一源码的 ParsedFile 输出」的变更都必须 bump：
- * - JsFamilyParser / CSharpParser / CppParser / VueParser / PythonParser / JavaParser 的函数、callSites、codeBlocks、imports 提取逻辑变化；
+ * - JsFamilyParser / CSharpParser / CppParser / VueParser / PythonParser / JavaParser / GoParser 的函数、callSites、codeBlocks、imports 提取逻辑变化；
  * - 升级 @vscode/tree-sitter-wasm（grammar wasm）或 web-tree-sitter；
  * - ParsedFile / ParsedFunction / ParsedImport / CodeBlock 结构调整。
  * v2：新增 VueParser（.vue script + 模板事件 + [template] 节点），.vue 首入解析范围。
  * v3：新增 CppParser（.cpp/.cc/.cxx/.h/.hpp/.hh/.hxx/.inl 的命名空间/方法/lambda/include 提取）。
  * v4：新增 PythonParser（.py 的函数/方法/嵌套作用域/lambda/文档字符串/注释块/import 提取）。
  * v5：新增 JavaParser（.java 的包/类型/方法/构造器/lambda/类型推断/import 提取）。
+ * v6：新增 GoParser（.go 的 package/函数/方法/接口/类型推断/lambda/import 提取）。
+ * v7：GoParser 词法作用域、`::pkg?` 候选、函数值 `::?`、重复 init/_ 合成名与 calleeId 去重。
  * 仅改注释、重命名内部变量等不影响输出的变更无需 bump。
  */
-export const PARSER_VERSION = 5
+export const PARSER_VERSION = 7
 
 export const parserRegistry = new ParserRegistry()
 
 let defaultsRegistered = false
 
-/** 注册内置语言解析器（TypeScript / TSX / JavaScript / C# / Vue SFC / C++ / Python / Java），幂等 */
+/** 注册内置语言解析器（TypeScript / TSX / JavaScript / C# / Vue SFC / C++ / Python / Java / Go），幂等 */
 export async function ensureDefaultParsers(): Promise<void> {
   if (defaultsRegistered) return
   defaultsRegistered = true
@@ -61,6 +64,7 @@ export async function ensureDefaultParsers(): Promise<void> {
   const cpp = await createParser('tree-sitter-cpp')
   const python = await createParser('tree-sitter-python')
   const java = await createParser('tree-sitter-java')
+  const go = await createParser('tree-sitter-go')
   const tsParser = new JsFamilyParser('typescript', ['ts'], typescript)
   const tsxParser = new JsFamilyParser('tsx', ['tsx'], tsx)
   const jsParser = new JsFamilyParser('javascript', ['js', 'jsx', 'mjs', 'cjs'], javascript)
@@ -82,4 +86,6 @@ export async function ensureDefaultParsers(): Promise<void> {
   parserRegistry.register(new PythonParser('python', ['py'], python))
   // Java 在 Python 之后注册
   parserRegistry.register(new JavaParser('java', ['java'], java))
+  // Go 在 Java 之后注册
+  parserRegistry.register(new GoParser('go', ['go'], go))
 }

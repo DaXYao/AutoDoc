@@ -6,6 +6,11 @@ import { diffFileSnapshots, type DetectedChange, type FileSnapshot } from './cha
 import type { NormalizedConfig } from './config.js'
 import { collectFiles } from './files.js'
 import { fingerprint, makeStableId, sha256 } from './identity.js'
+import {
+  GO_PACKAGE_IMPORT_LOCAL,
+  GO_PACKAGE_NAME_CANDIDATE,
+  GO_UNKNOWN_RECEIVER
+} from './parser/go.js'
 import { overloadQualifier } from './parser/identity.js'
 import { JAVA_PACKAGE_IMPORT_LOCAL, JAVA_UNKNOWN_RECEIVER } from './parser/java.js'
 import { ensureDefaultParsers, PARSER_VERSION, parserRegistry } from './parser/registry.js'
@@ -960,12 +965,358 @@ function resolveJavaCallee(
   return null
 }
 
+/** Go 目录：POSIX 相对路径，仓库根目录记为 '.' */
+function goDirOf(relPath: string): string {
+  return posix.dirname(relPath)
+}
+
+/** 文件包名：来自解析器为每个 .go 文件合成的 `__go_package__` import */
+function goPackageNameOf(imports: ParsedImport[]): string | null {
+  const imp = imports.find((candidate) => candidate.localName === GO_PACKAGE_IMPORT_LOCAL)
+  return imp && imp.source.length > 0 ? imp.source : null
+}
+
+/** Go 包条目：目录 + 包名 → 文件集合与全部函数（方法按 className 归属类型） */
+interface GoPackageEntry {
+  dir: string
+  name: string
+  files: Set<string>
+  functions: FunctionDoc[]
+}
+
+/** Go 类型条目：`包名.类型` → 文件集合 + 方法/接口方法声明 */
+interface GoTypeEntry {
+  className: string
+  files: Set<string>
+  methods: FunctionDoc[]
+}
+
+/**
+ * Go 建图索引（仅由 language === 'go' 的文件构建）：
+ * - packages：`目录\0包名` → 包条目（不同目录的同名包互不覆盖）；
+ * - packagesByDir：目录 → 该目录下全部包（import 映射到目录后用于挑可导入包）；
+ * - types：`包名.类型` → 方法集合（同名包跨目录合并，解析时再按目标包文件过滤）；
+ * - dirs：存在 Go 文件的目录集合（唯一目录后缀兜底用）；
+ * - modulePath：rootDir/go.mod 的 module 路径（缺失为 null）。
+ * 所有 Go 调用解析只查这份索引，候选天然只有 Go，不会连到 Java/Python/C++/TS 同名函数。
+ */
+interface GoIndex {
+  packages: Map<string, GoPackageEntry>
+  packagesByDir: Map<string, GoPackageEntry[]>
+  types: Map<string, GoTypeEntry>
+  dirs: Set<string>
+  modulePath: string | null
+}
+
+/** 单文件 Go 调用解析上下文：当前文件包名 + import 表 + 全局索引 */
+interface GoCallContext {
+  packageName: string | null
+  importByName: Map<string, ParsedImport>
+  /** 本文件全部 import（包名候选匹配需保留默认局部名与真实包名不一致的条目） */
+  imports: ParsedImport[]
+  index: GoIndex
+}
+
+/** 包条目键：目录 + 包名组合，避免不同目录的同名包互相混淆 */
+function goPackageKey(dir: string, name: string): string {
+  return `${dir}\u0000${name}`
+}
+
+/** 从阶段一产物构建 Go 包/类型索引（非 Go 文件忽略） */
+function buildGoIndex(units: ParsedUnit[], modulePath: string | null): GoIndex {
+  const index: GoIndex = {
+    packages: new Map(),
+    packagesByDir: new Map(),
+    types: new Map(),
+    dirs: new Set(),
+    modulePath
+  }
+  for (const unit of units) {
+    if (unit.language !== 'go') continue
+    const dir = goDirOf(unit.relPath)
+    const name = goPackageNameOf(unit.imports)
+    index.dirs.add(dir)
+    if (name === null) continue
+    let pkg = index.packages.get(goPackageKey(dir, name))
+    if (!pkg) {
+      pkg = { dir, name, files: new Set(), functions: [] }
+      index.packages.set(goPackageKey(dir, name), pkg)
+      const list = index.packagesByDir.get(dir) ?? []
+      list.push(pkg)
+      index.packagesByDir.set(dir, list)
+    }
+    pkg.files.add(unit.relPath)
+    pkg.functions.push(...unit.functions)
+    for (const fn of unit.functions) {
+      // lambda 的 className 含 `#`（父函数作用域），不归属任何类型
+      if (fn.className === null || fn.className.includes('#')) continue
+      let typeEntry = index.types.get(fn.className)
+      if (!typeEntry) {
+        typeEntry = { className: fn.className, files: new Set(), methods: [] }
+        index.types.set(fn.className, typeEntry)
+      }
+      typeEntry.files.add(unit.relPath)
+      typeEntry.methods.push(fn)
+    }
+  }
+  return index
+}
+
+/**
+ * 读取 rootDir/go.mod 的 module 路径（不新增依赖，直接读文本）。
+ * 缺失/不可读/无 module 行一律返回 null，后续只走唯一目录后缀兜底。
+ */
+async function readGoModulePath(rootDir: string): Promise<string | null> {
+  let text: string
+  try {
+    text = await readFile(join(rootDir, 'go.mod'), 'utf-8')
+  } catch {
+    return null
+  }
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*module\s+(?:"([^"]+)"|`([^`]+)`|(\S+))/.exec(line)
+    const parsed = match?.[1] ?? match?.[2] ?? match?.[3]
+    if (parsed && parsed.length > 0) return parsed
+  }
+  return null
+}
+
+/** 目录下的可导入包：排除 `_test` 外部测试包；零个或多个返回 null（不猜） */
+function importableGoPackage(dir: string, index: GoIndex): GoPackageEntry | null {
+  const candidates = (index.packagesByDir.get(dir) ?? []).filter(
+    (entry) => !entry.name.endsWith('_test')
+  )
+  return candidates.length === 1 ? candidates[0] : null
+}
+
+/**
+ * import path → 项目内 Go 目录：
+ * 1) go.mod module 命中（等于 modulePath，或以 modulePath + '/' 开头）→ 相对目录；
+ * 2) 未命中且首段含点（域名式，如 example.com/...、gopkg.in/...）才允许多段路径的
+ *    「唯一目录后缀」兜底（example.com/x/pkg/util → pkg/util）；命中多个目录 → null；
+ * 3) 首段无点的 stdlib（net/http、encoding/json）与单段路径（fmt/os）一律视为外部，
+ *    不做目录匹配——否则项目里恰好有 net/http 目录就会被误连。
+ */
+function resolveGoPackageDir(source: string, index: GoIndex): string | null {
+  if (source.length === 0 || source.startsWith('.') || source.startsWith('/')) return null
+  const modulePath = index.modulePath
+  if (modulePath !== null) {
+    if (source === modulePath) return index.dirs.has('.') ? '.' : null
+    if (source.startsWith(`${modulePath}/`)) {
+      const dir = source.slice(modulePath.length + 1)
+      return index.dirs.has(dir) ? dir : null
+    }
+  }
+  const segments = source.split('/').filter((segment) => segment.length > 0)
+  if (segments.length < 2) return null
+  if (!segments[0].includes('.')) return null
+  for (let length = segments.length; length >= 2; length--) {
+    const suffix = segments.slice(segments.length - length).join('/')
+    let match: string | null = null
+    for (const dir of index.dirs) {
+      if (dir === '.') continue
+      if (dir !== suffix && !dir.endsWith(`/${suffix}`)) continue
+      if (match !== null) return null
+      match = dir
+    }
+    if (match !== null) return match
+  }
+  return null
+}
+
+/** import 局部名 → 目标 Go 包（仅 namespace；合成 package import 与外部路径返回 null） */
+function goImportedPackage(localName: string, context: GoCallContext): GoPackageEntry | null {
+  if (localName === GO_PACKAGE_IMPORT_LOCAL) return null
+  const imp = context.importByName.get(localName)
+  if (!imp || imp.kind !== 'namespace') return null
+  const dir = resolveGoPackageDir(imp.source, context.index)
+  return dir === null ? null : importableGoPackage(dir, context.index)
+}
+
+/**
+ * 包名候选（解析器的 `::pkg?name`）：只在本文件 import 解析出的目标包内匹配
+ * 「真实 `__go_package__` 包名 === name」或「import 局部名 === name」。
+ * 目录 tool/包 toolkit、/v2、gopkg.in/yaml.v3 等默认 import 名与包名不一致时，
+ * 唯一目标包才继续；找不到/多个一律放弃，不得走全局同名兜底。
+ */
+function goPackagesByCandidateName(
+  name: string,
+  context: GoCallContext
+): GoPackageEntry[] {
+  const hits = new Map<string, GoPackageEntry>()
+  for (const imp of context.imports) {
+    if (imp.localName === GO_PACKAGE_IMPORT_LOCAL || imp.kind !== 'namespace') continue
+    const dir = resolveGoPackageDir(imp.source, context.index)
+    if (dir === null) continue
+    const pkg = importableGoPackage(dir, context.index)
+    if (!pkg) continue
+    if (imp.localName !== name && pkg.name !== name) continue
+    hits.set(goPackageKey(pkg.dir, pkg.name), pkg)
+  }
+  return [...hits.values()]
+}
+
+/** 包名候选唯一命中；零个/多个返回 null（不猜） */
+function goPackageByCandidateName(
+  name: string,
+  context: GoCallContext
+): GoPackageEntry | null {
+  const candidates = goPackagesByCandidateName(name, context)
+  return candidates.length === 1 ? candidates[0] : null
+}
+
+/**
+ * `::alias.Type` 的 alias → 目标包：显式 import 局部名优先（外部路径即失败）；
+ * 未显式绑定时按真实包名候选匹配（`toolkit.Thing` 未别名导入的场景）。
+ */
+function goTypeQualifierPackage(
+  alias: string,
+  context: GoCallContext
+): GoPackageEntry | null {
+  if (context.importByName.has(alias)) return goImportedPackage(alias, context)
+  return goPackageByCandidateName(alias, context)
+}
+
+/** 当前文件所属 Go 包（目录 + 包名精确匹配；包名缺失返回 null） */
+function currentGoPackage(relPath: string, context: GoCallContext): GoPackageEntry | null {
+  if (context.packageName === null) return null
+  return (
+    context.index.packages.get(goPackageKey(goDirOf(relPath), context.packageName)) ?? null
+  )
+}
+
+/** 测试文件不会被编进被导入的包：跨包解析时排除 */
+function isGoTestFile(relPath: string): boolean {
+  return relPath.endsWith('_test.go')
+}
+
+/**
+ * 类型方法查找：`包名.类型` 的方法集合中，只保留属于目标包文件的方法
+ *（不同目录的同名包不会串）；跨包调用只认导出方法（Go 跨包不可见小写方法）。
+ */
+function lookupGoTypeMethod(
+  pkg: GoPackageEntry,
+  typeName: string,
+  calledName: string,
+  index: GoIndex,
+  crossPackage: boolean
+): FunctionDoc | null {
+  const typeEntry = index.types.get(`${pkg.name}.${typeName}`)
+  if (!typeEntry) return null
+  const methods = typeEntry.methods.filter(
+    (method) =>
+      pkg.files.has(fileOfFunctionId(method.id)) &&
+      method.name === calledName &&
+      (!crossPackage || (method.exported && !isGoTestFile(fileOfFunctionId(method.id))))
+  )
+  return methods.length === 1 ? methods[0] : null
+}
+
+/** 包选择器函数 `pkg.Fn()`：目标包内唯一导出的包级函数（className = null） */
+function resolveGoPackageFunction(
+  pkg: GoPackageEntry,
+  calledName: string
+): FunctionDoc | null {
+  const matches = pkg.functions.filter(
+    (fn) =>
+      fn.name === calledName &&
+      fn.className === null &&
+      fn.exported &&
+      !isGoTestFile(fileOfFunctionId(fn.id))
+  )
+  return matches.length === 1 ? matches[0] : null
+}
+
+/** Go 内建函数：一律不解析（即使项目内恰好存在同名函数） */
+const GO_BUILTIN_FUNCTIONS = new Set([
+  'append',
+  'cap',
+  'clear',
+  'close',
+  'complex',
+  'copy',
+  'delete',
+  'imag',
+  'len',
+  'make',
+  'max',
+  'min',
+  'new',
+  'panic',
+  'print',
+  'println',
+  'real',
+  'recover'
+])
+
+/**
+ * Go 调用解析（严格、不猜）：
+ * - 哨兵 `::?`（局部函数值/未知对象）与普通文本 receiver → 未解析，不落回「无 receiver」分支；
+ * - `::pkg?name`：只在 import 目标包内按真实包名/局部名匹配，唯一才找导出包级函数；
+ * - `::pkg`：按 namespace import 解析目标包目录，找唯一导出的包级函数；
+ * - `::Type` / `::alias.Type`：定位类型所在包（当前包 / import 别名 / 包名候选），
+ *   在 `包名.类型` 的方法集合里找唯一方法；跨包只认导出方法；
+ * - 无 receiver：当前包内唯一包级函数（同包跨文件可见，含未导出），不做全局同名回退；
+ * - 内置函数只在无 receiver 时拦截（`t.new()` 是方法调用，正常解析）；
+ *   外部 stdlib、未知类型、多候选一律返回 null。
+ */
+function resolveGoCallee(
+  fn: FunctionDoc,
+  calledName: string,
+  receiver: string | undefined,
+  relPath: string,
+  context: GoCallContext
+): FunctionDoc | null {
+  // 内置名只拦截裸调用；`t.new()` / `t.close()` 这类方法调用必须按 receiver 解析
+  if (receiver === undefined && GO_BUILTIN_FUNCTIONS.has(calledName)) return null
+  if (receiver !== undefined) {
+    if (receiver === GO_UNKNOWN_RECEIVER || !receiver.startsWith('::')) return null
+    if (receiver.startsWith(GO_PACKAGE_NAME_CANDIDATE)) {
+      const name = receiver.slice(GO_PACKAGE_NAME_CANDIDATE.length)
+      if (name.length === 0) return null
+      const pkg = goPackageByCandidateName(name, context)
+      return pkg === null ? null : resolveGoPackageFunction(pkg, calledName)
+    }
+    const target = receiver.slice(2)
+    if (target.length === 0) return null
+    // 与解析器 receiver 编码一致：import 局部名优先于同名类型名（Go 中 import 遮蔽类型名）
+    const binding =
+      target === GO_PACKAGE_IMPORT_LOCAL ? undefined : context.importByName.get(target)
+    if (binding) {
+      const pkg = goImportedPackage(target, context)
+      return pkg === null ? null : resolveGoPackageFunction(pkg, calledName)
+    }
+    if (target.includes('.')) {
+      // `alias.Type`：类型名取最后一段；alias 先查显式 import，再按真实包名候选匹配
+      const dot = target.lastIndexOf('.')
+      const alias = target.slice(0, dot)
+      const typeName = target.slice(dot + 1)
+      if (alias.length === 0 || typeName.length === 0) return null
+      const pkg = goTypeQualifierPackage(alias, context)
+      return pkg === null
+        ? null
+        : lookupGoTypeMethod(pkg, typeName, calledName, context.index, true)
+    }
+    const current = currentGoPackage(relPath, context)
+    return current === null
+      ? null
+      : lookupGoTypeMethod(current, target, calledName, context.index, false)
+  }
+  const current = currentGoPackage(relPath, context)
+  if (current === null) return null
+  const matches = current.functions.filter(
+    (candidate) => candidate.className === null && candidate.name === calledName
+  )
+  return matches.length === 1 ? matches[0] : null
+}
+
 /**
  * 构建单个函数的调用边（阶段二）：
  * 1) 自调用；2) 文件内同名（优先同类方法）；3) 跨文件——经 import 映射到目标文件导出表；
  * C++ 走严格模式：include 可见候选 → 限定作用域/同名回退，多候选一律不猜；
  * Python 走严格模式：本文件同名优先 → named import → namespace 成员 → 仅 Python 的全局唯一回退；
- * Java 走严格模式：类索引 + import/同包/import 前缀嵌套 → 类成员/构造器，多候选一律不猜。
+ * Java 走严格模式：类索引 + import/同包/import 前缀嵌套 → 类成员/构造器，多候选一律不猜；
+ * Go 走严格模式：包/类型索引 + import/同包 → 包级函数/类型方法，内置函数与多候选一律不猜。
  * 解析不到一律归「外部/未解析」，禁止强行猜测。
  */
 function buildCallEdges(
@@ -979,10 +1330,16 @@ function buildCallEdges(
   exportedIndex: Map<string, Map<string, FunctionDoc>>,
   language: string,
   cppContext: CppCallContext,
-  javaContext: JavaCallContext
+  javaContext: JavaCallContext,
+  goContext: GoCallContext | null
 ): CallEdge[] {
   const edges: CallEdge[] = []
-  const seen = new Set<string>()
+  const isGo = language === 'go'
+  // 非 Go：沿用按 calledName 去重（保留首次出现的行号与角色）
+  const seenNames = new Set<string>()
+  // Go：解析后按目标去重（不同 receiver/目标保留多条）；未解析边按名字+receiver 收敛
+  const seenGoTargets = new Set<string>()
+  const goStepCounts = new Map<string, number>()
   const pyContext: PyCallContext = {
     byName,
     allByName: cppContext.allByName,
@@ -991,18 +1348,22 @@ function buildCallEdges(
     imports,
     knownPaths
   }
-  // 按调用点行号排序 = 源码执行顺序；同名调用去重，保留首次出现的行号与角色
+  // 按调用点行号排序 = 源码执行顺序
   const sites = [...parsed.callSites].sort((a, b) => a.line - b.line)
   for (const site of sites) {
     const calledName = site.name
-    if (seen.has(calledName)) continue
-    seen.add(calledName)
-    // 自调用短路：仅 JS/TS/C#/Vue 维持原口径；C++/Python/Java 交给严格解析（唯一才连，多候选不猜）
+    if (!isGo) {
+      if (seenNames.has(calledName)) continue
+      seenNames.add(calledName)
+    }
+    // 自调用短路：仅 JS/TS/C#/Vue 维持原口径；C++/Python/Java/Go 交给严格解析
+    //（Go 的 receiver 决定目标，按名字短路会把 `other.Run()` 误连成自身）
     if (
       calledName === fn.name &&
       language !== 'cpp' &&
       language !== 'python' &&
-      language !== 'java'
+      language !== 'java' &&
+      language !== 'go'
     ) {
       edges.push({
         callerId: fn.id,
@@ -1033,6 +1394,11 @@ function buildCallEdges(
         importByName,
         javaContext
       )
+    } else if (language === 'go') {
+      // Go 走包/类型索引 + import/同包，禁止跨语言与全局同名回退
+      resolved = goContext
+        ? resolveGoCallee(fn, calledName, site.receiver, relPath, goContext)
+        : null
     } else {
       const candidates = byName.get(calledName) ?? []
       resolved =
@@ -1061,22 +1427,46 @@ function buildCallEdges(
         }
       }
     }
+    // Go 按解析结果去重：同名不同目标（a.Close / b.Close）保留多条；
+    // 无法解析的同名边按名字 + receiver 收敛（receiver 不同仍可区分）。
+    if (isGo) {
+      const dedupeKey = resolved
+        ? `id:${resolved.id}`
+        : `external:${calledName}:${site.receiver ?? ''}`
+      if (seenGoTargets.has(dedupeKey)) continue
+      seenGoTargets.add(dedupeKey)
+    }
     // 最终仍解析不到 → 外部/未解析，补记来源模块说明符（供阶段2 让 AI 按「模块.名」作答）。
     // 取值优先级：接收者 import 源 > 被调名 import 源 > null（无来源，如本地对象成员调用）。
+    // Go 的 receiver 统一带 `::` 前缀（`::fmt` / `::pkg.Type`），需去掉后再查 import 表；
+    // 仅 Go 走该分支，其它语言的外部来源口径保持不变。
     let externalModule: string | null | undefined
     if (!resolved) {
-      const receiverSource = site.receiver
-        ? importByName.get(site.receiver)?.source
-        : undefined
+      const receiverImport =
+        site.receiver !== undefined
+          ? importByName.get(site.receiver) ??
+            (language === 'go' && site.receiver.startsWith('::')
+              ? importByName.get(site.receiver.slice(2).split('.')[0])
+              : undefined)
+          : undefined
+      const receiverSource = receiverImport?.source
       const rawSource = receiverSource ?? importByName.get(calledName)?.source ?? null
       // 仅裸模块说明符（不以 '.' 开头，如 vue/node:fs）才记录：相对路径未解析属「项目内没连上」，
       // 并非真外部库，AI 无法凭训练知识描述 './x'，记 null（项目内未连通的区分交后续阶段）。
       externalModule = rawSource !== null && !rawSource.startsWith('.') ? rawSource : null
     }
+    // stepId 在 caller 内必须唯一：Go 允许同名调用指向不同目标，
+    // 首次沿用 `${callerId}>${calleeName}`，后续同名边追加 `#N`（按调用顺序）。
+    let stepId = `${fn.id}>${calledName}`
+    if (isGo) {
+      const count = (goStepCounts.get(calledName) ?? 0) + 1
+      goStepCounts.set(calledName, count)
+      if (count > 1) stepId = `${stepId}#${count}`
+    }
     edges.push({
       callerId: fn.id,
       calleeName: calledName,
-      stepId: `${fn.id}>${calledName}`,
+      stepId,
       calleeId: resolved ? resolved.id : null,
       calleeCategory: resolved ? resolved.category : 'external',
       role: site.role,
@@ -1214,6 +1604,13 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
   // Java 类索引（仅 Java 文件）：类全名/简单类名/包名，供严格跨文件解析使用
   const javaContext = buildJavaCallContext(units)
 
+  // Go 包/类型索引（仅 Go 文件）：目录→包名/函数、包名.类型→方法，供严格跨文件解析使用。
+  // 只有存在 Go 文件时才读取 rootDir/go.mod（缺失不报错，走唯一目录后缀兜底）。
+  const goIndex = buildGoIndex(
+    units,
+    units.some((unit) => unit.language === 'go') ? await readGoModulePath(rootDir) : null
+  )
+
   // C++ 类外定义在所在 .cpp 里看不到类声明：用全局已观测到的「方法作用域」回填 kind。
   // 只对首段像类型名（大写开头）的作用域生效，避免把 namespace demo 的自由函数误判为方法。
   const cppMethodScopes = new Set<string>()
@@ -1271,6 +1668,11 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
       includedFiles:
         unit.language === 'cpp' ? resolveCppIncludes(relPath, imports, knownPaths) : new Set()
     }
+    // Go 调用上下文：当前文件包名 + import 表 + 全局包/类型索引（非 Go 文件为 null）
+    const goContext: GoCallContext | null =
+      unit.language === 'go'
+        ? { packageName: goPackageNameOf(imports), importByName, imports, index: goIndex }
+        : null
 
     parsed.forEach((p, index) => {
       functions[index].calls = buildCallEdges(
@@ -1284,7 +1686,8 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
         exportedIndex,
         unit.language,
         cppContext,
-        javaContext
+        javaContext,
+        goContext
       )
     })
 

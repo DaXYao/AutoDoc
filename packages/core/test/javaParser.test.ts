@@ -223,7 +223,7 @@ describe('Java 解析器：注册与 package/类型作用域', () => {
     expect(parser?.extensions).toEqual(['java'])
     expect(parserRegistry.forFile('pkg/Widget.jav')).toBeUndefined()
     expect(DEFAULT_INCLUDE).toContain('**/*.java')
-    expect(PARSER_VERSION).toBe(5)
+    expect(PARSER_VERSION).toBe(7)
   })
 
   it('package 前缀进入 className；嵌套类型用点号路径', () => {

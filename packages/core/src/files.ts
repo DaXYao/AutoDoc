@@ -17,7 +17,8 @@ export const DEFAULT_INCLUDE = [
   '**/*.hxx',
   '**/*.inl',
   '**/*.py',
-  '**/*.java'
+  '**/*.java',
+  '**/*.go'
 ]
 
 export const DEFAULT_EXCLUDE = [
