@@ -2,6 +2,17 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · 语义担保第五轮：Python（.py）接入语言闸门 · server+shared-types+docs
+
+- **语言闸门**：`GUARANTEE_LANGUAGE_EXTENSIONS` 加入 `py`；`isGuaranteeLanguageFile` 与 KEY 的 `isGuaranteeFunction` / `isGuaranteeFileSet` / `allGraphFilesGuaranteed` 直接覆盖 Python。变更侧 scope 同步接受 `.py`。`.java` / `.go` 仍为 `unverified`（原因「该语言尚未接入语义担保」），项目级混合对象同样不回退。
+- **Python 参数类型（server 侧，不改 parser）**：`ParamTypeLanguage` 增加 `python`；`paramTypeText` 对 `.py` 先去掉顶层默认值（`= []` 等，`==`/`>=`/`<=` 不算）和前导 `*`/`**`，只取顶层冒号后的注解（`page: int` → `int`、`name: Optional[str]` → `Optional[str]`、`x: list[int] = []` → `list[int]`）。无注解的 `self`/`cls`/`*args`/`**kwargs` 返回空类型，参数名与默认值不会成为类型 token；`matchesTypeText` 仍只认参数类型/返回类型整体或完整 token，完整声明与整签名不通过。
+- **Python 证据口径**：`.py` 复用通用证据包——装饰器（`@app.route(...)` / `@staticmethod`，系统去 `@` 与参数后归一）、类/嵌套作用域编码在 `className`、docstring 进 `docComment`、函数体内「`#` 注释 + 紧随语句」进注释块；跨文件 import 可解析为内部调用边，未解析调用按 import 源记录 `externalModule`，但 `import` claim 仍一律未证实。
+- **契约/文案**：`agentSupply.ts` 4.10 语言范围改为 TS/JS 家族 + C# + Vue SFC + C++ + Python，补充 Python 证据口径；`agentSupplyChanges.ts` 9.1 同步；`semanticGuarantee.ts` / `semanticVerifier.ts` 头部、shared-types 担保字段注释同步。
+- **测试**：`semanticGuarantee.test.ts` 语言判定（`.py=true`，`.java/.go=false）、Python 参数类型正反例矩阵（`int`/`str`/`Optional[str]`/`list[int]` 通过；参数名/默认值/完整声明失败）、含 Python 函数的 narratives/order/role、全 Python 与 TS+Python 的 partition/flows（含 `.java` 时 unverified）、changes scope；新增真实 3 文件 Python 项目（装饰器/类型注解/docstring/注释块/import/调用边）parser → generateDocs → buildGraph → 担保集成；`semanticVerifier.test.ts` 新增 Python KEY 用例。server 598（+10）、core 368、web 279，全仓 1245 项通过；`pnpm lint` 全绿。
+- **实跑**：临时 2 文件 Python 项目（类方法 + 类型注解 + import + 注释块），config/storage 指向系统临时目录（不写用户 `.autodoc`），`serve --port 7814 --no-watch`；写 `supply/default/insight/categories.qoder.json` 与 `coreRoles.qoder.json`（2 个函数，含 category/type/intent claims），`POST /api/agent-supply/merge` 后 `/api/insight` 返回 4 条 `source=agent,status=declared`（categories×2 + coreRoles×2；`type: int` 通过 Python 注解提取）。临时服务与数据已清理。
+- **已知边界**：Python 无注解参数没有类型文本（不会猜类型）；`import` claim 未接入；跨文件解析仍按既有 Python resolver 规则，不做动态 import/`sys.path`/继承；Agent 自审最高 `declared`，`verified` 仅由 KEY 第二遍复核产生。
+- **关联 commit**：随 Python 轮次一并提交。
+
 ## 2026-10-21 · 语义担保第四轮：C++（.cpp/.cc/.cxx/.h/.hpp/.hh/.hxx/.inl）接入语言闸门 · server+shared-types+docs
 
 - **语言闸门**：`GUARANTEE_LANGUAGE_EXTENSIONS` 加入 `cpp` / `cc` / `cxx` / `h` / `hpp` / `hh` / `hxx` / `inl`；`isGuaranteeLanguageFile` 与 KEY 的 `isGuaranteeFunction` / `isGuaranteeFileSet` / `allGraphFilesGuaranteed` 直接覆盖 C++。变更侧 scope 同步接受 C++。`.py` / `.java` / `.go` 仍为 `unverified`（原因「该语言尚未接入语义担保」），项目级混合对象同样不回退。

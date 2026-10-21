@@ -22,7 +22,7 @@ import type { ProjectGraph } from './graph.js'
 
 /**
  * SG1：语义担保的静态证据校验
- * （已接入语言：TypeScript / JavaScript / TSX / JSX、C#、Vue SFC、C++）。
+ * （已接入语言：TypeScript / JavaScript / TSX / JSX、C#、Vue SFC、C++、Python）。
  *
  * 本模块只依赖 shared-types 与 graph.js（禁止 import agentSupply / supplyCache）：
  * - agentSupply.ts 负责供给文件的结构/长度校验并挂载 guarantee；
@@ -31,11 +31,15 @@ import type { ProjectGraph } from './graph.js'
  * - 本模块不调用 LLM（KEY 第二遍复核见 semanticVerifier.ts），也不做前端展示。
  *
  * 已接入语言：.ts / .tsx / .js / .jsx / .mjs / .cjs / .cs / .vue /
- * .cpp / .cc / .cxx / .h / .hpp / .hh / .hxx / .inl。
+ * .cpp / .cc / .cxx / .h / .hpp / .hh / .hxx / .inl / .py。
  * Vue 的 script 函数复用 TS/JS 证据（签名/参数/返回类型/可见性/装饰器/调用/注释块）；
  * 合成 `[template]` 入口的调用边来自模板事件，`block` claim 不适用（模板节点没有函数体）。
  * C++ 复用通用证据包：attributes → decorators、命名空间/类编码在 className、quoted include
  * 只连项目内文件（未解析调用没有 externalModule）。参数类型按 C++ 声明语法提取，参数名不算类型。
+ * Python 复用通用证据包：decorators（`@app.route(...)` / `@staticmethod`）、类/嵌套作用域编码在
+ * className、docstring 进 docComment、注释块与调用边取自 parser；参数类型只认注解
+ * （`page: int` → `int`、`name: Optional[str]` → `Optional[str]`、`x: list[int] = []` → `list[int]`），
+ * 无注解的 `self` / `cls` / `*args` / `**kwargs` 没有类型文本，参数名与默认值不算类型。
  * 未接入语言、项目级混合对象一律 unverified（原因「该语言尚未接入语义担保」），不阻塞合并。
  */
 
@@ -56,7 +60,8 @@ const GUARANTEE_LANGUAGE_EXTENSIONS = new Set([
   'hpp',
   'hh',
   'hxx',
-  'inl'
+  'inl',
+  'py'
 ])
 const UNSUPPORTED_LANGUAGE_REASON = '该语言尚未接入语义担保'
 const MIXED_PROJECT_REASON = '项目级混合对象包含尚未接入语义担保的文件'
@@ -133,7 +138,7 @@ export function fileIdOfFunctionId(functionId: string): string | null {
   return at > 0 ? functionId.slice(0, at) : null
 }
 
-/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C# + Vue SFC + C++，按文件扩展名判定） */
+/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C# + Vue SFC + C++ + Python，按文件扩展名判定） */
 export function isGuaranteeLanguageFile(fileId: string): boolean {
   const lower = fileId.toLowerCase()
   const dot = lower.lastIndexOf('.')
@@ -142,7 +147,7 @@ export function isGuaranteeLanguageFile(fileId: string): boolean {
 }
 
 /** 按扩展名判定参数/类型口径的语言（仅影响参数类型提取；未知语言保持 TS 冒号口径） */
-type ParamTypeLanguage = 'js' | 'csharp' | 'cpp'
+type ParamTypeLanguage = 'js' | 'csharp' | 'cpp' | 'python'
 
 const CPP_TYPE_EXTENSIONS = new Set(['cpp', 'cc', 'cxx', 'h', 'hpp', 'hh', 'hxx', 'inl'])
 
@@ -153,6 +158,7 @@ function paramTypeLanguageOf(fileId: string | null): ParamTypeLanguage {
   if (dot < 0 || dot === lower.length - 1) return 'js'
   const ext = lower.slice(dot + 1)
   if (ext === 'cs') return 'csharp'
+  if (ext === 'py') return 'python'
   if (CPP_TYPE_EXTENSIONS.has(ext)) return 'cpp'
   return 'js'
 }
@@ -1042,22 +1048,101 @@ function cppParamTypeText(param: string): string {
 }
 
 /**
+ * Python 参数声明 → 参数类型（只认注解）：
+ * 去顶层默认值（`= ...`；`==` / `>=` / `<=` 不算）→ 去掉前导 `*` / `**` → 取顶层冒号后的注解。
+ * 例：`page: int` → `int`；`name: Optional[str]` → `Optional[str]`；
+ * `x: list[int] = []` → `list[int]`；`*args: int` → `int`。
+ * 无注解（`self` / `cls` / `page` / `*args` / `**kwargs`）→ 空类型：**不把参数名当类型**。
+ */
+function pythonParamTypeText(param: string): string {
+  const text = stripTopLevelDefaultValue(param).trim().replace(/^\*{1,2}\s*/, '')
+  let colon = -1
+  scanTopLevel(text, (i, ch) => {
+    if (colon < 0 && ch === ':') colon = i
+  })
+  if (colon < 0) return ''
+  return normalizeTypeText(text.slice(colon + 1))
+}
+
+/**
  * 取参数的类型段：TypeScript / JavaScript（含 Vue）保持冒号后类型；
- * C#（`.cs`）与 C++（`.cpp/.h/...`）按参数声明提取类型，参数名不会被当作类型。
+ * C#（`.cs`）、C++（`.cpp/.h/...`）与 Python（`.py`）按参数声明提取类型，参数名不会被当作类型。
  */
 function paramTypeText(param: string, language: ParamTypeLanguage): string {
   if (language === 'csharp') return csharpParamTypeText(param)
   if (language === 'cpp') return cppParamTypeText(param)
+  if (language === 'python') return pythonParamTypeText(param)
   const at = param.indexOf(':')
   return at >= 0 ? param.slice(at + 1) : param
 }
 
-/** 从类型文本提取完整类型 token（支持 `Foo.Bar` 与 C++ 的 `std::string`，不做子串匹配） */
+/** 与 `[` / `<` / `(` 匹配的闭合下标（跳过嵌套与字符串字面量）；未匹配返回 -1 */
+function matchTypeGroup(text: string, start: number): number {
+  const open = text[start]
+  const close = open === '<' ? '>' : open === '[' ? ']' : ')'
+  let depth = 0
+  let quote: string | null = null
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]
+    if (quote !== null) {
+      if (ch === '\\') i++
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === open) depth++
+    else if (ch === close) {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+  return -1
+}
+
+/**
+ * 从类型文本提取完整类型 token（支持 `Foo.Bar`、C++ 的 `std::string`、
+ * 以及带类型实参的 `Optional[str]` / `list[int]` / `Promise<Result>`，不做子串匹配）。
+ * 带实参的完整 token 与内部 token 都会产出（`list[int]` → `list[int]` / `list` / `int`），
+ * 与既有 C++ `std::vector<int>` 允许 `int` 的口径一致。
+ */
 function typeTokensOf(text: string): string[] {
   const out: string[] = []
-  const re = /[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\.|::)[A-Za-z_$][A-Za-z0-9_$]*)*/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text)) !== null) out.push(m[0])
+  const isStart = (ch: string | undefined): boolean => ch !== undefined && /[A-Za-z_$]/.test(ch)
+  const isPart = (ch: string | undefined): boolean => ch !== undefined && /[A-Za-z0-9_$]/.test(ch)
+  let i = 0
+  while (i < text.length) {
+    if (!isStart(text[i])) {
+      i++
+      continue
+    }
+    let j = i
+    while (j < text.length && isPart(text[j])) j++
+    // 限定名：Foo.Bar / std::string
+    for (;;) {
+      if (text[j] === '.' && isStart(text[j + 1])) {
+        j += 2
+        while (j < text.length && isPart(text[j])) j++
+        continue
+      }
+      if (text[j] === ':' && text[j + 1] === ':' && isStart(text[j + 2])) {
+        j += 3
+        while (j < text.length && isPart(text[j])) j++
+        continue
+      }
+      break
+    }
+    out.push(text.slice(i, j))
+    // 带类型实参：把平衡括号区间整体作为完整 token（内部 token 由后续扫描产出）
+    const next = text[j]
+    if (next === '[' || next === '<' || next === '(') {
+      const end = matchTypeGroup(text, j)
+      if (end > j) out.push(text.slice(i, end + 1))
+    }
+    i = j
+  }
   return out
 }
 

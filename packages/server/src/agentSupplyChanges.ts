@@ -892,7 +892,7 @@ export function buildChangesRulesSection(
   L.push('  - `range:` scope 暂不接受变更侧供给。')
   L.push('- **guarantees（SG3）**：支持，结构与洞察侧相同（`{ claims, review }`，键 = scopeId 且须同时出现在 `values` 中）。')
   L.push('  - Agent 自审最高 `declared`；系统按该 scope 的证据静态校验，变更侧不会升级为 `verified`。')
-  L.push('  - 语言范围与洞察侧一致：TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）+ C#（`.cs`）+ Vue SFC（`.vue`）+ C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`）。scope 内任一函数来自 `.py` / `.java` / `.go` 等未接入语言时，整条担保 `unverified`，原因「该语言尚未接入语义担保」；语义值本身仍照常合并。')
+  L.push('  - 语言范围与洞察侧一致：TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）+ C#（`.cs`）+ Vue SFC（`.vue`）+ C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`）+ Python（`.py`）。scope 内任一函数来自 `.java` / `.go` 等未接入语言时，整条担保 `unverified`，原因「该语言尚未接入语义担保」；语义值本身仍照常合并。')
   L.push('  - `guarantees` 的键可用 `workspace:latest`（与 `values` 的原始键一致）；claims 的 `subject` 推荐用规范 `workspace:<batchDate>`，服务端也接受 `workspace` / `workspace:latest` 别名。')
   L.push('  - 变更侧 scope 由供给值（`changeRoles` / `affectedChains`）声明，服务端**不反查 git diff 成员**；changeset 的「变更函数 / 受影响链路」仍以存储的变更记录为准，担保只证明 Agent 声明范围内的证据一致。')
   L.push('  - 证据只认 scope 内的 `functionId` / `chainId` / `stepId`（其 caller 在 scope）/ `fileId`；`moduleId` 不属于变更 scope，`symbol` / `line` / `detail` / `snippet` 只能作补充，不能单独作证。任一条证据出现 scope 外强锚点或 moduleId，整条 claim 判未证实。')

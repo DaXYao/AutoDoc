@@ -36,7 +36,7 @@ import {
  *   一律视为未证实；整次回复畸形则重试，耗尽后 unverified，不写缓存。
  *
  * 约束：
- * - 只处理已接入语义担保的语言（TypeScript / JavaScript / TSX / JSX、C#、Vue SFC、C++）；未接入语言、Agent 已供给对象跳过，不覆盖 source==='agent' 的担保。
+ * - 只处理已接入语义担保的语言（TypeScript / JavaScript / TSX / JSX、C#、Vue SFC、C++、Python）；未接入语言、Agent 已供给对象跳过，不覆盖 source==='agent' 的担保。
  * - 证据包只由当前图谱/洞察的结构化数据组成，不把其它生成式自由文本当证据，
  *   也不携带任何分类/核心判定值（分类值只出现在待复核对象文本中）。
  * - 复核结果写入 AiCache 全局键 `guarantee:<pass>:<sha256(...)>`；刷新时写入，读取路径只回放缓存。
@@ -2445,7 +2445,7 @@ export interface KeyGuaranteeStats {
 }
 
 /**
- * 在 KEY 语义全部套用之后，为已接入语义担保的语言（TS/JS/TSX/JSX、C#、Vue SFC、C++）对象生成/刷新语义担保。
+ * 在 KEY 语义全部套用之后，为已接入语义担保的语言（TS/JS/TSX/JSX、C#、Vue SFC、C++、Python）对象生成/刷新语义担保。
  * - 硬事实一律由服务端确定性生成；意图片段逐条调用第二遍 LLM（或命中缓存）；
  * - Agent 已供给对象跳过，不覆盖 source==='agent' 的担保；
  * - 单对象失败只写 unverified，绝不抛出（不阻塞刷新/保存快照）。

@@ -70,13 +70,13 @@ const GAMMA = 'src/util/c.ts::-::gamma@cccccccccccc'
 const EPSILON = 'src/util/e.ts::-::epsilon@eeeeeeeeeeee'
 const DELTA = 'py/foreign.py::-::delta@dddddddddddd'
 const MIX_TS = 'src/mix/mix.ts::-::mixTs@111111111111'
-const MIX_PY = 'src/mix/mix.py::-::mixPy@222222222222'
+const MIX_JAVA = 'src/mix/mix.java::-::mixJava@222222222222'
 const EXTERNAL_ID = 'node:fs::readFile'
 const CS_LIST = 'Services/UserService.cs::UserService::ListUsers@111111111111'
 const CS_FETCH = 'Services/UserService.cs::IRepository::Fetch@222222222222'
 const CS_NAME = 'Services/UserService.cs::UserService::ComputeName@333333333333'
 const CS_VALIDATE = 'Services/UserService.cs::UserService::TryValidate@444444444444'
-const CS_PY = 'scripts/foreign.py::-::foreign@555555555555'
+const CS_JAVA = 'scripts/foreign.java::-::foreign@555555555555'
 
 function mkBlock(fnId: string, startLine: number, endLine: number, codeText = 'run()'): CodeBlock {
   return {
@@ -163,7 +163,7 @@ function fixtureFiles(): FileDoc[] {
   const epsilon = mkFn(EPSILON, 'epsilon', { category: 'utility' })
   const delta = mkFn(DELTA, 'delta', { category: 'utility' })
   const mixTs = mkFn(MIX_TS, 'mixTs', { category: 'utility' })
-  const mixPy = mkFn(MIX_PY, 'mixPy', { category: 'utility' })
+  const mixJava = mkFn(MIX_JAVA, 'mixJava', { category: 'utility' })
   return [
     {
       fileId: 'src/a.ts',
@@ -190,10 +190,10 @@ function fixtureFiles(): FileDoc[] {
       functions: [mixTs]
     },
     {
-      fileId: 'src/mix/mix.py',
-      path: 'src/mix/mix.py',
-      language: 'python',
-      functions: [mixPy]
+      fileId: 'src/mix/mix.java',
+      path: 'src/mix/mix.java',
+      language: 'java',
+      functions: [mixJava]
     },
     {
       fileId: 'py/foreign.py',
@@ -274,12 +274,12 @@ function csharpFiles(): FileDoc[] {
   ]
 }
 
-function csharpPythonFile(): FileDoc {
+function csharpForeignFile(): FileDoc {
   return {
-    fileId: 'scripts/foreign.py',
-    path: 'scripts/foreign.py',
-    language: 'python',
-    functions: [mkFn(CS_PY, 'foreign', { category: 'utility' })]
+    fileId: 'scripts/foreign.java',
+    path: 'scripts/foreign.java',
+    language: 'java',
+    functions: [mkFn(CS_JAVA, 'foreign', { category: 'utility' })]
   }
 }
 
@@ -289,7 +289,7 @@ const CPP_RUN = 'src/main.cpp::demo::runWidget@111111111111'
 const CPP_RENDER = 'include/widget.hpp::demo::Widget::render@222222222222'
 const CPP_ADD = 'include/widget.hpp::demo::addValues@333333333333'
 const CPP_PARAM = 'include/widget.hpp::demo::paramMatrix@444444444444'
-const CPP_PY = 'scripts/foreign.py::-::foreign@555555555555'
+const CPP_JAVA = 'scripts/foreign.java::-::foreign@555555555555'
 
 /** C++ 夹具：命名空间内自由函数 + 类方法 + attribute/注释块/调用边（结构对齐真实解析输出） */
 function cppFiles(): FileDoc[] {
@@ -377,13 +377,146 @@ function cppFiles(): FileDoc[] {
   ]
 }
 
-function cppPythonFile(): FileDoc {
+function cppForeignFile(): FileDoc {
   return {
-    fileId: 'scripts/foreign.py',
-    path: 'scripts/foreign.py',
-    language: 'python',
-    functions: [mkFn(CPP_PY, 'foreign', { category: 'utility' })]
+    fileId: 'scripts/foreign.java',
+    path: 'scripts/foreign.java',
+    language: 'java',
+    functions: [mkFn(CPP_JAVA, 'foreign', { category: 'utility' })]
   }
+}
+
+/* ------------------------- Python 夹具 ------------------------- */
+
+const PY_LIST = 'app/service.py::UserService::list_users@111111111111'
+const PY_SAVE = 'app/service.py::UserService::save@222222222222'
+const PY_NORMALIZE = 'app/util.py::-::normalize@333333333333'
+const PY_PARAM = 'app/service.py::UserService::param_matrix@444444444444'
+const PY_MAKE = 'app/service.py::UserService::make@555555555555'
+const PY_PRIVATE = 'app/service.py::UserService::_internal@666666666666'
+
+/**
+ * Python 夹具：类方法 + 模块级函数 + 装饰器 + 类型注解/默认值/`*args`/`**kwargs`
+ * + 注释块 + 跨文件调用（结构对齐真实解析输出；默认值仅为覆盖 server 侧的容错）。
+ */
+function pyFiles(): FileDoc[] {
+  const listUsers = mkFn(PY_LIST, 'list_users', {
+    className: 'UserService',
+    kind: 'method',
+    signature: 'list_users(self, page: int = 1, *args, **kwargs): list[User]',
+    params: ['self', 'page: int = 1', '*args', '**kwargs'],
+    returnType: 'list[User]',
+    visibility: 'public',
+    decorators: ['app.route'],
+    exported: false,
+    category: 'business',
+    docComment: '分页列出用户。',
+    startLine: 18,
+    endLine: 26,
+    calls: [mkCall(PY_LIST, PY_SAVE, 'save', 22)],
+    codeBlocks: [
+      { ...mkBlock(PY_LIST, 20, 21, 'if page < 1: raise ValueError("page")'), commentText: '# 校验页码' }
+    ]
+  })
+  const save = mkFn(PY_SAVE, 'save', {
+    className: 'UserService',
+    kind: 'method',
+    signature: 'save(self, name: Optional[str], x: list[int] = []): None',
+    params: ['self', 'name: Optional[str]', 'x: list[int] = []'],
+    returnType: 'None',
+    visibility: 'public',
+    exported: false,
+    category: 'implementation',
+    startLine: 28,
+    endLine: 32,
+    calls: [mkCall(PY_SAVE, PY_NORMALIZE, 'normalize', 30)],
+    codeBlocks: [{ ...mkBlock(PY_SAVE, 29, 30, 'cleaned = normalize(name)'), commentText: '# 归一化名称' }]
+  })
+  const normalize = mkFn(PY_NORMALIZE, 'normalize', {
+    signature: 'normalize(name: str): str',
+    params: ['name: str'],
+    returnType: 'str',
+    visibility: 'public',
+    exported: true,
+    category: 'utility',
+    startLine: 1,
+    endLine: 3
+  })
+  const paramMatrix = mkFn(PY_PARAM, 'param_matrix', {
+    className: 'UserService',
+    kind: 'method',
+    signature: 'param_matrix(self, page: int = 1, name: Optional[str], x: list[int] = [], *args, **kwargs, count: int = 1): dict[str, int]',
+    params: [
+      'self',
+      'page: int = 1',
+      'name: Optional[str]',
+      'x: list[int] = []',
+      '*args',
+      '**kwargs',
+      'count: int = 1',
+      'raw',
+      'page_name'
+    ],
+    returnType: 'dict[str, int]',
+    visibility: 'public',
+    exported: false,
+    category: 'utility',
+    startLine: 34,
+    endLine: 40
+  })
+  const make = mkFn(PY_MAKE, 'make', {
+    className: 'UserService',
+    kind: 'method',
+    signature: 'make(): UserService',
+    params: [],
+    returnType: 'UserService',
+    visibility: 'public',
+    decorators: ['staticmethod'],
+    exported: false,
+    category: 'utility',
+    startLine: 42,
+    endLine: 44
+  })
+  const internal = mkFn(PY_PRIVATE, '_internal', {
+    className: 'UserService',
+    kind: 'method',
+    signature: '_internal(self): None',
+    params: ['self'],
+    returnType: 'None',
+    visibility: 'private',
+    exported: false,
+    category: 'utility',
+    startLine: 46,
+    endLine: 47
+  })
+  return [
+    {
+      fileId: 'app/service.py',
+      path: 'app/service.py',
+      language: 'python',
+      functions: [listUsers, save, paramMatrix, make, internal]
+    },
+    {
+      fileId: 'app/util.py',
+      path: 'app/util.py',
+      language: 'python',
+      functions: [normalize]
+    }
+  ]
+}
+
+const PY_GRAPH = buildGraph(pyFiles())
+const PY_MOD = PY_GRAPH.modules.find((m) => m.name === 'app')!.id
+const PY_CHAIN = PY_GRAPH.chains.find((c) => c.entryId === PY_LIST)!.id
+const PY_INSIGHT = baseInsightOf(PY_GRAPH)
+PY_INSIGHT.functions[PY_LIST] = {
+  ...PY_INSIGHT.functions[PY_LIST],
+  isCore: true,
+  coreSource: 'ai',
+  coreReason: '用户列表入口',
+  aiCategory: 'business',
+  aiCategoryReason: '对外业务接口',
+  systemRole: '用户列表服务入口'
 }
 
 /* ------------------------- 真实 C# 夹具解析 ------------------------- */
@@ -483,12 +616,12 @@ async function realCSharpFixture(): Promise<RealCSharpFixture> {
 }
 
 const CSHARP_GRAPH = buildGraph(csharpFiles())
-const CSHARP_MIXED_GRAPH = buildGraph([...csharpFiles(), csharpPythonFile()])
+const CSHARP_MIXED_GRAPH = buildGraph([...csharpFiles(), csharpForeignFile()])
 const CS_MOD = CSHARP_GRAPH.modules.find((m) => m.name === 'Services')!.id
 const CS_CHAIN = CSHARP_GRAPH.chains.find((c) => c.entryId === CS_LIST)!.id
 
 const CPP_GRAPH = buildGraph(cppFiles())
-const CPP_MIXED_GRAPH = buildGraph([...cppFiles(), cppPythonFile()])
+const CPP_MIXED_GRAPH = buildGraph([...cppFiles(), cppForeignFile()])
 const CPP_MOD = CPP_GRAPH.modules.find((m) => m.name === 'include')!.id
 const CPP_CHAIN = CPP_GRAPH.chains.find((c) => c.entryId === CPP_RUN)!.id
 
@@ -619,7 +752,7 @@ function validate(
 /* ------------------------- 基础语言判定 ------------------------- */
 
 describe('语言判定', () => {
-  it('按扩展名识别已接入语言（TS/JS/TSX、C#、Vue SFC、C++）与未接入语言', () => {
+  it('按扩展名识别已接入语言（TS/JS/TSX、C#、Vue SFC、C++、Python）与未接入语言', () => {
     for (const f of [
       'a.ts',
       'a.tsx',
@@ -637,18 +770,20 @@ describe('语言判定', () => {
       'include/widget.hpp',
       'include/widget.hh',
       'include/widget.hxx',
-      'include/widget.inl'
+      'include/widget.inl',
+      'app/service.py',
+      'app/pkg/__init__.py'
     ]) {
       expect(isGuaranteeLanguageFile(f), f).toBe(true)
     }
-    for (const f of ['a.py', 'a.java', 'a.go', 'README']) {
+    for (const f of ['a.java', 'a.go', 'a.pyi', 'README']) {
       expect(isGuaranteeLanguageFile(f), f).toBe(false)
     }
   })
 
   it('未接入语言对象 → unverified，原因「该语言尚未接入语义担保」', () => {
-    const res = validate('coreRoles', DELTA, [
-      claim('intent', DELTA, [{ detail: '对照用途。' }], { text: '这是外部脚本。' })
+    const res = validate('coreRoles', MIX_JAVA, [
+      claim('intent', MIX_JAVA, [{ detail: '对照用途。' }], { text: '这是外部脚本。' })
     ])
     expect(res.status).toBe('unverified')
     expect(res.reason).toContain('该语言尚未接入语义担保')
@@ -901,8 +1036,8 @@ describe('变更侧担保（SG3：scope 证据）', () => {
       INSIGHT,
       GRAPH,
       'commit:abc',
-      changesValue({ functions: [DELTA] }),
-      guaranteeOf([claim('intent', 'commit:abc', [{ functionId: DELTA }], { text: 'Python 函数。' })])
+      changesValue({ functions: [MIX_JAVA] }),
+      guaranteeOf([claim('intent', 'commit:abc', [{ functionId: MIX_JAVA }], { text: 'Java 函数。' })])
     )
     expect(res.status).toBe('unverified')
     expect(res.reason).toContain('尚未接入')
@@ -1014,7 +1149,7 @@ describe('claim / evidence 形状与锚点', () => {
 
   it('subject 引用未接入语言的函数 → unverified（即使 pass 对象是 TS）', () => {
     const res = validate('coreRoles', ALPHA, [
-      claim('intent', DELTA, [{ functionId: DELTA }], { text: '外部脚本入口。' })
+      claim('intent', MIX_JAVA, [{ functionId: MIX_JAVA }], { text: '外部脚本入口。' })
     ])
     expect(res.status).toBe('unverified')
     expect(res.claims[0].status).toBe('unverified')
@@ -1525,7 +1660,7 @@ describe('C# 硬事实静态校验', () => {
     expect(role.status).toBe('declared')
   })
 
-  it('partition / flows：全 C# 项目可 declared；含 .py 时 unverified 且原因含「尚未接入」', () => {
+  it('partition / flows：全 C# 项目可 declared；含 .java 时 unverified 且原因含「尚未接入」', () => {
     const partition = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'partition', 'root', [
       claim('intent', 'root', [{ moduleId: CS_MOD }], { text: 'C# 项目划分。' })
     ])
@@ -1549,7 +1684,7 @@ describe('C# 硬事实静态校验', () => {
     expect(mixedFlows.reason).toContain('尚未接入')
   })
 
-  it('changes scope 含 C# 函数可 declared；含 .py 函数时 unverified', () => {
+  it('changes scope 含 C# 函数可 declared；含 .java 函数时 unverified', () => {
     const csValue: AgentSupplyChangesValue = {
       narrative: { what: '调整 C# 用户列表。', why: '测试。', risks: [] },
       changeRoles: { [CS_LIST]: '本次变更的 C# 入口。' }
@@ -1563,19 +1698,19 @@ describe('C# 硬事实静态校验', () => {
     )
     expect(cs.status).toBe('declared')
 
-    const pyValue: AgentSupplyChangesValue = {
-      narrative: { what: '调整 Python 脚本。', why: '测试。', risks: [] },
-      changeRoles: { [CS_PY]: '本次变更的 Python 函数。' }
+    const javaValue: AgentSupplyChangesValue = {
+      narrative: { what: '调整 Java 脚本。', why: '测试。', risks: [] },
+      changeRoles: { [CS_JAVA]: '本次变更的 Java 函数。' }
     }
-    const py = validateChangesGuarantee(
+    const java = validateChangesGuarantee(
       CSHARP_MIXED_INSIGHT,
       CSHARP_MIXED_GRAPH,
-      'commit:py',
-      pyValue,
-      guaranteeOf([claim('intent', 'commit:py', [{ functionId: CS_PY }], { text: 'Python 变更意图。' })])
+      'commit:java',
+      javaValue,
+      guaranteeOf([claim('intent', 'commit:java', [{ functionId: CS_JAVA }], { text: 'Java 变更意图。' })])
     )
-    expect(py.status).toBe('unverified')
-    expect(py.reason).toContain('尚未接入')
+    expect(java.status).toBe('unverified')
+    expect(java.reason).toContain('尚未接入')
   })
 })
 
@@ -1743,7 +1878,7 @@ describe('C++ 硬事实静态校验', () => {
     expect(role.status).toBe('declared')
   })
 
-  it('partition / flows：全 C++ 与 TS+C++ 可 declared；含 .py 时 unverified', () => {
+  it('partition / flows：全 C++ 与 TS+C++ 可 declared；含 .java 时 unverified', () => {
     const partition = validateOn(CPP_INSIGHT, CPP_GRAPH, 'partition', 'root', [
       claim('intent', 'root', [{ moduleId: CPP_MOD }], { text: 'C++ 项目划分。' })
     ])
@@ -1786,7 +1921,7 @@ describe('C++ 硬事实静态校验', () => {
     expect(mixedFlows.reason).toContain('尚未接入')
   })
 
-  it('changes scope 含 C++ 函数可 declared；含 .py 函数时 unverified', () => {
+  it('changes scope 含 C++ 函数可 declared；含 .java 函数时 unverified', () => {
     const cppValue: AgentSupplyChangesValue = {
       narrative: { what: '调整 C++ 示例入口。', why: '测试。', risks: [] },
       changeRoles: { [CPP_RUN]: '本次变更的 C++ 入口。' }
@@ -1800,19 +1935,233 @@ describe('C++ 硬事实静态校验', () => {
     )
     expect(cpp.status).toBe('declared')
 
-    const pyValue: AgentSupplyChangesValue = {
-      narrative: { what: '调整 Python 脚本。', why: '测试。', risks: [] },
-      changeRoles: { [CPP_PY]: '本次变更的 Python 函数。' }
+    const javaValue: AgentSupplyChangesValue = {
+      narrative: { what: '调整 Java 脚本。', why: '测试。', risks: [] },
+      changeRoles: { [CPP_JAVA]: '本次变更的 Java 函数。' }
     }
-    const py = validateChangesGuarantee(
+    const java = validateChangesGuarantee(
       CPP_MIXED_INSIGHT,
       CPP_MIXED_GRAPH,
-      'commit:py',
-      pyValue,
-      guaranteeOf([claim('intent', 'commit:py', [{ functionId: CPP_PY }], { text: 'Python 变更意图。' })])
+      'commit:java',
+      javaValue,
+      guaranteeOf([claim('intent', 'commit:java', [{ functionId: CPP_JAVA }], { text: 'Java 变更意图。' })])
     )
-    expect(py.status).toBe('unverified')
-    expect(py.reason).toContain('尚未接入')
+    expect(java.status).toBe('unverified')
+    expect(java.reason).toContain('尚未接入')
+  })
+})
+
+/* ------------------------- Python 硬事实静态校验 ------------------------- */
+
+describe('Python 硬事实静态校验', () => {
+  it('categories / coreJudgment / coreRoles 的 Python 对象可 declared', () => {
+    const category = validateOn(PY_INSIGHT, PY_GRAPH, 'categories', PY_LIST, [
+      claim('category', PY_LIST, [{ functionId: PY_LIST }], { object: 'business', text: 'Python 业务接口。' })
+    ])
+    expect(category.status).toBe('declared')
+    expect(category.claims[0].status).toBe('declared')
+
+    const core = validateOn(PY_INSIGHT, PY_GRAPH, 'coreJudgment', PY_LIST, [
+      claim('core', PY_LIST, [{ functionId: PY_LIST }], { object: 'true', text: 'Python 核心入口。' })
+    ])
+    expect(core.status).toBe('declared')
+
+    const role = validateOn(PY_INSIGHT, PY_GRAPH, 'coreRoles', PY_LIST, [
+      claim('role', PY_LIST, [{ functionId: PY_LIST }, { chainId: PY_CHAIN }], {
+        object: PY_CHAIN,
+        text: 'Python 链路入口。'
+      })
+    ])
+    expect(role.status).toBe('declared')
+  })
+
+  it('Python 类型/可见性/装饰器/调用边/注释块证据可 declared', () => {
+    const list = PY_GRAPH.nodes.get(PY_LIST)!
+    const save = PY_GRAPH.nodes.get(PY_SAVE)!
+    expect(list.kind).toBe('method')
+    expect(list.className).toBe('UserService')
+    expect(list.decorators).toEqual(['app.route'])
+    expect(save.codeBlocks).toHaveLength(1)
+
+    const type = validateOn(PY_INSIGHT, PY_GRAPH, 'coreRoles', PY_NORMALIZE, [
+      claim('type', PY_NORMALIZE, [{ functionId: PY_NORMALIZE }], { object: 'str', text: 'Python 返回注解。' })
+    ])
+    expect(type.status).toBe('declared')
+
+    const visibility = validateOn(PY_INSIGHT, PY_GRAPH, 'coreRoles', PY_PRIVATE, [
+      claim('visibility', PY_PRIVATE, [{ functionId: PY_PRIVATE }], { object: 'private' })
+    ])
+    expect(visibility.status).toBe('declared')
+    const publicVisibility = validateOn(PY_INSIGHT, PY_GRAPH, 'coreRoles', PY_NORMALIZE, [
+      claim('visibility', PY_NORMALIZE, [{ functionId: PY_NORMALIZE }], { object: 'public' })
+    ])
+    expect(publicVisibility.status).toBe('declared')
+
+    for (const object of ['@app.route("/users/<int:page>")', 'app.route', '@staticmethod', 'staticmethod']) {
+      const target = object.includes('staticmethod') ? PY_MAKE : PY_LIST
+      const decorator = validateOn(PY_INSIGHT, PY_GRAPH, 'coreRoles', target, [
+        claim('decorator', target, [{ functionId: target }], { object })
+      ])
+      expect(decorator.claims[0].staticStatus, `应命中：${object}`).toBe('pass')
+      expect(decorator.status, `应命中：${object}`).toBe('declared')
+    }
+    const missing = validateOn(PY_INSIGHT, PY_GRAPH, 'coreRoles', PY_SAVE, [
+      claim('decorator', PY_SAVE, [{ functionId: PY_SAVE }], { object: '@staticmethod' })
+    ])
+    expect(missing.claims[0].staticStatus).toBe('fail')
+
+    const call = validateOn(PY_INSIGHT, PY_GRAPH, 'coreRoles', PY_LIST, [
+      claim('call', PY_LIST, [{ stepId: `${PY_LIST}>save` }], {
+        object: PY_SAVE,
+        text: 'Python 内部方法调用。'
+      })
+    ])
+    expect(call.status).toBe('declared')
+
+    const block = validateOn(PY_INSIGHT, PY_GRAPH, 'blocks', PY_SAVE, [
+      claim('block', PY_SAVE, [{ functionId: PY_SAVE, line: save.codeBlocks[0].startLine, snippet: 'normalize' }], {
+        object: '0'
+      })
+    ])
+    expect(block.status).toBe('declared')
+
+    // import 静态校验仍未接入：允许提交，但只能停在未证实
+    const importClaim = validateOn(PY_INSIGHT, PY_GRAPH, 'coreRoles', PY_LIST, [
+      claim('import', PY_LIST, [{ functionId: PY_LIST }], { object: 'app.util', text: '依赖 app.util。' })
+    ])
+    expect(importClaim.status).toBe('unverified')
+    expect(importClaim.claims[0].status).toBe('unverified')
+    expect(importClaim.claims[0].reason).toBe('语义担保暂不支持 import 静态校验')
+  })
+
+  it('Python 参数类型：int/str/Optional[str]/list[int]/dict[str, int] 通过；参数名/默认值/完整声明失败', () => {
+    const run = (object: string) =>
+      validateOn(PY_INSIGHT, PY_GRAPH, 'coreRoles', PY_PARAM, [
+        claim('type', PY_PARAM, [{ functionId: PY_PARAM }], { object })
+      ])
+
+    for (const object of ['int', 'str', 'Optional[str]', 'list[int]', 'dict[str, int]']) {
+      const result = run(object)
+      expect(result.claims[0].staticStatus, `应通过：${object}`).toBe('pass')
+      expect(result.status, `应通过：${object}`).toBe('declared')
+    }
+    for (const object of [
+      'page',
+      'page_name',
+      'raw',
+      'self',
+      'args',
+      'kwargs',
+      'int = 1',
+      'page: int = 1',
+      'count: int = 1',
+      'x: list[int] = []',
+      'page: int',
+      'self, page: int'
+    ]) {
+      const result = run(object)
+      expect(result.claims[0].staticStatus, `应失败：${object}`).toBe('fail')
+      expect(result.status, `应失败：${object}`).toBe('unverified')
+    }
+  })
+
+  it('包含 Python 函数的链路：narratives / order / role 可 declared', () => {
+    expect(PY_GRAPH.chains.find((c) => c.id === PY_CHAIN)?.path).toEqual([
+      PY_LIST,
+      PY_SAVE,
+      PY_NORMALIZE
+    ])
+    const narrative = validateOn(PY_INSIGHT, PY_GRAPH, 'narratives', PY_CHAIN, [
+      claim('intent', PY_CHAIN, [{ chainId: PY_CHAIN, functionId: PY_LIST }], {
+        text: 'Python 用户列表链路。'
+      })
+    ])
+    expect(narrative.status).toBe('declared')
+
+    const order = validateOn(PY_INSIGHT, PY_GRAPH, 'narratives', PY_CHAIN, [
+      claim('order', PY_CHAIN, [{ chainId: PY_CHAIN }], {
+        object: `${PY_LIST}->${PY_SAVE}`,
+        text: 'Python 调用顺序。'
+      })
+    ])
+    expect(order.status).toBe('declared')
+
+    const role = validateOn(PY_INSIGHT, PY_GRAPH, 'coreRoles', PY_SAVE, [
+      claim('role', PY_SAVE, [{ functionId: PY_SAVE }, { chainId: PY_CHAIN }], {
+        object: PY_CHAIN
+      })
+    ])
+    expect(role.status).toBe('declared')
+  })
+
+  it('partition / flows：全 Python 与 TS+Python 可 declared；含 .java 时 unverified', () => {
+    const partition = validateOn(PY_INSIGHT, PY_GRAPH, 'partition', 'root', [
+      claim('intent', 'root', [{ moduleId: PY_MOD }], { text: 'Python 项目划分。' })
+    ])
+    expect(partition.status).toBe('declared')
+    const flows = validateOn(PY_INSIGHT, PY_GRAPH, 'flows', 'root', [
+      claim('intent', 'root', [{ chainId: PY_CHAIN }], { text: 'Python 项目脉络。' })
+    ])
+    expect(flows.status).toBe('declared')
+
+    // TS + Python 混合项目：两种语言都已接入，项目级对象可 declared
+    const mixedTs = buildGraph([
+      ...fixtureFiles().filter((f) => isGuaranteeLanguageFile(f.fileId)),
+      ...pyFiles()
+    ])
+    const mixedTsInsight = baseInsightOf(mixedTs)
+    const pyMod = mixedTs.modules.find((m) => m.functionIds.includes(PY_SAVE))!
+    expect(pyMod).toBeTruthy()
+    const tsPyPartition = validateOn(mixedTsInsight, mixedTs, 'partition', 'root', [
+      claim('containment', pyMod.id, [{ moduleId: pyMod.id }], {
+        object: PY_SAVE,
+        text: 'TS+Python 项目划分。'
+      })
+    ])
+    expect(tsPyPartition.status).toBe('declared')
+    const tsPyFlows = validateOn(mixedTsInsight, mixedTs, 'flows', 'root', [
+      claim('intent', pyMod.id, [{ moduleId: pyMod.id }], { text: 'TS+Python 项目脉络。' })
+    ])
+    expect(tsPyFlows.status).toBe('declared')
+
+    const withJava = buildGraph([...pyFiles(), csharpForeignFile()])
+    const withJavaInsight = baseInsightOf(withJava)
+    const blocked = validateOn(withJavaInsight, withJava, 'partition', 'root', [
+      claim('intent', 'root', [{ moduleId: withJava.modules[0].id }], { text: '混合项目划分。' })
+    ])
+    expect(blocked.status).toBe('unverified')
+    expect(blocked.reason).toContain('项目级混合对象')
+    expect(blocked.reason).toContain('尚未接入')
+  })
+
+  it('changes scope 含 Python 函数可 declared；含 .java 仍 unverified', () => {
+    const value: AgentSupplyChangesValue = {
+      narrative: { what: '调整 Python 用户列表。', why: '测试。', risks: [] },
+      changeRoles: { [PY_LIST]: '本次变更的 Python 方法。' }
+    }
+    const py = validateChangesGuarantee(
+      PY_INSIGHT,
+      PY_GRAPH,
+      'commit:py',
+      value,
+      guaranteeOf([claim('intent', PY_LIST, [{ functionId: PY_LIST }], { text: 'Python 变更意图。' })])
+    )
+    expect(py.status).toBe('declared')
+
+    const javaValue: AgentSupplyChangesValue = {
+      narrative: { what: '调整 Java 脚本。', why: '测试。', risks: [] },
+      changeRoles: { [CPP_JAVA]: '本次变更的 Java 函数。' }
+    }
+    const mixed = buildGraph([...pyFiles(), csharpForeignFile()])
+    const java = validateChangesGuarantee(
+      baseInsightOf(mixed),
+      mixed,
+      'commit:java',
+      javaValue,
+      guaranteeOf([claim('intent', 'commit:java', [{ functionId: CPP_JAVA }], { text: 'Java 变更意图。' })])
+    )
+    expect(java.status).toBe('unverified')
+    expect(java.reason).toContain('尚未接入')
   })
 })
 
@@ -2189,6 +2538,232 @@ describe('真实 C++ 项目解析 → 建图 → 担保集成', () => {
   })
 })
 
+/* ------------------------- 真实 Python 项目（解析 → 建图 → 担保） ------------------------- */
+
+const PY_MAIN_SOURCE = `from app.service import UserService, fetch_users
+
+def run_app(page: int = 1) -> list[str]:
+    """入口：运行用户列表。"""
+    # 创建服务
+    service = UserService()
+    # 拉取用户
+    rows = fetch_users(page)
+    return rows
+`
+
+const PY_SERVICE_SOURCE = `from app.util import normalize
+from requests import get
+
+class UserService:
+    def __init__(self, base_url: str = ""):
+        self.base_url = base_url
+
+    @app.route("/users/<int:page>")
+    def list_users(self, page: int = 1, *args, **kwargs) -> list[str]:
+        """分页列出用户。"""
+        # 校验页码
+        if page < 1:
+            raise ValueError("page")
+        # 拉取用户
+        rows = fetch_users(page)
+        return [normalize(row) for row in rows]
+
+    @staticmethod
+    def make() -> "UserService":
+        return UserService()
+
+def fetch_users(page: int) -> list[str]:
+    # 请求远端
+    response = get("/users/%d" % page)
+    return response.json()
+`
+
+const PY_UTIL_SOURCE = `def normalize(name: str) -> str:
+    """去掉首尾空白。"""
+    # 归一化名称
+    cleaned = name.strip()
+    return cleaned
+`
+
+interface RealPythonFixture {
+  graph: ProjectGraph
+  insight: ProjectInsight
+  files: FileDoc[]
+}
+
+let realPythonCache: RealPythonFixture | null = null
+
+/** 真实 Python 项目：真 parser + 真 generate 管线（import 跨文件解析）+ buildGraph */
+async function realPythonFixture(): Promise<RealPythonFixture> {
+  if (realPythonCache) return realPythonCache
+  const root = freshDir('autodoc-sg1-python-')
+  mkdirSync(join(root, 'app'), { recursive: true })
+  writeFileSync(
+    join(root, 'autodoc.config.json'),
+    JSON.stringify(
+      {
+        include: ['**/*.py'],
+        classification: { fallback: 'implementation' },
+        storage: { type: 'json', path: '.autodoc/autodoc.json' }
+      },
+      null,
+      2
+    )
+  )
+  writeFileSync(join(root, 'app/main.py'), PY_MAIN_SOURCE)
+  writeFileSync(join(root, 'app/service.py'), PY_SERVICE_SOURCE)
+  writeFileSync(join(root, 'app/util.py'), PY_UTIL_SOURCE)
+
+  const normalized = await loadConfig(root)
+  const storage = createStorage(normalized.config.storage, root)
+  let files: FileDoc[]
+  try {
+    files = (await generateDocs({ rootDir: root, normalized, storage })).files
+  } finally {
+    storage.close()
+  }
+  const graph = buildGraph(files)
+  const insight = baseInsightOf(graph)
+  const runApp = files
+    .find((f) => f.fileId === 'app/main.py')!
+    .functions.find((fn) => fn.name === 'run_app')!
+  insight.functions[runApp.id] = {
+    ...insight.functions[runApp.id],
+    aiCategory: 'business',
+    aiCategoryReason: '用户列表入口',
+    isCore: true,
+    coreSource: 'ai',
+    coreReason: '用户列表入口',
+    systemRole: '用户列表入口'
+  }
+  realPythonCache = { graph, insight, files }
+  return realPythonCache
+}
+
+describe('真实 Python 项目解析 → 建图 → 担保集成', () => {
+  function fnOf(files: FileDoc[], fileId: string, name: string, className?: string): FunctionDoc {
+    const file = files.find((candidate) => candidate.fileId === fileId)
+    expect(file, `缺少文件 ${fileId}`).toBeTruthy()
+    const fn = file!.functions.find(
+      (candidate) => candidate.name === name && (className === undefined || candidate.className === className)
+    )
+    expect(fn, `缺少函数 ${fileId}::${name}`).toBeTruthy()
+    return fn!
+  }
+
+  it('3 个 Python 文件全部解析；装饰器/类型注解/docstring/注释块与源码一致', async () => {
+    const { files } = await realPythonFixture()
+    expect(files.map((f) => f.fileId).sort()).toEqual([
+      'app/main.py',
+      'app/service.py',
+      'app/util.py'
+    ])
+
+    const runApp = fnOf(files, 'app/main.py', 'run_app')
+    expect(runApp.params).toEqual(['page: int'])
+    expect(runApp.returnType).toBe('list[str]')
+    expect(runApp.visibility).toBe('public')
+    expect(runApp.calls.map((c) => c.calleeName)).toEqual(
+      expect.arrayContaining(['UserService', 'fetch_users'])
+    )
+
+    const listUsers = fnOf(files, 'app/service.py', 'list_users', 'UserService')
+    expect(listUsers.kind).toBe('method')
+    expect(listUsers.decorators).toEqual(['app.route'])
+    expect(listUsers.params).toEqual(['self', 'page: int', '*args', '**kwargs'])
+    expect(listUsers.returnType).toBe('list[str]')
+    expect(listUsers.docComment).toBe('分页列出用户。')
+    expect(listUsers.codeBlocks[0].commentText).toContain('校验页码')
+    expect(listUsers.codeBlocks[0].codeText).toContain('raise ValueError')
+
+    const make = fnOf(files, 'app/service.py', 'make', 'UserService')
+    expect(make.decorators).toEqual(['staticmethod'])
+
+    const normalize = fnOf(files, 'app/util.py', 'normalize')
+    expect(normalize.params).toEqual(['name: str'])
+    expect(normalize.returnType).toBe('str')
+    expect(normalize.codeBlocks[0].commentText).toContain('归一化名称')
+  })
+
+  it('import 解析出跨文件调用边；requests.get 记录 externalModule', async () => {
+    const { files } = await realPythonFixture()
+    const runApp = fnOf(files, 'app/main.py', 'run_app')
+    const listUsers = fnOf(files, 'app/service.py', 'list_users', 'UserService')
+    const fetchUsers = fnOf(files, 'app/service.py', 'fetch_users')
+    const normalize = fnOf(files, 'app/util.py', 'normalize')
+
+    const fetchEdge = runApp.calls.find((edge) => edge.calleeName === 'fetch_users')!
+    expect(fetchEdge.calleeId).toBe(fetchUsers.id)
+    const normalizeEdge = listUsers.calls.find((edge) => edge.calleeName === 'normalize')!
+    expect(normalizeEdge.calleeId).toBe(normalize.id)
+
+    const getEdge = fetchUsers.calls.find((edge) => edge.calleeName === 'get')!
+    expect(getEdge.calleeId).toBeNull()
+    expect(getEdge.calleeCategory).toBe('external')
+    expect(getEdge.externalModule).toBe('requests')
+  })
+
+  it('真实解析结果可支撑 category/type/decorator/call/block/visibility 的 declared', async () => {
+    const { graph, insight, files } = await realPythonFixture()
+    const runApp = fnOf(files, 'app/main.py', 'run_app')
+    const listUsers = fnOf(files, 'app/service.py', 'list_users', 'UserService')
+    const fetchUsers = fnOf(files, 'app/service.py', 'fetch_users')
+
+    const category = validateOn(insight, graph, 'categories', runApp.id, [
+      claim('category', runApp.id, [{ functionId: runApp.id }], { object: 'business', text: 'Python 入口。' })
+    ])
+    expect(category.status).toBe('declared')
+
+    const type = validateOn(insight, graph, 'coreRoles', runApp.id, [
+      claim('type', runApp.id, [{ functionId: runApp.id }], { object: 'int' })
+    ])
+    expect(type.status).toBe('declared')
+    const genericType = validateOn(insight, graph, 'coreRoles', runApp.id, [
+      claim('type', runApp.id, [{ functionId: runApp.id }], { object: 'list[str]' })
+    ])
+    expect(genericType.status).toBe('declared')
+    const nameAsType = validateOn(insight, graph, 'coreRoles', runApp.id, [
+      claim('type', runApp.id, [{ functionId: runApp.id }], { object: 'page' })
+    ])
+    expect(nameAsType.claims[0].staticStatus).toBe('fail')
+
+    for (const object of ['@app.route("/users/<int:page>")', 'app.route']) {
+      const decorator = validateOn(insight, graph, 'coreRoles', listUsers.id, [
+        claim('decorator', listUsers.id, [{ functionId: listUsers.id }], { object })
+      ])
+      expect(decorator.claims[0].staticStatus, `应命中：${object}`).toBe('pass')
+      expect(decorator.status, `应命中：${object}`).toBe('declared')
+    }
+
+    const fetchEdge = runApp.calls.find((edge) => edge.calleeName === 'fetch_users')!
+    const call = validateOn(insight, graph, 'coreRoles', runApp.id, [
+      claim('call', runApp.id, [{ stepId: fetchEdge.stepId }], { object: fetchUsers.id })
+    ])
+    expect(call.status).toBe('declared')
+
+    const block = validateOn(insight, graph, 'blocks', listUsers.id, [
+      claim(
+        'block',
+        listUsers.id,
+        [{ functionId: listUsers.id, line: listUsers.codeBlocks[0].startLine, snippet: '校验页码' }],
+        { object: '0' }
+      )
+    ])
+    expect(block.status).toBe('declared')
+
+    const visibility = validateOn(insight, graph, 'coreRoles', listUsers.id, [
+      claim('visibility', listUsers.id, [{ functionId: listUsers.id }], { object: 'public' })
+    ])
+    expect(visibility.status).toBe('declared')
+
+    const importClaim = validateOn(insight, graph, 'coreRoles', runApp.id, [
+      claim('import', runApp.id, [{ functionId: runApp.id }], { object: 'app.service' })
+    ])
+    expect(importClaim.status).toBe('unverified')
+    expect(importClaim.claims[0].reason).toBe('语义担保暂不支持 import 静态校验')
+  })
+})
+
 /* ------------------------- 真实 Vue SFC 解析 ------------------------- */
 
 const VUE_SETUP_FILE = 'packages/web/src/components/SampleCard.vue'
@@ -2386,7 +2961,7 @@ describe('Vue SFC 担保', () => {
     expect(res.claims[0].staticStatus).toBe('not-applicable')
   })
 
-  it('混合 TS + Vue 项目：partition / flows 可 declared；加入 .py 仍 unverified', async () => {
+  it('混合 TS + Vue + Python 项目：partition / flows 可 declared；加入 .java 仍 unverified', async () => {
     const vue = await realVueFixture()
     const tsFiles = fixtureFiles().filter((f) => isGuaranteeLanguageFile(f.fileId))
     const mixed = buildGraph([...tsFiles, ...vue.files])
@@ -2407,14 +2982,14 @@ describe('Vue SFC 担保', () => {
     ])
     expect(flows.status).toBe('declared')
 
-    const withPython = buildGraph([...tsFiles, ...vue.files, csharpPythonFile()])
-    const withPythonInsight = baseInsightOf(withPython)
-    const pythonMod = withPython.modules.find((m) =>
+    const withJava = buildGraph([...tsFiles, ...vue.files, csharpForeignFile()])
+    const withJavaInsight = baseInsightOf(withJava)
+    const vueMod = withJava.modules.find((m) =>
       m.functionIds.some((id) => id.startsWith(VUE_SETUP_FILE))
     )!
-    const blocked = validateOn(withPythonInsight, withPython, 'partition', 'root', [
-      claim('containment', pythonMod.id, [{ moduleId: pythonMod.id }], {
-        object: pythonMod.functionIds.find((id) => id.startsWith(VUE_SETUP_FILE))!,
+    const blocked = validateOn(withJavaInsight, withJava, 'partition', 'root', [
+      claim('containment', vueMod.id, [{ moduleId: vueMod.id }], {
+        object: vueMod.functionIds.find((id) => id.startsWith(VUE_SETUP_FILE))!,
         text: '划分模块包含 Vue 函数。'
       })
     ])
@@ -2996,7 +3571,11 @@ describe('供给契约包含 guarantees 说明与示例', () => {
     expect(rulesText).toContain('C#（`.cs`）')
     expect(rulesText).toContain('C# 证据口径')
     expect(rulesText).toContain('C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`）')
+    expect(rulesText).toContain('Python（`.py`）')
     expect(rulesText).toContain('C++ 证据口径')
+    expect(rulesText).toContain('Python 证据口径')
+    expect(rulesText).toContain('`name: Optional[str]` → `Optional[str]`')
+    expect(rulesText).toContain('无注解参数没有类型文本')
     expect(rulesText).toContain('`char *name` / `char* name` → `char*`')
     expect(rulesText).toContain('`external` claim 与 KEY externals pass 对 C++ 实际不可生成')
     expect(rulesText).toContain('不接受参数名')

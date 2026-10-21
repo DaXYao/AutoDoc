@@ -556,7 +556,7 @@ export interface ProjectInsight {
    * 语义担保映射：key = `${pass}:${objectId}`（如 `narratives:chain:0`、`categories:<functionId>`）。
    * Agent 供给由合并/实时 overlay 按**当前 winners** 重建（旧 Agent 担保先删除再写入，
    * 被当前 winner 覆盖的 key/API 旧担保也会删除；partition / flows 变化时整份清空重建）；
-   * KEY 模式由 refreshInsightAI 末尾为已接入语言（TS/JS 家族 + C# + Vue SFC + C++）对象写入 source='api' 的静态/复核结果。
+   * KEY 模式由 refreshInsightAI 末尾为已接入语言（TS/JS 家族 + C# + Vue SFC + C++ + Python）对象写入 source='api' 的静态/复核结果。
    * 随洞察与快照持久化；缺省 = 全部未证实（旧数据/旧快照）。
    */
   semanticGuarantees?: Record<string, SemanticGuarantee>
@@ -1152,7 +1152,7 @@ export interface AgentSupplyFile<P extends AgentSupplyPass = AgentSupplyPass> {
   values: Record<string, AgentSupplyValueShapes[P]>
   /**
    * 可选：对象 id → 语义担保输入（claims + 自审）。key 必须同时出现在 `values` 中；
-   * 缺省 = 该条目未证实（不报错、不阻塞合并）。SG1 仅已接入语言（TypeScript/JavaScript 家族 + C# + Vue SFC + C++）参与静态校验；
+   * 缺省 = 该条目未证实（不报错、不阻塞合并）。SG1 仅已接入语言（TypeScript/JavaScript 家族 + C# + Vue SFC + C++ + Python）参与静态校验；
    * guarantee 体积计入单条目（值 + guarantee）与单文件上限。
    * 变更侧 `changes.<agent>.json` 同样支持：键 = scopeId，Agent 自审最高 `declared`，
    * 系统按该 scope 的证据静态校验（证据须来自 affectedChains 的 path 函数/链路或 changeRoles 的函数）。
