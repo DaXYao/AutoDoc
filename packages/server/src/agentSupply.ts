@@ -2562,8 +2562,8 @@ function buildRulesText(
   L.push(
     '- **语言范围（本轮）**：TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）' +
       '+ C#（`.cs`）+ Vue SFC（`.vue`）+ C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`）' +
-      '+ Python（`.py`）。' +
-      '`.java` / `.go` 等其它语言、以及包含未接入语言文件的项目级对象（partition / flows / 混合模块 / 混合链路）' +
+      '+ Python（`.py`）+ Java（`.java`）。' +
+      '`.go` 等其它语言、以及包含未接入语言文件的项目级对象（partition / flows / 混合模块 / 混合链路）' +
       '一律 `unverified`，原因「该语言尚未接入语义担保」。'
   )
   L.push(
@@ -2590,6 +2590,14 @@ function buildRulesText(
       '`type` 只认参数注解/返回注解：`page: int` → `int`、`name: Optional[str]` → `Optional[str]`、`x: list[int] = []` → `list[int]`；' +
       '默认值先去掉，前导 `*` / `**` 去掉；`self` / `cls` / 无注解参数没有类型文本，参数名、默认值与完整声明都不算类型。' +
       'Python 跨文件 import 可解析为内部调用边，未解析调用（含标准库/第三方）的 `externalModule` 为模块名时可生成 `external` claim；`import` claim 一律未证实。'
+  )
+  L.push(
+    '- **Java 证据口径**：`.java` 复用通用证据包——`decorator` 对应注解（`@Deprecated` / `@GetMapping("/x")`，系统去 `@` 与参数后归一）；' +
+      '包+类路径编码在 `className`（如 `com.example.Widget`），构造器/嵌套类/接口/枚举/记录按现有解析结果；' +
+      'docComment、注释块、调用边、可见性共用锚点。`type` 只认参数类型/返回类型：`String name` → `String`、' +
+      '`final int page` → `int`、`@Nullable String name` → `String`、`String... args` → `String...`、' +
+      '`Map<String, Integer> map` → `Map<String, Integer>`、`int[] values` → `int[]`；参数名、完整参数声明与整个签名都不算类型。' +
+      'Java import 可解析为内部调用边；未解析调用的 `externalModule` 为 import 源时可生成 `external` claim，`import` claim 仍未证实。'
   )
   L.push(
     '- **Vue SFC 证据口径**：`.vue` 的 script 函数（含 `<script setup>` 与 Options API methods，`className` 可能是 `[component]` 或 null）' +

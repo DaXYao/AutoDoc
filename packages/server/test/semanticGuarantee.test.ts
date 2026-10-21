@@ -12,6 +12,7 @@ import type {
   CallEdge,
   CodeBlock,
   FileDoc,
+  FlowNode,
   FunctionDoc,
   ProjectInsight,
   SemanticClaimKind,
@@ -68,15 +69,15 @@ const ALPHA = 'src/a.ts::-::alpha@aaaaaaaaaaaa'
 const BETA = 'src/a.ts::Svc::beta@bbbbbbbbbbbb'
 const GAMMA = 'src/util/c.ts::-::gamma@cccccccccccc'
 const EPSILON = 'src/util/e.ts::-::epsilon@eeeeeeeeeeee'
-const DELTA = 'py/foreign.py::-::delta@dddddddddddd'
+const DELTA = 'go/foreign.go::-::delta@dddddddddddd'
 const MIX_TS = 'src/mix/mix.ts::-::mixTs@111111111111'
-const MIX_JAVA = 'src/mix/mix.java::-::mixJava@222222222222'
+const MIX_GO = 'src/mix/mix.go::-::mixGo@222222222222'
 const EXTERNAL_ID = 'node:fs::readFile'
 const CS_LIST = 'Services/UserService.cs::UserService::ListUsers@111111111111'
 const CS_FETCH = 'Services/UserService.cs::IRepository::Fetch@222222222222'
 const CS_NAME = 'Services/UserService.cs::UserService::ComputeName@333333333333'
 const CS_VALIDATE = 'Services/UserService.cs::UserService::TryValidate@444444444444'
-const CS_JAVA = 'scripts/foreign.java::-::foreign@555555555555'
+const CS_GO = 'scripts/cs-foreign.go::-::foreign@555555555555'
 
 function mkBlock(fnId: string, startLine: number, endLine: number, codeText = 'run()'): CodeBlock {
   return {
@@ -163,7 +164,7 @@ function fixtureFiles(): FileDoc[] {
   const epsilon = mkFn(EPSILON, 'epsilon', { category: 'utility' })
   const delta = mkFn(DELTA, 'delta', { category: 'utility' })
   const mixTs = mkFn(MIX_TS, 'mixTs', { category: 'utility' })
-  const mixJava = mkFn(MIX_JAVA, 'mixJava', { category: 'utility' })
+  const mixGo = mkFn(MIX_GO, 'mixGo', { category: 'utility' })
   return [
     {
       fileId: 'src/a.ts',
@@ -190,15 +191,15 @@ function fixtureFiles(): FileDoc[] {
       functions: [mixTs]
     },
     {
-      fileId: 'src/mix/mix.java',
-      path: 'src/mix/mix.java',
-      language: 'java',
-      functions: [mixJava]
+      fileId: 'src/mix/mix.go',
+      path: 'src/mix/mix.go',
+      language: 'go',
+      functions: [mixGo]
     },
     {
-      fileId: 'py/foreign.py',
-      path: 'py/foreign.py',
-      language: 'python',
+      fileId: 'go/foreign.go',
+      path: 'go/foreign.go',
+      language: 'go',
       functions: [delta]
     }
   ]
@@ -274,12 +275,12 @@ function csharpFiles(): FileDoc[] {
   ]
 }
 
-function csharpForeignFile(): FileDoc {
+function goForeignFile(): FileDoc {
   return {
-    fileId: 'scripts/foreign.java',
-    path: 'scripts/foreign.java',
-    language: 'java',
-    functions: [mkFn(CS_JAVA, 'foreign', { category: 'utility' })]
+    fileId: 'scripts/cs-foreign.go',
+    path: 'scripts/cs-foreign.go',
+    language: 'go',
+    functions: [mkFn(CS_GO, 'foreign', { category: 'utility' })]
   }
 }
 
@@ -289,7 +290,7 @@ const CPP_RUN = 'src/main.cpp::demo::runWidget@111111111111'
 const CPP_RENDER = 'include/widget.hpp::demo::Widget::render@222222222222'
 const CPP_ADD = 'include/widget.hpp::demo::addValues@333333333333'
 const CPP_PARAM = 'include/widget.hpp::demo::paramMatrix@444444444444'
-const CPP_JAVA = 'scripts/foreign.java::-::foreign@555555555555'
+const CPP_GO = 'scripts/cpp-foreign.go::-::foreign@666666666666'
 
 /** C++ 夹具：命名空间内自由函数 + 类方法 + attribute/注释块/调用边（结构对齐真实解析输出） */
 function cppFiles(): FileDoc[] {
@@ -377,12 +378,12 @@ function cppFiles(): FileDoc[] {
   ]
 }
 
-function cppForeignFile(): FileDoc {
+function cppGoForeignFile(): FileDoc {
   return {
-    fileId: 'scripts/foreign.java',
-    path: 'scripts/foreign.java',
-    language: 'java',
-    functions: [mkFn(CPP_JAVA, 'foreign', { category: 'utility' })]
+    fileId: 'scripts/cpp-foreign.go',
+    path: 'scripts/cpp-foreign.go',
+    language: 'go',
+    functions: [mkFn(CPP_GO, 'foreign', { category: 'utility' })]
   }
 }
 
@@ -615,13 +616,127 @@ async function realCSharpFixture(): Promise<RealCSharpFixture> {
   return realCSharpCache
 }
 
+/* ------------------------- 真实 Java 夹具解析 ------------------------- */
+
+const JAVA_SOURCE = `package demo;
+import java.util.List;
+
+public class UserService {
+    @Deprecated
+    public List<String> listUsers(final int page, List<String> names) {
+        // 分页读取
+        return helper(page);
+    }
+
+    private List<String> helper(int page) {
+        return List.of();
+    }
+}
+`
+
+interface RealJavaFixture {
+  graph: ProjectGraph
+  insight: ProjectInsight
+  fnByName: Map<string, FunctionDoc>
+  files: FileDoc[]
+}
+
+let realJavaCache: RealJavaFixture | null = null
+
+/** 用默认 Java 解析器解析内联源码，按 generate 管线同口径组装 FunctionDoc 与图谱 */
+async function realJavaFixture(): Promise<RealJavaFixture> {
+  if (realJavaCache) return realJavaCache
+  await ensureDefaultParsers()
+  const parser = parserRegistry.forFile('UserService.java')
+  if (!parser) throw new Error('未注册 Java 解析器')
+  const parsed = await parser.parse(JAVA_SOURCE)
+  const categories: Record<string, FunctionDoc['category']> = {
+    listUsers: 'business',
+    helper: 'implementation'
+  }
+  const docs: FunctionDoc[] = parsed.functions.map((p) => {
+    const id = makeStableId('UserService.java', p.className, p.name, p.params)
+    return {
+      id,
+      name: p.name,
+      className: p.className,
+      kind: p.kind,
+      signature: p.signature,
+      params: [...p.params],
+      returnType: p.returnType,
+      visibility: p.visibility,
+      decorators: [...p.decorators],
+      exported: p.exported,
+      category: categories[p.name] ?? 'utility',
+      purpose: p.name,
+      docComment: p.docComment,
+      fingerprint: `fp-${p.name}`,
+      startLine: p.startLine,
+      endLine: p.endLine,
+      calls: [],
+      codeBlocks: p.codeBlocks.map((b) => ({ ...b, functionId: id }))
+    }
+  })
+  const byName = new Map<string, FunctionDoc[]>()
+  for (const fn of docs) {
+    const list = byName.get(fn.name) ?? []
+    list.push(fn)
+    byName.set(fn.name, list)
+  }
+  parsed.functions.forEach((p, index) => {
+    const fn = docs[index]
+    const seen = new Set<string>()
+    const calls: CallEdge[] = []
+    for (const site of [...p.callSites].sort((a, b) => a.line - b.line)) {
+      if (seen.has(site.name)) continue
+      seen.add(site.name)
+      const candidates = byName.get(site.name) ?? []
+      const target = candidates.find((c) => c.className === fn.className) ?? candidates[0] ?? null
+      calls.push({
+        callerId: fn.id,
+        calleeName: site.name,
+        stepId: `${fn.id}>${site.name}`,
+        calleeId: target?.id ?? null,
+        calleeCategory: target ? target.category : 'external',
+        role: site.role,
+        line: site.line,
+        calleePurpose: target ? target.purpose : null,
+        ...(target ? {} : { externalModule: null })
+      })
+    }
+    fn.calls = calls
+  })
+  const files: FileDoc[] = [
+    {
+      fileId: 'UserService.java',
+      path: 'UserService.java',
+      language: 'java',
+      functions: docs
+    }
+  ]
+  const graph = buildGraph(files)
+  const insight = baseInsightOf(graph)
+  const list = docs.find((fn) => fn.name === 'listUsers')!
+  insight.functions[list.id] = {
+    ...insight.functions[list.id],
+    isCore: true,
+    coreSource: 'ai',
+    coreReason: '用户列表入口',
+    aiCategory: 'business',
+    aiCategoryReason: '对外业务接口',
+    systemRole: '用户列表服务入口'
+  }
+  realJavaCache = { graph, insight, fnByName: new Map(docs.map((fn) => [fn.name, fn])), files }
+  return realJavaCache
+}
+
 const CSHARP_GRAPH = buildGraph(csharpFiles())
-const CSHARP_MIXED_GRAPH = buildGraph([...csharpFiles(), csharpForeignFile()])
+const CSHARP_MIXED_GRAPH = buildGraph([...csharpFiles(), goForeignFile()])
 const CS_MOD = CSHARP_GRAPH.modules.find((m) => m.name === 'Services')!.id
 const CS_CHAIN = CSHARP_GRAPH.chains.find((c) => c.entryId === CS_LIST)!.id
 
 const CPP_GRAPH = buildGraph(cppFiles())
-const CPP_MIXED_GRAPH = buildGraph([...cppFiles(), cppForeignFile()])
+const CPP_MIXED_GRAPH = buildGraph([...cppFiles(), cppGoForeignFile()])
 const CPP_MOD = CPP_GRAPH.modules.find((m) => m.name === 'include')!.id
 const CPP_CHAIN = CPP_GRAPH.chains.find((c) => c.entryId === CPP_RUN)!.id
 
@@ -672,7 +787,7 @@ function insightOf(graph: ProjectGraph): ProjectInsight {
 
 const INSIGHT = insightOf(GRAPH)
 
-/** 纯 TS 项目（排除 .py 文件）：用于 partition / flows root 的正常担保用例 */
+/** 纯已接入语言项目（排除未接入文件）：用于 partition / flows root 的正常担保用例 */
 const TS_GRAPH = buildGraph(fixtureFiles().filter((f) => isGuaranteeLanguageFile(f.fileId)))
 const TS_INSIGHT = insightOf(TS_GRAPH)
 const TS_MOD_SRC = TS_GRAPH.modules.find((m) => m.name === 'src')!.id
@@ -752,7 +867,7 @@ function validate(
 /* ------------------------- 基础语言判定 ------------------------- */
 
 describe('语言判定', () => {
-  it('按扩展名识别已接入语言（TS/JS/TSX、C#、Vue SFC、C++、Python）与未接入语言', () => {
+  it('按扩展名识别已接入语言（TS/JS/TSX、C#、Vue SFC、C++、Python、Java）与未接入语言', () => {
     for (const f of [
       'a.ts',
       'a.tsx',
@@ -772,18 +887,19 @@ describe('语言判定', () => {
       'include/widget.hxx',
       'include/widget.inl',
       'app/service.py',
-      'app/pkg/__init__.py'
+      'app/pkg/__init__.py',
+      'app/UserService.java'
     ]) {
       expect(isGuaranteeLanguageFile(f), f).toBe(true)
     }
-    for (const f of ['a.java', 'a.go', 'a.pyi', 'README']) {
+    for (const f of ['a.go', 'a.pyi', 'README']) {
       expect(isGuaranteeLanguageFile(f), f).toBe(false)
     }
   })
 
   it('未接入语言对象 → unverified，原因「该语言尚未接入语义担保」', () => {
-    const res = validate('coreRoles', MIX_JAVA, [
-      claim('intent', MIX_JAVA, [{ detail: '对照用途。' }], { text: '这是外部脚本。' })
+    const res = validate('coreRoles', MIX_GO, [
+      claim('intent', MIX_GO, [{ detail: '对照用途。' }], { text: '这是外部脚本。' })
     ])
     expect(res.status).toBe('unverified')
     expect(res.reason).toContain('该语言尚未接入语义担保')
@@ -1036,8 +1152,8 @@ describe('变更侧担保（SG3：scope 证据）', () => {
       INSIGHT,
       GRAPH,
       'commit:abc',
-      changesValue({ functions: [MIX_JAVA] }),
-      guaranteeOf([claim('intent', 'commit:abc', [{ functionId: MIX_JAVA }], { text: 'Java 函数。' })])
+      changesValue({ functions: [MIX_GO] }),
+      guaranteeOf([claim('intent', 'commit:abc', [{ functionId: MIX_GO }], { text: 'Go 函数。' })])
     )
     expect(res.status).toBe('unverified')
     expect(res.reason).toContain('尚未接入')
@@ -1149,7 +1265,7 @@ describe('claim / evidence 形状与锚点', () => {
 
   it('subject 引用未接入语言的函数 → unverified（即使 pass 对象是 TS）', () => {
     const res = validate('coreRoles', ALPHA, [
-      claim('intent', MIX_JAVA, [{ functionId: MIX_JAVA }], { text: '外部脚本入口。' })
+      claim('intent', MIX_GO, [{ functionId: MIX_GO }], { text: '外部脚本入口。' })
     ])
     expect(res.status).toBe('unverified')
     expect(res.claims[0].status).toBe('unverified')
@@ -1660,7 +1776,7 @@ describe('C# 硬事实静态校验', () => {
     expect(role.status).toBe('declared')
   })
 
-  it('partition / flows：全 C# 项目可 declared；含 .java 时 unverified 且原因含「尚未接入」', () => {
+  it('partition / flows：全 C# 项目可 declared；含 .go 时 unverified 且原因含「尚未接入」', () => {
     const partition = validateOn(CSHARP_INSIGHT, CSHARP_GRAPH, 'partition', 'root', [
       claim('intent', 'root', [{ moduleId: CS_MOD }], { text: 'C# 项目划分。' })
     ])
@@ -1684,7 +1800,7 @@ describe('C# 硬事实静态校验', () => {
     expect(mixedFlows.reason).toContain('尚未接入')
   })
 
-  it('changes scope 含 C# 函数可 declared；含 .java 函数时 unverified', () => {
+  it('changes scope 含 C# 函数可 declared；含 .go 函数时 unverified', () => {
     const csValue: AgentSupplyChangesValue = {
       narrative: { what: '调整 C# 用户列表。', why: '测试。', risks: [] },
       changeRoles: { [CS_LIST]: '本次变更的 C# 入口。' }
@@ -1699,15 +1815,15 @@ describe('C# 硬事实静态校验', () => {
     expect(cs.status).toBe('declared')
 
     const javaValue: AgentSupplyChangesValue = {
-      narrative: { what: '调整 Java 脚本。', why: '测试。', risks: [] },
-      changeRoles: { [CS_JAVA]: '本次变更的 Java 函数。' }
+      narrative: { what: '调整 Go 脚本。', why: '测试。', risks: [] },
+      changeRoles: { [CS_GO]: '本次变更的 Go 函数。' }
     }
     const java = validateChangesGuarantee(
       CSHARP_MIXED_INSIGHT,
       CSHARP_MIXED_GRAPH,
-      'commit:java',
+      'commit:go',
       javaValue,
-      guaranteeOf([claim('intent', 'commit:java', [{ functionId: CS_JAVA }], { text: 'Java 变更意图。' })])
+      guaranteeOf([claim('intent', 'commit:go', [{ functionId: CS_GO }], { text: 'Go 变更意图。' })])
     )
     expect(java.status).toBe('unverified')
     expect(java.reason).toContain('尚未接入')
@@ -1878,7 +1994,7 @@ describe('C++ 硬事实静态校验', () => {
     expect(role.status).toBe('declared')
   })
 
-  it('partition / flows：全 C++ 与 TS+C++ 可 declared；含 .java 时 unverified', () => {
+  it('partition / flows：全 C++ 与 TS+C++ 可 declared；含 .go 时 unverified', () => {
     const partition = validateOn(CPP_INSIGHT, CPP_GRAPH, 'partition', 'root', [
       claim('intent', 'root', [{ moduleId: CPP_MOD }], { text: 'C++ 项目划分。' })
     ])
@@ -1921,7 +2037,7 @@ describe('C++ 硬事实静态校验', () => {
     expect(mixedFlows.reason).toContain('尚未接入')
   })
 
-  it('changes scope 含 C++ 函数可 declared；含 .java 函数时 unverified', () => {
+  it('changes scope 含 C++ 函数可 declared；含 .go 函数时 unverified', () => {
     const cppValue: AgentSupplyChangesValue = {
       narrative: { what: '调整 C++ 示例入口。', why: '测试。', risks: [] },
       changeRoles: { [CPP_RUN]: '本次变更的 C++ 入口。' }
@@ -1936,15 +2052,15 @@ describe('C++ 硬事实静态校验', () => {
     expect(cpp.status).toBe('declared')
 
     const javaValue: AgentSupplyChangesValue = {
-      narrative: { what: '调整 Java 脚本。', why: '测试。', risks: [] },
-      changeRoles: { [CPP_JAVA]: '本次变更的 Java 函数。' }
+      narrative: { what: '调整 Go 脚本。', why: '测试。', risks: [] },
+      changeRoles: { [CPP_GO]: '本次变更的 Go 函数。' }
     }
     const java = validateChangesGuarantee(
       CPP_MIXED_INSIGHT,
       CPP_MIXED_GRAPH,
-      'commit:java',
+      'commit:go',
       javaValue,
-      guaranteeOf([claim('intent', 'commit:java', [{ functionId: CPP_JAVA }], { text: 'Java 变更意图。' })])
+      guaranteeOf([claim('intent', 'commit:go', [{ functionId: CPP_GO }], { text: 'Go 变更意图。' })])
     )
     expect(java.status).toBe('unverified')
     expect(java.reason).toContain('尚未接入')
@@ -2094,7 +2210,7 @@ describe('Python 硬事实静态校验', () => {
     expect(role.status).toBe('declared')
   })
 
-  it('partition / flows：全 Python 与 TS+Python 可 declared；含 .java 时 unverified', () => {
+  it('partition / flows：全 Python 与 TS+Python 可 declared；含 .go 时 unverified', () => {
     const partition = validateOn(PY_INSIGHT, PY_GRAPH, 'partition', 'root', [
       claim('intent', 'root', [{ moduleId: PY_MOD }], { text: 'Python 项目划分。' })
     ])
@@ -2124,17 +2240,17 @@ describe('Python 硬事实静态校验', () => {
     ])
     expect(tsPyFlows.status).toBe('declared')
 
-    const withJava = buildGraph([...pyFiles(), csharpForeignFile()])
-    const withJavaInsight = baseInsightOf(withJava)
-    const blocked = validateOn(withJavaInsight, withJava, 'partition', 'root', [
-      claim('intent', 'root', [{ moduleId: withJava.modules[0].id }], { text: '混合项目划分。' })
+    const withGo = buildGraph([...pyFiles(), goForeignFile()])
+    const withGoInsight = baseInsightOf(withGo)
+    const blocked = validateOn(withGoInsight, withGo, 'partition', 'root', [
+      claim('intent', 'root', [{ moduleId: withGo.modules[0].id }], { text: '混合项目划分。' })
     ])
     expect(blocked.status).toBe('unverified')
     expect(blocked.reason).toContain('项目级混合对象')
     expect(blocked.reason).toContain('尚未接入')
   })
 
-  it('changes scope 含 Python 函数可 declared；含 .java 仍 unverified', () => {
+  it('changes scope 含 Python 函数可 declared；含 .go 仍 unverified', () => {
     const value: AgentSupplyChangesValue = {
       narrative: { what: '调整 Python 用户列表。', why: '测试。', risks: [] },
       changeRoles: { [PY_LIST]: '本次变更的 Python 方法。' }
@@ -2148,24 +2264,108 @@ describe('Python 硬事实静态校验', () => {
     )
     expect(py.status).toBe('declared')
 
-    const javaValue: AgentSupplyChangesValue = {
-      narrative: { what: '调整 Java 脚本。', why: '测试。', risks: [] },
-      changeRoles: { [CPP_JAVA]: '本次变更的 Java 函数。' }
+    const goValue: AgentSupplyChangesValue = {
+      narrative: { what: '调整 Go 脚本。', why: '测试。', risks: [] },
+      changeRoles: { [CS_GO]: '本次变更的 Go 函数。' }
     }
-    const mixed = buildGraph([...pyFiles(), csharpForeignFile()])
-    const java = validateChangesGuarantee(
+    const mixed = buildGraph([...pyFiles(), goForeignFile()])
+    const go = validateChangesGuarantee(
       baseInsightOf(mixed),
       mixed,
-      'commit:java',
-      javaValue,
-      guaranteeOf([claim('intent', 'commit:java', [{ functionId: CPP_JAVA }], { text: 'Java 变更意图。' })])
+      'commit:go',
+      goValue,
+      guaranteeOf([claim('intent', 'commit:go', [{ functionId: CS_GO }], { text: 'Go 变更意图。' })])
     )
-    expect(java.status).toBe('unverified')
-    expect(java.reason).toContain('尚未接入')
+    expect(go.status).toBe('unverified')
+    expect(go.reason).toContain('尚未接入')
   })
 })
 
 /* ------------------------- 真实 C# 夹具（解析 → 担保） ------------------------- */
+
+describe('真实 Java 项目解析 → 建图 → 担保集成', () => {
+  it('注解/final/泛型/可见性/调用边取自真实解析', async () => {
+    const { fnByName } = await realJavaFixture()
+    const list = fnByName.get('listUsers')!
+    expect(list.params).toEqual(['int page', 'List<String> names'])
+    expect(list.decorators).toContain('Deprecated')
+    expect(list.visibility).toBe('public')
+    expect(list.returnType).toBe('List<String>')
+    const helper = fnByName.get('helper')!
+    expect(helper.visibility).toBe('private')
+    expect(list.calls.find((c) => c.calleeName === 'helper')?.calleeId).toBe(helper.id)
+  })
+
+  it('type/decorator/visibility/category/call 可 declared；参数名/完整声明失败', async () => {
+    const { graph, insight, fnByName } = await realJavaFixture()
+    const list = fnByName.get('listUsers')!
+    const helper = fnByName.get('helper')!
+    const run = (kind: SemanticClaimKind, object: string) =>
+      validateOn(insight, graph, 'coreRoles', list.id, [
+        claim(kind, list.id, [{ functionId: list.id }], { object })
+      ])
+    for (const object of ['int', 'List<String>']) {
+      expect(run('type', object).status, `应通过：${object}`).toBe('declared')
+    }
+    for (const object of ['page', 'names', 'final int page', 'List<String> names']) {
+      expect(run('type', object).claims[0].staticStatus, `应失败：${object}`).toBe('fail')
+    }
+    expect(run('decorator', '@Deprecated').status).toBe('declared')
+    expect(run('visibility', 'public').status).toBe('declared')
+    const category = validateOn(insight, graph, 'categories', list.id, [
+      claim('category', list.id, [{ functionId: list.id }], { object: 'business' })
+    ])
+    expect(category.status).toBe('declared')
+    const call = validateOn(insight, graph, 'coreRoles', list.id, [
+      claim('call', list.id, [{ stepId: `${list.id}>helper` }], { object: helper.id })
+    ])
+    expect(call.status).toBe('declared')
+  })
+
+  it('Java 项目级对象与 changes scope 可 declared', async () => {
+    const { graph, insight, fnByName } = await realJavaFixture()
+    const list = fnByName.get('listUsers')!
+    const partition = validateOn(insight, graph, 'partition', 'root', [
+      claim('intent', 'root', [{ moduleId: graph.modules[0].id }], { text: 'Java 项目划分。' })
+    ])
+    expect(partition.status).toBe('declared')
+
+    const chain = graph.chains.find((c) => c.entryId === list.id)
+    if (chain) {
+      const flowNode: FlowNode = {
+        id: 'flow:0',
+        parentId: null,
+        label: 'Java 入口',
+        summary: '',
+        order: 0,
+        kind: 'leaf',
+        depth: 0,
+        relatedModuleIds: [],
+        relatedFunctionIds: [list.id],
+        relatedChainIds: [chain.id],
+        source: 'ai',
+        reason: '',
+        children: []
+      }
+      insight.flows = [flowNode]
+      const flows = validateOn(insight, graph, 'flows', 'root', [
+        claim('intent', 'root', [{ chainId: chain.id }], { text: 'Java 脉络。' })
+      ])
+      expect(flows.status).toBe('declared')
+    }
+
+    const changes = validateChangesGuarantee(
+      insight,
+      graph,
+      'commit:java',
+      { changeRoles: { [list.id]: 'Java 变更' } },
+      guaranteeOf([
+        claim('intent', 'commit:java', [{ functionId: list.id }], { text: 'Java 变更意图。' })
+      ])
+    )
+    expect(changes.status).toBe('declared')
+  })
+})
 
 describe('真实 C# 夹具解析 → 担保集成', () => {
   it('真实解析的 attribute / 可见性 / 调用 / 注释块与源码一致', async () => {
@@ -2961,7 +3161,7 @@ describe('Vue SFC 担保', () => {
     expect(res.claims[0].staticStatus).toBe('not-applicable')
   })
 
-  it('混合 TS + Vue + Python 项目：partition / flows 可 declared；加入 .java 仍 unverified', async () => {
+  it('混合 TS + Vue + Python 项目：partition / flows 可 declared；加入 .go 仍 unverified', async () => {
     const vue = await realVueFixture()
     const tsFiles = fixtureFiles().filter((f) => isGuaranteeLanguageFile(f.fileId))
     const mixed = buildGraph([...tsFiles, ...vue.files])
@@ -2982,12 +3182,12 @@ describe('Vue SFC 担保', () => {
     ])
     expect(flows.status).toBe('declared')
 
-    const withJava = buildGraph([...tsFiles, ...vue.files, csharpForeignFile()])
-    const withJavaInsight = baseInsightOf(withJava)
-    const vueMod = withJava.modules.find((m) =>
+    const withGo = buildGraph([...tsFiles, ...vue.files, goForeignFile()])
+    const withGoInsight = baseInsightOf(withGo)
+    const vueMod = withGo.modules.find((m) =>
       m.functionIds.some((id) => id.startsWith(VUE_SETUP_FILE))
     )!
-    const blocked = validateOn(withJavaInsight, withJava, 'partition', 'root', [
+    const blocked = validateOn(withGoInsight, withGo, 'partition', 'root', [
       claim('containment', vueMod.id, [{ moduleId: vueMod.id }], {
         object: vueMod.functionIds.find((id) => id.startsWith(VUE_SETUP_FILE))!,
         text: '划分模块包含 Vue 函数。'

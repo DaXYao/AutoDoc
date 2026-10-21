@@ -22,7 +22,7 @@ import type { ProjectGraph } from './graph.js'
 
 /**
  * SG1：语义担保的静态证据校验
- * （已接入语言：TypeScript / JavaScript / TSX / JSX、C#、Vue SFC、C++、Python）。
+ * （已接入语言：TypeScript / JavaScript / TSX / JSX、C#、Vue SFC、C++、Python、Java）。
  *
  * 本模块只依赖 shared-types 与 graph.js（禁止 import agentSupply / supplyCache）：
  * - agentSupply.ts 负责供给文件的结构/长度校验并挂载 guarantee；
@@ -31,7 +31,7 @@ import type { ProjectGraph } from './graph.js'
  * - 本模块不调用 LLM（KEY 第二遍复核见 semanticVerifier.ts），也不做前端展示。
  *
  * 已接入语言：.ts / .tsx / .js / .jsx / .mjs / .cjs / .cs / .vue /
- * .cpp / .cc / .cxx / .h / .hpp / .hh / .hxx / .inl / .py。
+ * .cpp / .cc / .cxx / .h / .hpp / .hh / .hxx / .inl / .py / .java。
  * Vue 的 script 函数复用 TS/JS 证据（签名/参数/返回类型/可见性/装饰器/调用/注释块）；
  * 合成 `[template]` 入口的调用边来自模板事件，`block` claim 不适用（模板节点没有函数体）。
  * C++ 复用通用证据包：attributes → decorators、命名空间/类编码在 className、quoted include
@@ -61,7 +61,8 @@ const GUARANTEE_LANGUAGE_EXTENSIONS = new Set([
   'hh',
   'hxx',
   'inl',
-  'py'
+  'py',
+  'java'
 ])
 const UNSUPPORTED_LANGUAGE_REASON = '该语言尚未接入语义担保'
 const MIXED_PROJECT_REASON = '项目级混合对象包含尚未接入语义担保的文件'
@@ -138,7 +139,7 @@ export function fileIdOfFunctionId(functionId: string): string | null {
   return at > 0 ? functionId.slice(0, at) : null
 }
 
-/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C# + Vue SFC + C++ + Python，按文件扩展名判定） */
+/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C# + Vue SFC + C++ + Python + Java，按文件扩展名判定） */
 export function isGuaranteeLanguageFile(fileId: string): boolean {
   const lower = fileId.toLowerCase()
   const dot = lower.lastIndexOf('.')
@@ -147,7 +148,7 @@ export function isGuaranteeLanguageFile(fileId: string): boolean {
 }
 
 /** 按扩展名判定参数/类型口径的语言（仅影响参数类型提取；未知语言保持 TS 冒号口径） */
-type ParamTypeLanguage = 'js' | 'csharp' | 'cpp' | 'python'
+type ParamTypeLanguage = 'js' | 'csharp' | 'cpp' | 'python' | 'java'
 
 const CPP_TYPE_EXTENSIONS = new Set(['cpp', 'cc', 'cxx', 'h', 'hpp', 'hh', 'hxx', 'inl'])
 
@@ -159,6 +160,7 @@ function paramTypeLanguageOf(fileId: string | null): ParamTypeLanguage {
   const ext = lower.slice(dot + 1)
   if (ext === 'cs') return 'csharp'
   if (ext === 'py') return 'python'
+  if (ext === 'java') return 'java'
   if (CPP_TYPE_EXTENSIONS.has(ext)) return 'cpp'
   return 'js'
 }
@@ -1064,14 +1066,70 @@ function pythonParamTypeText(param: string): string {
   return normalizeTypeText(text.slice(colon + 1))
 }
 
+/** 去掉 Java 参数开头的注解（`@Nullable` / `@Foo(...)`）与 `final` 修饰符 */
+function stripJavaParamDecorators(text: string): string {
+  let rest = text.trim()
+  for (;;) {
+    const before = rest
+    rest = rest.replace(/^final\b/, '').trim()
+    if (rest.startsWith('@')) {
+      const name = /^@[A-Za-z_$][A-Za-z0-9_$.]*/.exec(rest)
+      if (name) {
+        rest = rest.slice(name[0].length).trim()
+        if (rest.startsWith('(')) {
+          let depth = 0
+          let quote: string | null = null
+          let close = -1
+          for (let i = 0; i < rest.length; i++) {
+            const ch = rest[i]
+            if (quote !== null) {
+              if (ch === '\\') i++
+              else if (ch === quote) quote = null
+              continue
+            }
+            if (ch === '"' || ch === "'") quote = ch
+            else if (ch === '(') depth++
+            else if (ch === ')') {
+              depth--
+              if (depth === 0) {
+                close = i
+                break
+              }
+            }
+          }
+          if (close >= 0) rest = rest.slice(close + 1).trim()
+        }
+      }
+    }
+    if (rest === before) return rest
+  }
+}
+
+/**
+ * Java 参数声明 → 参数类型：去注解/`final` 后在顶层从右往左找最后一个空白，左侧为类型。
+ * 例：`String name`→`String`；`final int page`→`int`；`@Nullable String name`→`String`；
+ * `String... args`→`String...`；`Map<String, Integer> map`→`Map<String, Integer>`；`int[] values`→`int[]`。
+ */
+function javaParamTypeText(param: string): string {
+  const text = stripJavaParamDecorators(param)
+  let lastSpace = -1
+  scanTopLevel(text, (i, ch) => {
+    if (/\s/.test(ch)) lastSpace = i
+  })
+  if (lastSpace < 0) return text
+  const type = text.slice(0, lastSpace).trim()
+  return type.length > 0 ? type : text
+}
+
 /**
  * 取参数的类型段：TypeScript / JavaScript（含 Vue）保持冒号后类型；
- * C#（`.cs`）、C++（`.cpp/.h/...`）与 Python（`.py`）按参数声明提取类型，参数名不会被当作类型。
+ * C#（`.cs`）、C++（`.cpp/.h/...`）、Python（`.py`）与 Java（`.java`）按参数声明提取类型，参数名不会被当作类型。
  */
 function paramTypeText(param: string, language: ParamTypeLanguage): string {
   if (language === 'csharp') return csharpParamTypeText(param)
   if (language === 'cpp') return cppParamTypeText(param)
   if (language === 'python') return pythonParamTypeText(param)
+  if (language === 'java') return javaParamTypeText(param)
   const at = param.indexOf(':')
   return at >= 0 ? param.slice(at + 1) : param
 }

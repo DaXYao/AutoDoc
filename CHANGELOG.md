@@ -2,6 +2,17 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-10-21 · 语义担保第六轮：Java（.java）接入语言闸门 · server+shared-types+docs
+
+- **语言闸门**：`GUARANTEE_LANGUAGE_EXTENSIONS` 加入 `java`；`isGuaranteeLanguageFile` 与 KEY 的 `isGuaranteeFunction` / `isGuaranteeFileSet` / `allGraphFilesGuaranteed` 直接覆盖 Java。变更侧 scope 同步接受 `.java`。`.go` 仍为 `unverified`（原因「该语言尚未接入语义担保」），项目级混合对象同样不回退。既有「以 .java 作为未接入语言」的测试夹具统一改为 `.go`。
+- **Java 参数类型（server 侧，不改 parser）**：`ParamTypeLanguage` 增加 `java`；`paramTypeText` 对 `.java` 去注解（`@Nullable` / `@Foo(...)`）与 `final` 后，在顶层（忽略 `<> () []` 与字符串）从右往左找最后一个空白，左侧为类型。例：`String name`→`String`、`final int page`→`int`、`String... args`→`String...`、`Map<String, Integer> map`→`Map<String, Integer>`、`int[] values`→`int[]`；参数名/完整声明/整签名不算类型。`matchesTypeText` 仍只认参数类型/返回类型整体或完整 token。
+- **Java 证据口径**：`.java` 复用通用证据包——注解作为 decorators（`@Deprecated` / `@GetMapping("/x")` 去 `@` 与参数后归一）、包+类路径编码在 `className`、构造器/嵌套类/接口/枚举/记录按现有解析结果；docComment、注释块、可见性、调用边共用锚点；import 可解析内部调用，未解析调用的 `externalModule` 为 import 源时可生成 `external` claim，`import` claim 仍未证实。
+- **契约/文案**：`agentSupply.ts` 4.10 语言范围改为 TS/JS 家族 + C# + Vue SFC + C++ + Python + Java，新增 Java 证据口径；`agentSupplyChanges.ts` 9.1 同步；`semanticGuarantee.ts` / `semanticVerifier.ts` 头部、shared-types 担保字段注释同步。
+- **测试**：语言判定（`.java=true`，`.go=false`）；真实 Java 解析→建图→担保集成（注解/`final`/泛型/可见性/调用边取自 parser；`type` 为 `int`/`List<String>` 通过、`page`/`names`/`final int page`/`List<String> names` 失败；`@Deprecated`、public、category、内部 call 均可 declared）；Java 项目 partition/flows 与 changes scope 可 declared；未接入 `.go` 仍 unverified。server 601（+3）、core 368、web 279，全仓 1248 项通过；`pnpm lint` 全绿。
+- **实跑**：临时 2 文件 Java 项目（`package`/`import`/`@Deprecated`/`final`/泛型/内部调用），config/storage 指向系统临时目录（不写用户 `.autodoc`），`serve --port 7815 --no-watch`；写 `supply/default/insight/categories.qoder.json` 与 `coreRoles.qoder.json`，`POST /api/agent-supply/merge` 后 `/api/insight` 返回 4 条 `source=agent,status=declared`（categories×2 + coreRoles×2；`type: int`、`type: List<String>`、`decorator: @Deprecated` 均通过）。临时服务与数据已清理。
+- **已知边界**：Java `import` claim 仍未接入；方法引用/继承/匿名类等动态语义仍按现有解析边界；Agent 自审最高 `declared`，`verified` 仅由 KEY 第二遍复核产生。
+- **关联 commit**：随 Java 轮次一并提交。
+
 ## 2026-10-21 · 语义担保第五轮：Python（.py）接入语言闸门 · server+shared-types+docs
 
 - **语言闸门**：`GUARANTEE_LANGUAGE_EXTENSIONS` 加入 `py`；`isGuaranteeLanguageFile` 与 KEY 的 `isGuaranteeFunction` / `isGuaranteeFileSet` / `allGraphFilesGuaranteed` 直接覆盖 Python。变更侧 scope 同步接受 `.py`。`.java` / `.go` 仍为 `unverified`（原因「该语言尚未接入语义担保」），项目级混合对象同样不回退。

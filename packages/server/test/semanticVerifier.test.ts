@@ -42,7 +42,7 @@ const ALPHA = 'src/a.ts::-::alpha@aaaaaaaaaaaa'
 const BETA = 'src/a.ts::-::beta@bbbbbbbbbbbb'
 const GAMMA = 'src/util/c.ts::-::gamma@cccccccccccc'
 const DELTA = 'py/foreign.py::-::delta@dddddddddddd'
-const JAVA_DELTA = 'java/foreign.java::-::delta@eeeeeeeeeeee'
+const GO_DELTA = 'go/foreign.go::-::delta@eeeeeeeeeeee'
 const CS_LIST = 'Services/UserService.cs::UserService::ListUsers@111111111111'
 const CS_FETCH = 'Services/UserService.cs::IRepository::Fetch@222222222222'
 const CS_NAME = 'Services/UserService.cs::UserService::ComputeName@333333333333'
@@ -129,7 +129,7 @@ function fixtureFiles(
   includeCsharp = false,
   includeVue = false,
   includeCpp = false,
-  includeJava = false
+  includeGo = false
 ): FileDoc[] {
   const alpha = mkFn(ALPHA, 'alpha', {
     signature: 'alpha(req: Request): Promise<Result>',
@@ -163,12 +163,12 @@ function fixtureFiles(
       functions: [mkFn(DELTA, 'delta', { category: 'utility' })]
     })
   }
-  if (includeJava) {
+  if (includeGo) {
     files.push({
-      fileId: 'java/foreign.java',
-      path: 'java/foreign.java',
-      language: 'java',
-      functions: [mkFn(JAVA_DELTA, 'delta', { category: 'utility' })]
+      fileId: 'go/foreign.go',
+      path: 'go/foreign.go',
+      language: 'go',
+      functions: [mkFn(GO_DELTA, 'delta', { category: 'utility' })]
     })
   }
   if (includeCsharp) {
@@ -376,7 +376,7 @@ function fullFixture(opts: {
   includeCsharp?: boolean
   includeVue?: boolean
   includeCpp?: boolean
-  includeJava?: boolean
+  includeGo?: boolean
   withFlows?: boolean
   partitionSource?: 'ai' | 'dir'
 } = {}): Fixture {
@@ -386,7 +386,7 @@ function fullFixture(opts: {
       opts.includeCsharp === true,
       opts.includeVue === true,
       opts.includeCpp === true,
-      opts.includeJava === true
+      opts.includeGo === true
     )
   )
   // graph 的目录划分描述为空；模拟本地 AI 划分写入模块职责
@@ -437,9 +437,9 @@ function fullFixture(opts: {
       internalSteps: []
     }
   }
-  if (functions[JAVA_DELTA]) {
-    functions[JAVA_DELTA] = {
-      ...functions[JAVA_DELTA],
+  if (functions[GO_DELTA]) {
+    functions[GO_DELTA] = {
+      ...functions[GO_DELTA],
       aiCategory: 'utility',
       aiCategoryReason: 'Java 工具',
       systemRole: 'Java 工具'
@@ -1940,11 +1940,11 @@ describe('SG2 读取路径（readBackKeyGuarantees）', () => {
 /* ------------------------- 跳过规则 ------------------------- */
 
 describe('SG2 跳过规则', () => {
-  it('未接入语言（.java）对象跳过，不生成担保', async () => {
-    const { graph, insight } = fullFixture({ includeJava: true, withFlows: false })
+  it('未接入语言（.go）对象跳过，不生成担保', async () => {
+    const { graph, insight } = fullFixture({ includeGo: true, withFlows: false })
     mockAuto()
     await attachKeyGuarantees(insight, graph, new AiCache(freshDir()))
-    expect(insight.semanticGuarantees?.[`categories:${JAVA_DELTA}`]).toBeUndefined()
+    expect(insight.semanticGuarantees?.[`categories:${GO_DELTA}`]).toBeUndefined()
     expect(insight.semanticGuarantees?.[`categories:${ALPHA}`]).toBeDefined()
   })
 
@@ -1972,18 +1972,18 @@ describe('SG2 跳过规则', () => {
     expect(empty.insight.semanticGuarantees?.[`coreRoles:${DELTA}`]).toBeUndefined()
   })
 
-  it('C# 对象参与担保；同项目未接入语言（.java）仍跳过', async () => {
-    const { graph, insight } = fullFixture({ includeJava: true, includeCsharp: true, withFlows: false })
+  it('C# 对象参与担保；同项目未接入语言（.go）仍跳过', async () => {
+    const { graph, insight } = fullFixture({ includeGo: true, includeCsharp: true, withFlows: false })
     mockAuto()
     const stats = await attachKeyGuarantees(insight, graph, new AiCache(freshDir()))
     expect(insight.semanticGuarantees?.[`categories:${CS_LIST}`]?.status).toBe('verified')
     expect(insight.semanticGuarantees?.[`coreRoles:${CS_LIST}`]?.status).toBe('verified')
-    expect(insight.semanticGuarantees?.[`categories:${JAVA_DELTA}`]).toBeUndefined()
+    expect(insight.semanticGuarantees?.[`categories:${GO_DELTA}`]).toBeUndefined()
     expect(stats.skippedNonTs).toBe(1)
   })
 
-  it('C++ 对象参与担保：categories/coreRoles/narratives 可 verified；同项目 .java 仍跳过', async () => {
-    const { graph, insight } = fullFixture({ includeJava: true, includeCpp: true, withFlows: false })
+  it('C++ 对象参与担保：categories/coreRoles/narratives 可 verified；同项目 .go 仍跳过', async () => {
+    const { graph, insight } = fullFixture({ includeGo: true, includeCpp: true, withFlows: false })
     const cppChainId = chainIdOfEntry(graph, CPP_RUN)
     const cppChain = insight.chains.find((c) => c.id === cppChainId)!
     cppChain.narrative = '创建 Widget 并调用渲染方法。'
@@ -1993,7 +1993,7 @@ describe('SG2 跳过规则', () => {
     expect(insight.semanticGuarantees?.[`categories:${CPP_RUN}`]?.status).toBe('verified')
     expect(insight.semanticGuarantees?.[`coreRoles:${CPP_RUN}`]?.status).toBe('verified')
     expect(insight.semanticGuarantees?.[`narratives:${cppChainId}`]?.status).toBe('verified')
-    expect(insight.semanticGuarantees?.[`categories:${JAVA_DELTA}`]).toBeUndefined()
+    expect(insight.semanticGuarantees?.[`categories:${GO_DELTA}`]).toBeUndefined()
     expect(stats.skippedNonTs).toBe(1)
   })
 
@@ -2107,8 +2107,8 @@ describe('SG2 跳过规则', () => {
     expect(insight.semanticGuarantees?.[`categories:${ALPHA}`]?.status).toBe('verified')
   })
 
-  it('含未接入语言（.java）的混合项目：partition/flows 不生成项目级担保', async () => {
-    const { graph, insight } = fullFixture({ includeJava: true })
+  it('含未接入语言（.go）的混合项目：partition/flows 不生成项目级担保', async () => {
+    const { graph, insight } = fullFixture({ includeGo: true })
     mockAuto()
     await attachKeyGuarantees(insight, graph, new AiCache(freshDir()))
     expect(insight.semanticGuarantees?.['partition:root']).toBeUndefined()
