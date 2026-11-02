@@ -1,4 +1,9 @@
-import type { FunctionInsight, InsightChain } from '@autodoc/shared-types'
+import type {
+  FunctionInsight,
+  ImpactChangeset,
+  ImpactCommit,
+  InsightChain
+} from '@autodoc/shared-types'
 import type { GraphEdge, GraphModel, GraphNode } from './graphModel'
 import { fnLabelFromId, firstSentence, IMPACT_COLOR, RIPPLE_COLOR } from './graphModel'
 
@@ -14,6 +19,28 @@ export const RIPPLE_TAG = '上游'
 
 /** 影响叠加图合并的链路上限（top5，超出部分不进图，防止大图不可读） */
 export const IMPACT_OVERLAY_TOP_N = 5
+
+export interface ImpactLandingSelection {
+  mode: 'workspace' | 'commit'
+  commitHash: string | null
+  automatic: boolean
+}
+
+/** 首屏只在工作区确为空且提交列表可用时回退最近提交；加载失败与无提交都留在工作区。 */
+export function resolveImpactLanding(
+  workspaceChangeset: Pick<ImpactChangeset, 'changedFunctions'> | null,
+  commits: ImpactCommit[] | null
+): ImpactLandingSelection {
+  if (
+    workspaceChangeset !== null &&
+    workspaceChangeset.changedFunctions.length === 0 &&
+    commits !== null &&
+    commits.length > 0
+  ) {
+    return { mode: 'commit', commitHash: commits[0].hash, automatic: true }
+  }
+  return { mode: 'workspace', commitHash: null, automatic: false }
+}
 
 /**
  * 受影响链路 = path 中含至少一个变更函数的链路。

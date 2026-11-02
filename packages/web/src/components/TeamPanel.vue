@@ -419,7 +419,7 @@ async function handleMigrate(): Promise<void> {
           <p v-if="syncSummary.supplyHint" class="mt-1 text-xs">
             若本次同步拉取了团队供给（supply/），请到
             <router-link
-              :to="{ name: 'home' }"
+              :to="{ name: 'insight' }"
               class="underline"
               @click="visible = false"
             >

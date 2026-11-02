@@ -9,6 +9,7 @@
 - 已被 AGENTS.md 沉淀为硬规则的教训，在本文件保留一条链接即可，不重复展开。
 
 ## 避坑清单（快速扫描）
+- [ ] `getMode()` 这类模块级非响应式值不能单独包进 `computed`：bootstrap 前首算会永久缓存错误模式；必须用 `appReady` 等响应式门闩参与求值（静态导航实跑发现）。
 - [ ] 「链路入口函数稳定 ID」不保证唯一：同一入口可能对应多条链路。任务包/契约用入口 ID 做链路符号引用时必须附加路径（如 path hash 的 symbolicKey），否则 narratives/flows 会无法唯一解析（一键任务包实跑发现）。
 - [ ] 任务包/缓存是否过期不能只看图谱指纹：图谱指纹只含节点与边，纯函数体改动不会变化；要补函数体指纹摘要（id: fingerprint 的哈希），否则旧答案会静默套到新代码上。
 - [ ] 团队数据仓库首次建立必须先在空目录（允许只有 `.git`）跑 AutoDoc 初始化并同步 manifest，其他人再 clone；不要先塞 README/普通文件——`TeamStorage` 对「非空且无 manifest」会拒绝接管（实跑双 clone 时踩过）。测试/演练里可手工补 `.autodoc-team.json` 再启动，但不要把它当成用户流程。
@@ -65,6 +66,12 @@
 ---
 
 ## 教训条目
+
+### 2026-11-03 · 非响应式数据源模式被 computed 永久缓存
+- **现象**：静态导出已正确跳到文件页，顶栏却仍显示 serve 专属入口；`getMode()` 实际已是 `static`。
+- **根因**：`computed(() => getMode() === 'static')` 没有任何响应式依赖，首次在 bootstrap 前按默认 `api` 求值后不再重算。
+- **正确做法**：模式判定写成 `computed(() => appReady.value && getMode() === 'static')`，与 ImpactView 既有门闩口径一致；凡读取模块级可变值，都要检查 computed 是否真有响应式依赖。
+- **验收**：重新构建并导出静态站，强制忽略缓存 reload，确认只剩文件文档与搜索。
 
 ### 2026-10-22 · 团队 Git 测试单文件过长触发 Vitest worker RPC 超时（测试全绿却 exit 1）
 - **场景**：团队协作后端 P0/P1 加固，`teamGit.test.ts` 真实 bare remote + 双 clone 用例增至 29 项、单文件约 100s。

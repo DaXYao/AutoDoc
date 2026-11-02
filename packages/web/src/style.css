@@ -72,15 +72,15 @@ body {
   background: transparent;
 }
 
-/* 顶栏：单行 56px，surface 底 + 发丝线下边框；用原生 header 而非 n-layout-header，避免 naive cssr 与自定义样式层叠竞争 */
+/* 顶栏：原生 header 承接布局与响应类，避免 naive cssr 层叠竞争 */
 .ad-header {
   position: sticky;
   top: 0;
   z-index: 10;
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 56px;
+  gap: 16px;
+  height: 64px;
   padding: 0 24px;
   background: var(--ad-surface);
   border-bottom: 1px solid var(--ad-line);
@@ -93,43 +93,157 @@ body {
   color: var(--ad-ink);
 }
 
-/* 导航 pills：默认次级墨色，active 用 accent-soft 底 + accent-ink 字（文字对比度达 AA）；
-   纵向 padding 6px（py-1.5）保证触控目标 ≥24px */
-.ad-nav-pill {
-  padding: 6px 10px;
-  border-radius: var(--ad-radius-sm);
-  font-size: 12px;
-  line-height: 20px;
-  color: var(--ad-ink-2);
-  transition: color .15s ease, background-color .15s ease;
+.ad-main-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex-shrink: 0;
 }
-.ad-nav-pill:hover {
+
+.ad-nav-item {
+  display: grid;
+  grid-template-columns: 18px auto;
+  column-gap: 8px;
+  align-items: center;
+  min-height: 48px;
+  padding: 5px 10px;
+  border-radius: var(--ad-radius-sm);
+  color: var(--ad-ink-2);
+  transition: color .15s ease, background-color .15s ease, box-shadow .15s ease;
+}
+
+.ad-nav-item:hover {
+  background: var(--ad-canvas);
   color: var(--ad-ink);
 }
-.ad-nav-pill--active,
-.ad-nav-pill--active:hover {
+
+.ad-nav-item--active,
+.ad-nav-item--active:hover {
   background: var(--ad-accent-soft);
+  color: var(--ad-accent-ink);
+  box-shadow: inset 0 -2px 0 var(--ad-accent-ink);
+}
+
+.ad-nav-icon {
+  grid-row: 1 / span 2;
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ad-nav-label {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.ad-nav-item--primary .ad-nav-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ad-ink);
+}
+
+.ad-nav-item--primary.ad-nav-item--active .ad-nav-label,
+.ad-nav-item--primary.ad-nav-item--active:hover .ad-nav-label {
   color: var(--ad-accent-ink);
 }
 
-/* 搜索槽：弹性但有宽度下限——旧版 flex-1 无下限，窄屏被挤成 44px「空白盒」 */
+.ad-nav-description {
+  grid-column: 2;
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--ad-ink-3);
+  white-space: nowrap;
+}
+
 .ad-search {
   flex: 1 1 0%;
-  min-width: 150px;
-  max-width: 260px;
+  min-width: 160px;
+  max-width: 360px;
 }
 
-/* 统计文字：单行截断，全文走 title 悬浮 */
-.ad-stats {
-  font-size: 12px;
-  color: var(--ad-ink-3);
+.ad-header-actions {
+  flex-shrink: 0;
 }
 
-.ad-select-label {
+.ad-project-menu-label {
   display: block;
+  max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ad-menu-caret {
+  width: 0;
+  height: 0;
+  margin-left: 6px;
+  border-right: 4px solid transparent;
+  border-left: 4px solid transparent;
+  border-top: 4px solid currentColor;
+}
+
+@media (max-width: 1279px) {
+  .ad-header {
+    gap: 10px;
+    padding: 0 16px;
+  }
+
+  .ad-nav-description {
+    display: none;
+  }
+
+  .ad-nav-item {
+    min-height: 38px;
+    padding: 5px 8px;
+  }
+
+  .ad-nav-icon {
+    grid-row: auto;
+  }
+
+  .ad-project-menu-label {
+    max-width: 120px;
+  }
+}
+
+@media (max-width: 767px) {
+  .ad-header {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 56px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+  .ad-wordmark {
+    font-size: 16px;
+  }
+
+  .ad-main-nav {
+    flex: 1 1 auto;
+    overflow-x: auto;
+  }
+
+  .ad-nav-item {
+    flex-shrink: 0;
+  }
+
+  .ad-search {
+    order: 5;
+    flex: 1 0 100%;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .ad-project-menu-label {
+    max-width: 96px;
+  }
 }
 
 /* 顶栏两枚按钮（.ad-btn-ink / .ad-btn-outline）的换肤不在这里：
@@ -149,7 +263,7 @@ body {
 
 /* 卡片交互态修饰类：.ad-card 未分层，Tailwind 的 border-* 工具类在 @layer utilities 里，
    层内样式压不过未分层的 .ad-card，直接用 border-[color:var(--ad-accent)] 不生效。
-   故用语义修饰类（与 .ad-nav-pill--active 同范式），置于 .ad-card 之后靠源码顺序覆盖边框色。 */
+   故用语义修饰类（与 .ad-nav-item--active 同范式），置于 .ad-card 之后靠源码顺序覆盖边框色。 */
 .ad-card--active {
   border-color: var(--ad-accent);
 }

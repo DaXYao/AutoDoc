@@ -1,16 +1,14 @@
 <script setup lang="ts">
-import { computed, h, onMounted } from 'vue'
-import type { VNodeChild } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import type { SelectOption } from 'naive-ui'
+import type { DropdownOption } from 'naive-ui'
 import { getMode } from './data/api'
-import { appState, bootstrap, regenerateActive, switchProject } from './store/app'
+import { appReady, appState, bootstrap, regenerateActive, switchProject } from './store/app'
 import { formatDate } from './utils/format'
-import { adSelectLabel as vAdSelectLabel } from './utils/a11y'
 import { formatIncrementalSummary } from './utils/incremental'
 import { teamStatusPill } from './utils/team'
 import { toast } from './utils/toast'
-import { themeOverrides, adBtnInkOverrides, adBtnOutlineOverrides } from './theme'
+import { themeOverrides, adBtnOutlineOverrides } from './theme'
 import SearchBar from './components/SearchBar.vue'
 import TeamPanel from './components/TeamPanel.vue'
 
@@ -21,11 +19,15 @@ onMounted(async () => {
   // hub 模式且尚无活动项目：跳转到项目选择页
   if (appState.hubEnabled && appState.activeProjectId === null) {
     await router.replace({ name: 'projects' })
+    return
+  }
+  if (getMode() === 'static' && router.currentRoute.value.name === 'home') {
+    await router.replace({ name: 'files' })
   }
 })
 
 const readOnly = computed(() => appState.meta?.readOnly ?? false)
-const isStatic = computed(() => getMode() === 'static')
+const isStatic = computed(() => appReady.value && getMode() === 'static')
 
 /** 团队状态胶囊（非团队项目/未加载为 null，顶栏不显示团队入口） */
 const teamPill = computed(() => teamStatusPill(appState.teamStatus))
@@ -34,32 +36,56 @@ function openTeamPanel(): void {
   appState.teamPanelOpen = true
 }
 
-/**
- * 顶部项目切换下拉的选项。
- * D1 起消费组件已从 n-dropdown 换成 n-select（模板处注释有换型记录）：
- * n-select 只读 valueField='value'、无 key 回退（naive-ui Select.mjs 源码核实），
- * 沿用 dropdown 的 key 协议会让全部选项 value=undefined、点击切项目必然失败。
- */
-const projectOptions = computed(() =>
-  appState.projects.map((p) => ({
-    label: p.name,
-    value: p.id,
-    disabled: p.id === appState.activeProjectId
-  }))
+type NavId = 'impact' | 'insight' | 'files'
+
+const NAV_ITEMS: { id: NavId; label: string; description: string; to: string }[] = [
+  { id: 'impact', label: '变更影响', description: '改动波及哪些链路与函数', to: '/' },
+  { id: 'insight', label: '项目洞察', description: '模块、核心函数与业务脉络', to: '/insight' },
+  { id: 'files', label: '文件文档', description: '源码结构、三分类与批注', to: '/files' }
+]
+
+const visibleNavItems = computed(() =>
+  isStatic.value ? NAV_ITEMS.filter((item) => item.id === 'files') : NAV_ITEMS
 )
 
-/** 顶栏统计单行文案：截断展示，title 悬浮看全文 */
+function isNavActive(id: NavId): boolean {
+  const name = String(router.currentRoute.value.name ?? '')
+  if (id === 'impact') return name === 'home' || name === 'impact'
+  if (id === 'insight') return name === 'insight' || name === 'module'
+  return name === 'files' || name === 'file'
+}
+
+/** 顶栏统计单行文案：完整内容收进项目菜单，避免挤压主导航 */
 const statsText = computed(() =>
   appState.meta
     ? `${appState.meta.fileCount} 文件 / ${appState.meta.functionCount} 函数 · 生成于 ${formatDate(appState.meta.generatedAt)}`
     : ''
 )
 
-/** 选择器 180px 宽内截断项目名，title 悬浮全文 */
-function renderProjectLabel(option: SelectOption): VNodeChild {
-  const label = String(option.label ?? '')
-  return h('span', { class: 'ad-select-label', title: label }, label)
-}
+const activeProjectName = computed(() => {
+  const active = appState.projects.find((p) => p.id === appState.activeProjectId)
+  if (active) return active.name
+  return appState.hubEnabled ? '选择项目' : '项目'
+})
+
+const projectMenuOptions = computed(() => {
+  const options: DropdownOption[] = []
+  if (statsText.value) options.push({ label: statsText.value, key: 'stats', disabled: true })
+  if (appState.hubEnabled) {
+    for (const project of appState.projects) {
+      options.push({
+        label: `切换到：${project.name}`,
+        key: `project:${project.id}`,
+        disabled: project.id === appState.activeProjectId
+      })
+    }
+  }
+  if (!isStatic.value && appState.activeProjectId !== null) {
+    options.push({ label: '重新生成', key: 'refresh', disabled: appState.loading })
+  }
+  if (appState.hubEnabled) options.push({ label: '项目管理', key: 'projects' })
+  return options
+})
 
 async function handleSwitchProject(id: string): Promise<void> {
   if (id === appState.activeProjectId) return
@@ -69,6 +95,17 @@ async function handleSwitchProject(id: string): Promise<void> {
 
 function goHub(): void {
   void router.push({ name: 'projects' })
+}
+
+function handleProjectMenuSelect(key: string | number): void {
+  const value = String(key)
+  if (value.startsWith('project:')) {
+    void handleSwitchProject(value.slice('project:'.length))
+  } else if (value === 'refresh') {
+    void handleRefresh()
+  } else if (value === 'projects') {
+    goHub()
+  }
 }
 
 async function handleRefresh(): Promise<void> {
@@ -91,48 +128,63 @@ async function handleRefresh(): Promise<void> {
           <router-link to="/" class="ad-wordmark shrink-0">
             AutoDoc
           </router-link>
-          <nav class="flex items-center gap-1 shrink-0">
-            <router-link to="/" class="ad-nav-pill" active-class="ad-nav-pill--active">
-              洞察
-            </router-link>
-            <router-link to="/files" class="ad-nav-pill" active-class="ad-nav-pill--active">
-              文件
-            </router-link>
-            <router-link to="/impact" class="ad-nav-pill" active-class="ad-nav-pill--active">
-              变更影响
+          <nav class="ad-main-nav" aria-label="主导航">
+            <router-link
+              v-for="item in visibleNavItems"
+              :key="item.id"
+              :to="item.to"
+              class="ad-nav-item"
+              :class="{
+                'ad-nav-item--active': isNavActive(item.id),
+                'ad-nav-item--primary': item.id === 'impact'
+              }"
+              :aria-current="isNavActive(item.id) ? 'page' : undefined"
+            >
+              <svg
+                v-if="item.id === 'impact'"
+                class="ad-nav-icon"
+                viewBox="0 0 20 20"
+                fill="none"
+                aria-hidden="true"
+              >
+                <circle cx="5" cy="5" r="2" />
+                <circle cx="15" cy="10" r="2" />
+                <circle cx="5" cy="15" r="2" />
+                <path d="M6.8 6.2 13.2 9M6.8 13.8 13.2 11" />
+              </svg>
+              <svg
+                v-else-if="item.id === 'insight'"
+                class="ad-nav-icon"
+                viewBox="0 0 20 20"
+                fill="none"
+                aria-hidden="true"
+              >
+                <circle cx="10" cy="10" r="7" />
+                <path d="m12.8 7.2-1.5 4.1-4.1 1.5 1.5-4.1 4.1-1.5Z" />
+              </svg>
+              <svg
+                v-else
+                class="ad-nav-icon"
+                viewBox="0 0 20 20"
+                fill="none"
+                aria-hidden="true"
+              >
+                <path d="M5 2.8h6l4 4V17H5V2.8Z" />
+                <path d="M11 2.8v4h4M7.5 10h5M7.5 13h5" />
+              </svg>
+              <span class="ad-nav-label">{{ item.label }}</span>
+              <span class="ad-nav-description">{{ item.description }}</span>
             </router-link>
           </nav>
 
-          <!-- 搜索槽包一层普通 div：tailwind 响应类在原生节点才稳赢 naive cssr 的 display 规则 -->
-          <div class="ad-search hidden lg:block">
+          <div class="ad-search">
             <SearchBar />
           </div>
 
-          <div class="ml-auto flex items-center gap-3 min-w-0">
-            <!-- 项目切换（仅 hub 模式）：旧 n-dropdown 触发按钮在窄屏参与 flex 挤压，改 n-select 定宽 -->
-            <n-select
-              v-if="appState.hubEnabled"
-              :value="appState.activeProjectId"
-              :options="projectOptions"
-              :render-label="renderProjectLabel"
-              v-ad-select-label="'切换项目'"
-              placeholder="选择项目"
-              size="small"
-              class="shrink-0"
-              style="width: 180px"
-              @update:value="(v: string | number) => void handleSwitchProject(String(v))"
-            />
-            <span
-              v-if="appState.meta"
-              class="ad-stats hidden lg:block min-w-0 shrink whitespace-nowrap overflow-hidden text-ellipsis max-w-[280px]"
-              :title="statsText"
-            >
-              {{ statsText }}
-            </span>
+          <div class="ad-header-actions ml-auto flex items-center gap-2 min-w-0">
             <n-tag v-if="readOnly" size="small" type="warning" class="shrink-0">
               只读
             </n-tag>
-            <!-- 团队入口：状态胶囊本身可点开面板；非团队项目 teamPill 为 null，整块不渲染 -->
             <n-tag
               v-if="teamPill"
               size="small"
@@ -149,34 +201,23 @@ async function handleRefresh(): Promise<void> {
             >
               {{ teamPill.label }}
             </n-tag>
-            <n-button
-              v-if="teamPill"
-              size="small"
-              class="ad-btn-outline shrink-0"
-              :theme-overrides="adBtnOutlineOverrides"
-              @click="openTeamPanel"
+            <n-dropdown
+              :options="projectMenuOptions"
+              trigger="click"
+              @select="handleProjectMenuSelect"
             >
-              团队
-            </n-button>
-            <n-button
-              v-if="appState.hubEnabled"
-              size="small"
-              class="ad-btn-outline shrink-0"
-              :theme-overrides="adBtnOutlineOverrides"
-              @click="goHub"
-            >
-              项目管理
-            </n-button>
-            <n-button
-              v-if="!isStatic && appState.activeProjectId !== null"
-              size="small"
-              class="ad-btn-ink shrink-0"
-              :theme-overrides="adBtnInkOverrides"
-              :loading="appState.loading"
-              @click="handleRefresh"
-            >
-              重新生成
-            </n-button>
+              <n-button
+                size="small"
+                class="ad-btn-outline shrink-0"
+                :theme-overrides="adBtnOutlineOverrides"
+                aria-label="项目操作"
+              >
+                <span class="ad-project-menu-label" :title="activeProjectName">
+                  {{ activeProjectName }}
+                </span>
+                <span class="ad-menu-caret" aria-hidden="true"></span>
+              </n-button>
+            </n-dropdown>
           </div>
         </header>
         <main class="px-8 py-6 max-w-[1400px] mx-auto">

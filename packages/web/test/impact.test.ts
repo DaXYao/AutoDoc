@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { InsightChain } from '@autodoc/shared-types'
+import type { ImpactCommit, InsightChain } from '@autodoc/shared-types'
 import { IMPACT_COLOR, RIPPLE_COLOR } from '../src/utils/graphModel'
 import {
   affectedChains,
@@ -7,6 +7,7 @@ import {
   downstreamOf,
   impactOverlayModel,
   IMPACT_TAG,
+  resolveImpactLanding,
   RIPPLE_TAG,
   upstreamRipple
 } from '../src/utils/impact'
@@ -218,5 +219,54 @@ describe('impactOverlayModel', () => {
 
   it('空输入 → 空模型（视图据此不渲染空图）', () => {
     expect(impactOverlayModel([], changed, ripple)).toEqual({ nodes: [], edges: [] })
+  })
+})
+
+describe('resolveImpactLanding', () => {
+  const commits: ImpactCommit[] = [
+    { hash: 'newest', author: 'a', date: '2026-11-03', subject: '最新', functionCount: 0 },
+    { hash: 'older', author: 'b', date: '2026-11-02', subject: '较旧', functionCount: 2 }
+  ]
+  const emptyWorkspace = { changedFunctions: [] }
+  const changedWorkspace = {
+    changedFunctions: [
+      { functionId: 'a.ts::f@1', type: 'modified' as const, filePath: 'a.ts', name: 'f' }
+    ]
+  }
+
+  it('工作区有改动时始终优先工作区', () => {
+    expect(resolveImpactLanding(changedWorkspace, commits)).toEqual({
+      mode: 'workspace',
+      commitHash: null,
+      automatic: false
+    })
+  })
+
+  it('工作区为空且有提交时自动回退到列表第一项', () => {
+    expect(resolveImpactLanding(emptyWorkspace, commits)).toEqual({
+      mode: 'commit',
+      commitHash: 'newest',
+      automatic: true
+    })
+  })
+
+  it('最近提交没有函数记录也不偷换成较旧提交', () => {
+    expect(resolveImpactLanding(emptyWorkspace, commits).commitHash).toBe('newest')
+  })
+
+  it('没有提交时留在工作区空态', () => {
+    expect(resolveImpactLanding(emptyWorkspace, [])).toEqual({
+      mode: 'workspace',
+      commitHash: null,
+      automatic: false
+    })
+  })
+
+  it('提交列表加载失败时不把 null 当成无提交', () => {
+    expect(resolveImpactLanding(emptyWorkspace, null).automatic).toBe(false)
+  })
+
+  it('工作区响应缺失时不做回退', () => {
+    expect(resolveImpactLanding(null, commits).automatic).toBe(false)
   })
 })

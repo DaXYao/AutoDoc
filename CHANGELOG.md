@@ -2,6 +2,14 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-03 · 任务导航重构：变更影响首屏 + 项目洞察/文件文档 + 空工作区回退 · web+docs
+
+- **导航与路由**：serve 默认 `/` 改为变更影响，`/impact` 重定向首页，项目洞察独立到 `/insight`；顶栏按「变更影响 → 项目洞察 → 文件文档」重排，补图标、价值说明与模块/文件详情激活态。项目切换、统计、重新生成与项目管理收进项目菜单，团队状态胶囊保留；全局搜索不再随 `lg` 断点隐藏，窄屏独占一行。
+- **变更首屏**：默认仍取工作区；首次进入/切项目时工作区为空且有 Git 提交则自动展示最近提交，显示 hash/subject 与「切回工作区」。自动回退不写 localStorage、只在首屏执行一次，用户手动选择不被抢改；提交列表失败不误判为无提交。无 Git/无提交与提交无函数记录分别给解释性空态，并提供项目洞察/文件文档入口。
+- **静态导出**：bootstrap 确认静态模式后 `/` 转 `/files`，主导航只保留文件文档与搜索，隐藏不可用的变更影响、项目洞察和写操作。修复 `isStatic` 无响应式依赖导致模式探测前结果被永久缓存的问题（由 `appReady` 门控）。
+- **测试与实跑**：`utils/impact.resolveImpactLanding` 新增 6 项边界测试（工作区优先、最近提交、最新提交无函数记录、无提交、提交列表失败、工作区响应缺失）；全仓 1423 项（core 427 / server 667 / web 329）通过，`pnpm lint`、`pnpm build` 通过。浏览器实测 AutoDoc 自身与隔离 fixture：默认首页、工作区非空、空工作区自动回退、自动选择不持久化、手动切回不跳走、无 Git 空态、项目菜单、项目洞察往返、静态导出导航。未改后端/API/共享类型，未引入依赖。
+- **关联 commit**：随本批次提交。
+
 ## 2026-10-22 · 一键 Agent 任务包（#206/#207）：符号引用一次交接 + 校验合并 · shared-types+server+web+docs
 
 - **后端（server/src/agentTasks.ts）**：新增本地任务目录 `<dataDir>/agent-tasks/<id>/`，生成 `PROMPT.md` / `TASK.md` / `contract.md` / `index.json` / `answers/` / `task.json`。契约复用现有 `generateSupplyRulesText`（新增 `includeTwoRound:false`，去掉变更侧与两轮章节），索引在 `buildSupplyIndexFile` 上补函数行号、代码块与链路 `symbolicKey`。任务清单记录 basis、图谱指纹与函数体内容指纹；生成后任一变化即 `stale`，拒绝旧答案。

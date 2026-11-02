@@ -283,9 +283,14 @@ watch(
 
 <template>
   <div>
-    <div class="flex items-center justify-between mb-3">
-      <h2 class="text-xl font-semibold text-[color:var(--ad-ink)]">项目洞察</h2>
-      <div class="flex items-center gap-2">
+    <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h2 class="text-xl font-semibold text-[color:var(--ad-ink)]">项目洞察</h2>
+        <p class="mt-1 text-sm text-[color:var(--ad-ink-2)]">
+          从模块划分、核心函数和业务链路理解整个项目。
+        </p>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
         <n-tag v-if="insight?.aiGenerated" size="small" type="success" :bordered="false">
           {{ !insight.aiEnabled && hasAgentSupply ? 'Agent 已增强' : 'AI 已增强' }}
         </n-tag>
@@ -301,8 +306,11 @@ watch(
         >
           重新生成 AI
         </n-button>
+        <n-button size="small" quaternary @click="router.push({ name: 'home' })">
+          查看变更影响
+        </n-button>
         <n-button size="small" quaternary @click="router.push({ name: 'files' })">
-          文件列表
+          文件文档
         </n-button>
       </div>
     </div>

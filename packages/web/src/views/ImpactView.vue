@@ -15,6 +15,7 @@ import {
   downstreamOf,
   impactOverlayModel,
   IMPACT_OVERLAY_TOP_N,
+  resolveImpactLanding,
   upstreamRipple
 } from '../utils/impact'
 import { fnJumpQuery } from '../utils/nav'
@@ -100,8 +101,11 @@ const mode = ref<ScopeMode>(initialPrefs.mode)
 const commitHash = ref<string | null>(initialPrefs.commitHash)
 const rangeStart = ref<string | null>(initialPrefs.rangeStart)
 const rangeEnd = ref<string | null>(initialPrefs.rangeEnd)
+const automaticFallback = ref(false)
+let shouldResolveLanding = initialPrefs.mode === 'workspace'
 
 watchEffect(() => {
+  if (automaticFallback.value) return
   const ls = safeLocalStorage()
   if (!ls) return
   const prefs: ImpactPrefs = {
@@ -116,6 +120,40 @@ watchEffect(() => {
     /* 存储满/隐私模式：选择属可再生状态，放弃持久化不阻断视图 */
   }
 })
+
+function selectMode(value: unknown): void {
+  if (!isScopeMode(value)) return
+  automaticFallback.value = false
+  shouldResolveLanding = false
+  mode.value = value
+}
+
+function selectCommitHash(value: unknown): void {
+  automaticFallback.value = false
+  shouldResolveLanding = false
+  commitHash.value = typeof value === 'string' || typeof value === 'number' ? String(value) : null
+}
+
+function selectRangeStart(value: unknown): void {
+  automaticFallback.value = false
+  shouldResolveLanding = false
+  rangeStart.value = typeof value === 'string' || typeof value === 'number' ? String(value) : null
+}
+
+function selectRangeEnd(value: unknown): void {
+  automaticFallback.value = false
+  shouldResolveLanding = false
+  rangeEnd.value = typeof value === 'string' || typeof value === 'number' ? String(value) : null
+}
+
+function resetLandingForProject(): void {
+  if (automaticFallback.value) {
+    automaticFallback.value = false
+    mode.value = 'workspace'
+    commitHash.value = null
+  }
+  shouldResolveLanding = mode.value === 'workspace'
+}
 
 /* ------------------------- 数据获取 ------------------------- */
 
@@ -155,6 +193,15 @@ async function loadChangeset(): Promise<void> {
     const result = await fetchChangeset(scope)
     if (token !== changesetToken) return
     changeset.value = result
+    if (result !== null && shouldResolveLanding && result.scope === 'workspace') {
+      shouldResolveLanding = false
+      const landing = resolveImpactLanding(result, commits.value)
+      if (landing.automatic && landing.commitHash !== null) {
+        automaticFallback.value = true
+        mode.value = 'commit'
+        commitHash.value = landing.commitHash
+      }
+    }
   } catch (error) {
     if (token !== changesetToken) return
     changeset.value = null
@@ -355,6 +402,7 @@ watch(
     //（runAutoRefresh 自带 inFlight 守卫，与在途重生重叠时不会双发）
     autoRefreshPhase.value = 'idle'
     autoRefreshSucceeded = false
+    resetLandingForProject()
     void loadCommits().then(() => loadChangeset())
     void runAutoRefresh()
   }
@@ -554,6 +602,22 @@ const selectionIncomplete = computed(
 const changesetEmpty = computed(
   () => changeset.value !== null && changedFunctions.value.length === 0
 )
+const fallbackCommit = computed(() => {
+  if (!automaticFallback.value) return null
+  return commits.value?.find((commit) => commit.hash === commitHash.value) ?? null
+})
+const emptyDescription = computed(() => {
+  if (mode.value === 'commit') {
+    return '该提交暂无函数级变更记录，可能尚未回填提交历史，或不包含已支持语言的函数变更'
+  }
+  if (commits.value !== null && commits.value.length === 0) {
+    return '当前没有未提交的函数级改动，也没有可回看的 Git 提交'
+  }
+  if (commits.value !== null && commits.value.length > 0) {
+    return '当前工作区没有函数级未提交改动，可切换到单提交或提交范围继续查看'
+  }
+  return '当前工作区没有函数级未提交改动'
+})
 
 function fnName(id: string): string {
   const entry = findFunctionEntry(id)
@@ -573,11 +637,16 @@ function goFunction(id: string): void {
 
 <template>
   <div>
-    <div class="mb-3 flex items-center justify-between">
-      <h2 class="text-xl font-semibold text-[color:var(--ad-ink)]">变更影响分析</h2>
-      <span class="text-xs text-[color:var(--ad-ink-3)]">
-        变更集来自变更历史；链路/调用关系来自当前洞察图谱
-      </span>
+    <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h2 class="text-xl font-semibold text-[color:var(--ad-ink)]">变更影响</h2>
+        <p class="mt-1 text-sm text-[color:var(--ad-ink-2)]">
+          查看这次改动会影响哪些业务链路，以及需要回归的上下游函数。
+        </p>
+      </div>
+      <n-button size="small" quaternary @click="router.push({ name: 'insight' })">
+        查看项目洞察 →
+      </n-button>
     </div>
 
     <!-- 静态导出无变更历史与 impact API，如实提示不渲染空壳 -->
@@ -593,6 +662,22 @@ function goFunction(id: string): void {
     </n-empty>
 
     <template v-else>
+      <div
+        v-if="fallbackCommit"
+        class="mb-3 flex flex-wrap items-center gap-2 rounded-[length:var(--ad-radius)] border border-[color:var(--ad-line)] bg-[color:var(--ad-surface)] px-4 py-2 text-sm text-[color:var(--ad-ink-2)]"
+      >
+        <span>
+          工作区暂无未提交改动，已显示最近提交：
+          <span class="font-mono font-semibold text-[color:var(--ad-ink)]">
+            {{ fallbackCommit.hash.slice(0, 7) }}
+          </span>
+          · {{ fallbackCommit.subject || '(无标题)' }}
+        </span>
+        <n-button size="tiny" quaternary class="ml-auto" @click="selectMode('workspace')">
+          切回工作区
+        </n-button>
+      </div>
+
       <!-- ============ C3：自动增量重生横幅（探测静默；stale 才现身） ============ -->
       <div
         v-if="autoRefreshPhase === 'refreshing'"
@@ -629,7 +714,7 @@ function goFunction(id: string): void {
       <!-- ============ 变更集选择器 ============ -->
       <section class="ad-card mb-4 px-4 py-3">
         <div class="flex flex-wrap items-center gap-3">
-          <n-radio-group v-model:value="mode" size="small">
+          <n-radio-group :value="mode" size="small" @update:value="selectMode">
             <n-radio-button value="workspace">工作区当前</n-radio-button>
             <n-radio-button value="commit" :disabled="commits !== null && commits.length === 0">
               单提交
@@ -641,7 +726,7 @@ function goFunction(id: string): void {
 
           <n-select
             v-if="mode === 'commit'"
-            v-model:value="commitHash"
+            :value="commitHash"
             :options="commitOptions"
             :loading="commitsLoading"
             v-ad-select-label="'选择提交'"
@@ -650,10 +735,11 @@ function goFunction(id: string): void {
             clearable
             placeholder="选择提交"
             class="!w-96 max-w-full"
+            @update:value="selectCommitHash"
           />
           <template v-if="mode === 'range'">
             <n-select
-              v-model:value="rangeStart"
+              :value="rangeStart"
               :options="commitOptions"
               :loading="commitsLoading"
               v-ad-select-label="'范围起点提交'"
@@ -662,10 +748,11 @@ function goFunction(id: string): void {
               clearable
               placeholder="起点提交"
               class="!w-72 max-w-full"
+              @update:value="selectRangeStart"
             />
             <span class="text-xs text-[color:var(--ad-ink-3)]">至</span>
             <n-select
-              v-model:value="rangeEnd"
+              :value="rangeEnd"
               :options="commitOptions"
               :loading="commitsLoading"
               v-ad-select-label="'范围终点提交'"
@@ -674,6 +761,7 @@ function goFunction(id: string): void {
               clearable
               placeholder="终点提交"
               class="!w-72 max-w-full"
+              @update:value="selectRangeEnd"
             />
           </template>
 
@@ -750,12 +838,29 @@ function goFunction(id: string): void {
           description="请先选择提交（选择完整后自动加载变更集）"
           class="my-8"
         />
-        <!-- 变更集为空：后端 200 但无函数级变更（如 commit hash 未回填 git 记录） -->
         <n-empty
           v-else-if="changesetEmpty"
-          description="该变更集无函数级变更"
+          :description="emptyDescription"
           class="my-8"
-        />
+        >
+          <template #extra>
+            <div class="flex flex-wrap justify-center gap-2">
+              <n-button
+                v-if="mode === 'commit'"
+                size="small"
+                @click="selectMode('workspace')"
+              >
+                查看工作区
+              </n-button>
+              <n-button size="small" @click="router.push({ name: 'insight' })">
+                查看项目洞察
+              </n-button>
+              <n-button size="small" @click="router.push({ name: 'files' })">
+                浏览文件文档
+              </n-button>
+            </div>
+          </template>
+        </n-empty>
 
         <template v-else-if="changeset">
           <!-- ============ 摘要卡 ============ -->

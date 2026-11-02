@@ -42,7 +42,7 @@ function goFile(fileId: string): void {
 <template>
   <div>
     <div class="flex items-center gap-2 mb-2">
-      <n-button size="small" quaternary @click="router.push({ name: 'home' })">← 洞察</n-button>
+      <n-button size="small" quaternary @click="router.push({ name: 'insight' })">← 项目洞察</n-button>
       <h2 class="text-xl font-semibold text-[color:var(--ad-ink)]">{{ module?.name ?? '模块' }}</h2>
     </div>
     <div v-if="module" class="mb-4 flex items-start gap-1.5">
