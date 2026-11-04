@@ -33,14 +33,14 @@ import { isCategoryCandidate } from '../src/categoryCandidates.js'
 import { loadInsight, refreshInsightAI, saveInsightSnapshot } from '../src/insight.js'
 import { SUPPLY_PASSES, scanAgentSupply, supplyDirOf } from '../src/agentSupply.js'
 import {
-  archiveMergedInsight,
+  archiveAgentInsight,
   executeMerge,
   insightContentHash,
   mergeAgentSupply
 } from '../src/agentSupplyMerge.js'
 import {
+  applyAgentSemantics,
   applyPassSemantics,
-  applySupplyOverlay,
   clearSupplyCache,
   readFlowsSupply,
   readPartitionSupply,
@@ -329,6 +329,15 @@ async function makeService(
   return { rootDir: dir, normalized, storage, files, generatedAt: '2026-10-19T00:00:00.000Z' }
 }
 
+/**
+ * Agent 管线的「纯静态基线」：不读任何 supply:*。
+ * 等价于双管线分离前 supplyOverlay:false 的「未套用供给」底座，供 mergeAgentSupply /
+ * applyAgentSemantics 的单元用例自行叠加供给。
+ */
+function loadAgentBaseline(service: DocService) {
+  return loadInsight(service, '', { ignoreSnapshot: true, source: 'agent', agentBaselineOnly: true })
+}
+
 function cacheOf(service: DocService): AiCache {
   return new AiCache(dirname(service.storage.dataPath))
 }
@@ -381,7 +390,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
     const graph = fixtureGraph()
     const scan = scanAgentSupply({ dir, graph })
     const service = await makeService(freshDir())
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
 
     const result = mergeAgentSupply({ insight: baseInsight, graph, winners: scan.winners, entries: scan.entries })
     expect(result.changed).toBe(true)
@@ -399,7 +408,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
     const graph = fixtureGraph()
     const scan = scanAgentSupply({ dir, graph })
     const service = await makeService(freshDir())
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
     expect(baseInsight.functions[FN_B].isCore).toBe(false)
 
     const result = mergeAgentSupply({ insight: baseInsight, graph, winners: scan.winners, entries: scan.entries })
@@ -417,7 +426,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
     const graph = fixtureGraph()
     const scan = scanAgentSupply({ dir, graph })
     const service = await makeService(freshDir())
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
     const chain0 = baseInsight.chains.find((c) => c.id === 'chain:0')!
     chain0.stepRoles['dirty-key-that-should-die'] = '脏值'
     chain0.stepRoles[FN_B] = '旧角色'
@@ -439,7 +448,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
   it('mod:i 下标越界：判 missing，不进 provenance / agentSources', async () => {
     const service = await makeService(freshDir())
     const graph = fixtureGraph()
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
     const result = mergeAgentSupply({
       insight: baseInsight,
       graph,
@@ -455,7 +464,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
   it('blocks 的 blockIndexes 越界被过滤，全越界判 missing', async () => {
     const service = await makeService(freshDir())
     const graph = fixtureGraph()
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
     const result = mergeAgentSupply({
       insight: baseInsight,
       graph,
@@ -475,7 +484,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
     const graph = fixtureGraph()
     const scan = scanAgentSupply({ dir, graph })
     const service = await makeService(freshDir())
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
 
     const result = mergeAgentSupply({ insight: baseInsight, graph, winners: scan.winners, entries: scan.entries })
     expect(result.changed).toBe(true)
@@ -502,7 +511,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
     const graph = fixtureGraph()
     const scan = scanAgentSupply({ dir, graph })
     const service = await makeService(freshDir())
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
     // 本地先有一棵旧树与一个旧主干判定：Agent 供给必须整棵/整条覆盖
     baseInsight.flows = [
       {
@@ -577,7 +586,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
       { ...edge(FN_B, FN_A, 'alpha'), line: 4 }
     ]
     const service = await makeService(freshDir(), files)
-    const { insight: baseInsight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const { insight: baseInsight, graph } = loadAgentBaseline(service)
     const result = mergeAgentSupply({
       insight: baseInsight,
       graph,
@@ -591,7 +600,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
 
   it('flows 引用失效 / keySteps 名称不存在 → 整条 missing，不覆盖基线也不记来源', async () => {
     const service = await makeService(freshDir())
-    const { insight: baseInsight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const { insight: baseInsight, graph } = loadAgentBaseline(service)
     const result = mergeAgentSupply({
       insight: baseInsight,
       graph,
@@ -629,7 +638,10 @@ describe('mergeAgentSupply（字段级合并）', () => {
     expect(result.provenance).toEqual([])
     expect(result.changed).toBe(false)
     expect(result.agentSources).toEqual({})
-    expect(result.insight.flows).toBeUndefined()
+    // 失效的 flows 供给不覆盖基线：Agent 纯静态基线保留启发式脉络作为兜底展示
+    expect(result.insight.flows).toEqual(baseInsight.flows)
+    expect(result.insight.flows?.[0]?.source).toBe('heuristic')
+    expect(result.insight.agentSources?.['flows:root']).toBeUndefined()
     expect(result.insight.functions[FN_A].keyCallIndexes).toBeUndefined()
     service.storage.close()
   })
@@ -645,7 +657,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
     const scan = scanAgentSupply({ dir, graph })
     expect(scan.errors).toEqual([])
     const service = await makeService(freshDir(), externalsFiles())
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
     // 本地已有一个同模块符号 + 一个同符号旧值 + 另一个模块
     baseInsight.externals = {
       vue: {
@@ -678,7 +690,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
     const graph = externalsGraph()
     const scan = scanAgentSupply({ dir, graph })
     const service = await makeService(freshDir(), externalsFiles())
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
     baseInsight.externals = structuredClone(EXTERNALS_INSIGHT)
 
     const result = mergeAgentSupply({ insight: baseInsight, graph, winners: scan.winners, entries: scan.entries })
@@ -695,7 +707,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
 
   it('externals：对象 id 非法 / 符号不存在 → missing，不写入也不记来源', async () => {
     const service = await makeService(freshDir(), externalsFiles())
-    const { insight: baseInsight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const { insight: baseInsight, graph } = loadAgentBaseline(service)
     const result = mergeAgentSupply({
       insight: baseInsight,
       graph,
@@ -717,7 +729,7 @@ describe('mergeAgentSupply（字段级合并）', () => {
 
   it('externals：__proto__ / constructor 模块名不污染原型链', async () => {
     const service = await makeService(freshDir(), externalsFiles())
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
     const graph = buildGraph([
       {
         fileId: 'src/evil.ts',
@@ -774,7 +786,7 @@ describe('coreFunctionIds 与 isCore 一致（🔴6）', () => {
     const graph = fixtureGraph()
     const scan = scanAgentSupply({ dir, graph })
     const service = await makeService(freshDir())
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
     expect(baseInsight.modules[0].coreFunctionIds).toEqual([FN_A])
 
     const result = mergeAgentSupply({ insight: baseInsight, graph, winners: scan.winners, entries: scan.entries })
@@ -802,7 +814,9 @@ describe('coreFunctionIds 与 isCore 一致（🔴6）', () => {
         [FN_A]: { core: false, reason: '本地判定非核心' },
         [FN_B]: { core: true, reason: '本地判定核心' }
       })
-      const loaded = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+      // 本用例验证 KEY 管线的实时回读，故显式走 key（默认）管线
+      const loaded = loadInsight(service, '', { ignoreSnapshot: true, source: 'key' })
+      expect(loaded.insight.pipeline).toBe('key')
       expect(loaded.insight.functions[FN_A].isCore).toBe(false)
       expect(loaded.insight.functions[FN_B].isCore).toBe(true)
       // 既有缺陷：rebuildInsightFromGraph 的 {...m} 拷贝早于 applyCoreJudgment，模块核心表停在静态版本
@@ -825,6 +839,7 @@ describe('aiStatus 与 aiSource（裁决②）', () => {
     return {
       generatedAt: '',
       graphFingerprint: 'fp',
+      pipeline: 'agent',
       aiEnabled: true,
       aiGenerated: true,
       partitionSource: 'dir',
@@ -837,39 +852,33 @@ describe('aiStatus 与 aiSource（裁决②）', () => {
     }
   }
 
-  it('本地 ok + Agent 供给一部分 → aiStatus 保持 ok，aiSource=mixed', () => {
-    const insight = base({ categories: 'ok' })
-    applyPassSemantics(insight, uni({ categories: 3 }), uni({ categories: 10 }))
-    expect(insight.aiStatus!.categories).toBe('ok')
-    expect(insight.aiSource!.categories).toBe('mixed')
-  })
-
-  it('本地 partial + Agent 供给 → 降级信号保留（不得抹成 ok），aiSource=mixed', () => {
-    const insight = base({ blocks: 'partial' })
-    applyPassSemantics(insight, uni({ blocks: 5 }), uni({ blocks: 5 }))
-    expect(insight.aiStatus!.blocks).toBe('partial')
-    expect(insight.aiSource!.blocks).toBe('mixed')
-  })
-
-  it('本地 failed + Agent 未覆盖全 → 按覆盖度记 partial，aiSource=agent', () => {
-    const insight = base({ categories: 'failed' })
+  it('Agent 只覆盖一部分 → 按覆盖度记 partial，来源恒 agent（不再有 mixed）', () => {
+    const insight = base({})
     applyPassSemantics(insight, uni({ categories: 3 }), uni({ categories: 10 }))
     expect(insight.aiStatus!.categories).toBe('partial')
     expect(insight.aiSource!.categories).toBe('agent')
+    expect(Object.values(insight.aiSource!)).not.toContain('mixed')
   })
 
-  it('本地 failed + Agent 覆盖全 → ok，aiSource=agent', () => {
-    const insight = base({ categories: 'failed' })
+  it('Agent 覆盖全 → ok，来源 agent', () => {
+    const insight = base({})
     applyPassSemantics(insight, uni({ categories: 10 }), uni({ categories: 10 }))
     expect(insight.aiStatus!.categories).toBe('ok')
     expect(insight.aiSource!.categories).toBe('agent')
   })
 
-  it('本地缺省（无 KEY）+ Agent 供给 → 记状态与 agent 来源', () => {
+  it('结构层（partition / flows）整份替换 → 恒 ok + agent', () => {
+    const insight = base({})
+    applyPassSemantics(insight, uni({ partition: 1, flows: 1 }), uni({ partition: 1, flows: 1 }))
+    expect(insight.aiStatus).toMatchObject({ partition: 'ok', flows: 'ok' })
+    expect(insight.aiSource).toMatchObject({ partition: 'agent', flows: 'agent' })
+  })
+
+  it('未供给的 pass 不登记来源（key 缺省不写成 mixed/api 兜底）', () => {
     const insight = base({})
     applyPassSemantics(insight, uni({ coreJudgment: 1 }), uni({ coreJudgment: 4 }))
-    expect(insight.aiStatus!.coreJudgment).toBe('partial')
-    expect(insight.aiSource!.coreJudgment).toBe('agent')
+    expect(insight.aiStatus).toEqual({ coreJudgment: 'partial' })
+    expect(insight.aiSource).toEqual({ coreJudgment: 'agent' })
   })
 
   it('modules pass 不映射到 partition（只供模块描述 ≠ 划分已生成）', async () => {
@@ -878,7 +887,7 @@ describe('aiStatus 与 aiSource（裁决②）', () => {
     const graph = fixtureGraph()
     const scan = scanAgentSupply({ dir, graph })
     const service = await makeService(freshDir())
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
     const result = mergeAgentSupply({ insight: baseInsight, graph, winners: scan.winners, entries: scan.entries })
     expect(result.insight.modules[0].description).toBe('一句话职责。')
     expect(result.insight.aiStatus?.partition).toBeUndefined()
@@ -900,7 +909,7 @@ describe('aiStatus 与 aiSource（裁决②）', () => {
     expect((res.json() as MergeBody).code).toBe('merged')
 
     // 实时视图（无 KEY）：走增量路径 + 供给缓存
-    const live = loadInsight(service)
+    const live = loadInsight(service, '', { source: 'agent' })
     expect(live.insight.aiEnabled).toBe(false)
     expect(live.insight.aiGenerated).toBe(true)
     const expectAgent: AiPassKey[] = ['flows', 'narratives', 'categories', 'coreJudgment', 'coreRoles', 'blocks', 'keySteps']
@@ -926,7 +935,7 @@ describe('aiStatus 与 aiSource（裁决②）', () => {
     expect(res.statusCode).toBe(200)
     expect((res.json() as MergeBody).code).toBe('merged')
 
-    const live = loadInsight(service)
+    const live = loadInsight(service, '', { source: 'agent' })
     expect(live.insight.aiEnabled).toBe(false)
     expect(live.insight.aiGenerated).toBe(true)
     expect(live.insight.aiStatus?.externals).toBe('ok')
@@ -943,15 +952,18 @@ describe('aiStatus 与 aiSource（裁决②）', () => {
 
 /* ------------------------- 🔴1 归档不再自锁 ------------------------- */
 
-describe('archiveMergedInsight（归档与回滚指针）', () => {
+describe('archiveAgentInsight（Agent 历史归档与回滚指针）', () => {
   it('归档后清空回滚指针，旧快照仍可回滚', async () => {
     const service = await makeService(freshDir())
-    const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const { insight, graph } = loadAgentBaseline(service)
     const oldSnap: InsightSnapshot = {
       id: 'old-1',
       savedAt: '2026-10-01T00:00:00.000Z',
       graphFingerprint: graph.fingerprint,
-      trigger: 'refresh',
+      trigger: 'agent',
+      pipeline: 'agent',
+      source: 'agent',
+      agent: 'qoder',
       partitionFeedback: '',
       aiEnabled: true,
       aiGenerated: true,
@@ -960,17 +972,20 @@ describe('archiveMergedInsight（归档与回滚指针）', () => {
       insight: structuredClone(insight)
     }
     service.storage.addInsightSnapshot(oldSnap)
-    service.storage.setActiveInsightSnapshotId('old-1')
+    service.storage.setActiveInsightSnapshotId('old-1', 'agent')
+    service.storage.setActiveInsightSnapshotId('key-1', 'key')
 
     const merged = structuredClone(insight)
     merged.functions[FN_A].systemRole = 'Agent 赋予的角色'
     merged.agentSources = { [`coreRoles:${FN_A}`]: 'qoder' }
     merged.aiSource = { coreRoles: 'agent' }
-    const result = archiveMergedInsight({ service, insight: merged, graph })
+    const result = archiveAgentInsight({ service, insight: merged, graph })
     expect(result.deduplicated).toBe(false)
     expect(result.snapshotId).not.toBe('old-1')
     // 裁决①：指针清空（生效靠供给缓存 + 实时装配，不靠指针），否则第二次合并会被判 rolledBack 而永久 409
-    expect(service.storage.getActiveInsightSnapshotId()).toBeNull()
+    expect(service.storage.getActiveInsightSnapshotId('agent')).toBeNull()
+    // 回滚指针按管线作用域隔离：归档 Agent 快照不得动 KEY 管线的指针
+    expect(service.storage.getActiveInsightSnapshotId('key')).toBe('key-1')
     expect(service.storage.getInsightSnapshot('old-1')).not.toBeNull()
     const snap = service.storage.getInsightSnapshot(result.snapshotId)!
     expect(snap.trigger).toBe('agent')
@@ -981,11 +996,11 @@ describe('archiveMergedInsight（归档与回滚指针）', () => {
 
   it('同内容重复归档 → deduplicated，快照份数不增', async () => {
     const service = await makeService(freshDir())
-    const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const { insight, graph } = loadAgentBaseline(service)
     const merged = structuredClone(insight)
     merged.functions[FN_A].systemRole = '角色'
-    const r1 = archiveMergedInsight({ service, insight: merged, graph })
-    const r2 = archiveMergedInsight({ service, insight: merged, graph })
+    const r1 = archiveAgentInsight({ service, insight: merged, graph })
+    const r2 = archiveAgentInsight({ service, insight: merged, graph })
     expect(r1.deduplicated).toBe(false)
     expect(r2.deduplicated).toBe(true)
     expect(r2.snapshotId).toBe(r1.snapshotId)
@@ -995,21 +1010,21 @@ describe('archiveMergedInsight（归档与回滚指针）', () => {
 
   it('externals 同内容重复归档去重；符号内容变化产生新快照', async () => {
     const service = await makeService(freshDir())
-    const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const { insight, graph } = loadAgentBaseline(service)
     const m1 = structuredClone(insight)
     m1.externals = {
       'node:fs': { readFile: { purpose: '读取文件。' }, writeFile: { purpose: '写入文件。' } }
     }
-    const r1 = archiveMergedInsight({ service, insight: m1, graph })
+    const r1 = archiveAgentInsight({ service, insight: m1, graph })
     const again = structuredClone(m1)
-    const r2 = archiveMergedInsight({ service, insight: again, graph })
+    const r2 = archiveAgentInsight({ service, insight: again, graph })
     expect(r1.deduplicated).toBe(false)
     expect(r2.deduplicated).toBe(true)
     expect(r2.snapshotId).toBe(r1.snapshotId)
 
     const changed = structuredClone(m1)
     changed.externals!['node:fs'].readFile.purpose = '读取文件（Agent 修正）。'
-    const r3 = archiveMergedInsight({ service, insight: changed, graph })
+    const r3 = archiveAgentInsight({ service, insight: changed, graph })
     expect(r3.deduplicated).toBe(false)
     expect(r3.snapshotId).not.toBe(r1.snapshotId)
     expect(service.storage.listInsightSnapshots()).toHaveLength(2)
@@ -1018,19 +1033,19 @@ describe('archiveMergedInsight（归档与回滚指针）', () => {
 
   it('内容变了则产生新快照（旧的不删）', async () => {
     const service = await makeService(freshDir())
-    const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const { insight, graph } = loadAgentBaseline(service)
     const m1 = structuredClone(insight)
     m1.functions[FN_A].systemRole = '角色 v1'
-    const r1 = archiveMergedInsight({ service, insight: m1, graph })
+    const r1 = archiveAgentInsight({ service, insight: m1, graph })
     const m2 = structuredClone(insight)
     m2.functions[FN_A].systemRole = '角色 v2'
-    const r2 = archiveMergedInsight({ service, insight: m2, graph })
+    const r2 = archiveAgentInsight({ service, insight: m2, graph })
     expect(r1.deduplicated).toBe(false)
     expect(r2.deduplicated).toBe(false)
     expect(r1.snapshotId).not.toBe(r2.snapshotId)
     expect(service.storage.listInsightSnapshots()).toHaveLength(2)
     expect(service.storage.getInsightSnapshot(r1.snapshotId)).not.toBeNull()
-    expect(service.storage.getActiveInsightSnapshotId()).toBeNull()
+    expect(service.storage.getActiveInsightSnapshotId('agent')).toBeNull()
     service.storage.close()
   })
 })
@@ -1040,7 +1055,7 @@ describe('archiveMergedInsight（归档与回滚指针）', () => {
 describe('insightContentHash（去重口径）', () => {
   async function plainInsight(): Promise<ProjectInsight> {
     const service = await makeService(freshDir())
-    const insight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const insight = loadAgentBaseline(service).insight
     service.storage.close()
     return insight
   }
@@ -1159,7 +1174,7 @@ describe('insightContentHash（去重口径）', () => {
     const graph = fixtureGraph()
     const scan = scanAgentSupply({ dir, graph })
     const service = await makeService(freshDir())
-    const baseInsight = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const baseInsight = loadAgentBaseline(service).insight
     const first = mergeAgentSupply({ insight: baseInsight, graph, winners: scan.winners, entries: scan.entries })
     expect(Object.keys(first.agentSources)).toHaveLength(10)
 
@@ -1176,13 +1191,13 @@ describe('insightContentHash（去重口径）', () => {
 /* ------------------------- 供给缓存：增量套用 / force / basis ------------------------- */
 
 describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
-  it('写入后 applySupplyOverlay 能读到并套用', async () => {
+  it('写入后 applyAgentSemantics 能读到并套用', async () => {
     const dir = freshDir()
     const cache = new AiCache(dir)
     writeSupplyCache(cache, FINGERPRINT, BASIS, passDataOf([['coreRoles', FN_B, '缓存里的角色。']]), ['qoder'])
     const service = await makeService(freshDir())
-    const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
-    const touched = applySupplyOverlay(insight, graph, new AiCache(dir))
+    const { insight, graph } = loadAgentBaseline(service)
+    const touched = applyAgentSemantics(insight, graph, new AiCache(dir))
     expect(touched).toBe(true)
     expect(insight.functions[FN_B].systemRole).toBe('缓存里的角色。')
     expect(insight.agentSources?.[`coreRoles:${FN_B}`]).toBe('qoder')
@@ -1207,9 +1222,9 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
       ['qoder']
     )
     const service = await makeService(freshDir(), externalsFiles())
-    const { insight, graph: liveGraph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const { insight, graph: liveGraph } = loadAgentBaseline(service)
     insight.externals = { 'node:fs': { readFile: { purpose: '本地读取。' } }, vue: { computed: { purpose: '本地计算属性。' } } }
-    expect(applySupplyOverlay(insight, liveGraph, new AiCache(dir))).toBe(true)
+    expect(applyAgentSemantics(insight, liveGraph, new AiCache(dir))).toBe(true)
     expect(insight.externals).toEqual({
       'node:fs': {
         readFile: { purpose: 'Agent 读取文件。', signature: 'readFile(path)' },
@@ -1230,7 +1245,7 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
     expect(insight.aiSource?.externals).toBe('agent')
     // 重复套用：同值不再改写，哈希稳定
     const hash = insightContentHash(insight)
-    expect(applySupplyOverlay(insight, liveGraph, new AiCache(dir))).toBe(false)
+    expect(applyAgentSemantics(insight, liveGraph, new AiCache(dir))).toBe(false)
     expect(insightContentHash(insight)).toBe(hash)
     service.storage.close()
   })
@@ -1240,10 +1255,10 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
     const cache = new AiCache(dir)
     writeSupplyCache(cache, FINGERPRINT, BASIS, passDataOf([['coreRoles', FN_B, '角色。']]), ['qoder'])
     const service = await makeService(freshDir())
-    const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
-    expect(applySupplyOverlay(insight, graph, new AiCache(dir))).toBe(true)
+    const { insight, graph } = loadAgentBaseline(service)
+    expect(applyAgentSemantics(insight, graph, new AiCache(dir))).toBe(true)
     const firstHash = insightContentHash(insight)
-    expect(applySupplyOverlay(insight, graph, new AiCache(dir))).toBe(false)
+    expect(applyAgentSemantics(insight, graph, new AiCache(dir))).toBe(false)
     expect(insightContentHash(insight)).toBe(firstHash)
     expect(insight.agentSources?.[`coreRoles:${FN_B}`]).toBe('qoder')
     service.storage.close()
@@ -1347,10 +1362,10 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
       ['qoder']
     )
     const service = await makeService(freshDir())
-    const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const { insight, graph } = loadAgentBaseline(service)
     expect(insight.modules.map((m) => m.name)).not.toEqual(['入口层', '工具层'])
 
-    expect(applySupplyOverlay(insight, graph, new AiCache(dir))).toBe(true)
+    expect(applyAgentSemantics(insight, graph, new AiCache(dir))).toBe(true)
     // partition 先生效，flows / 其余 pass 按应用后的 basis 才读得到
     expect(insight.modules.map((m) => m.name)).toEqual(['入口层', '工具层'])
     expect(insight.partitionSource).toBe('agent')
@@ -1391,7 +1406,7 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
     expect(readSupplyCache(new AiCache(dir), FINGERPRINT, BASIS).size).toBe(0)
   })
 
-  it('force 与 forcePartition 都清掉 supply:* 且不套用；普通刷新套用', async () => {
+  it('force 与 forcePartition 不清 supply:*（KEY 刷新不碰 Agent 供给缓存）', async () => {
     const service = await makeService(freshDir())
     const seed = (): void => {
       writeSupplyCache(cacheOf(service), FINGERPRINT, BASIS, passDataOf([['coreRoles', FN_B, 'Agent 角色。']]), ['qoder'])
@@ -1399,40 +1414,52 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
     // 无 KEY：refreshInsightAI 走早退分支，不发网络请求
     seed()
     const plain = await refreshInsightAI(service, {})
-    expect(plain.insight.functions[FN_B].systemRole).toBe('Agent 角色。')
+    // KEY 管线完全不读 supply:*，故刷新结果里没有 Agent 角色
+    expect(plain.insight.pipeline).toBe('key')
+    expect(plain.insight.functions[FN_B].systemRole).toBe('')
     expect(readSupplyCache(cacheOf(service), FINGERPRINT, BASIS).size).toBe(1)
 
     seed()
     const forced = await refreshInsightAI(service, { force: true })
     expect(forced.insight.functions[FN_B].systemRole).toBe('')
-    expect(readSupplyCache(cacheOf(service), FINGERPRINT, BASIS).size).toBe(0)
+    // force 只重跑 KEY 管线自己的 pass，不得清掉另一条管线的供给
+    expect(readSupplyCache(cacheOf(service), FINGERPRINT, BASIS).size).toBe(1)
 
     seed()
     const repartitioned = await refreshInsightAI(service, { forcePartition: true })
     expect(repartitioned.insight.functions[FN_B].systemRole).toBe('')
-    expect(readSupplyCache(cacheOf(service), FINGERPRINT, BASIS).size).toBe(0)
+    expect(readSupplyCache(cacheOf(service), FINGERPRINT, BASIS).size).toBe(1)
+    // Agent 管线仍照常读到这份供给（两套管线互不影响）
+    const agent = loadInsight(service, '', { source: 'agent' })
+    expect(agent.insight.pipeline).toBe('agent')
+    expect(agent.insight.functions[FN_B].systemRole).toBe('Agent 角色。')
     service.storage.close()
   })
 
-  it('增量路径（loadInsight）在无 KEY 时也套用供给', async () => {
+  it('增量路径按 source 分流：key 不套用供给，agent 套用且两条结果互不覆盖', async () => {
     const service = await makeService(freshDir())
     writeSupplyCache(cacheOf(service), FINGERPRINT, BASIS, passDataOf([['coreRoles', FN_B, 'Agent 角色。']]), ['qoder'])
-    const loaded = loadInsight(service)
-    expect(loaded.insight.aiEnabled).toBe(false)
-    expect(loaded.insight.functions[FN_B].systemRole).toBe('Agent 角色。')
-    expect(loaded.insight.aiGenerated).toBe(true)
-    expect(loaded.insight.aiSource?.coreRoles).toBe('agent')
-    // supplyOverlay:false 的调用方（供给层自身）拿到的必须是纯本地视图
-    const bare = loadInsight(service, '', { supplyOverlay: false })
-    expect(bare.insight.functions[FN_B].systemRole).toBe('')
-    expect(bare.insight.agentSources).toBeUndefined()
+    // 缺省 = KEY 管线：静态基线，零 supply 读取
+    const key = loadInsight(service)
+    expect(key.insight.pipeline).toBe('key')
+    expect(key.insight.aiEnabled).toBe(false)
+    expect(key.insight.functions[FN_B].systemRole).toBe('')
+    expect(key.insight.agentSources).toBeUndefined()
+    // Agent 管线：同一份存储上独立装配，供给生效
+    const agent = loadInsight(service, '', { source: 'agent' })
+    expect(agent.insight.pipeline).toBe('agent')
+    expect(agent.insight.functions[FN_B].systemRole).toBe('Agent 角色。')
+    expect(agent.insight.aiGenerated).toBe(true)
+    expect(agent.insight.aiSource?.coreRoles).toBe('agent')
+    // 两条管线的结果对象互不共享，Agent 套用不会污染已返回的 KEY 结果
+    expect(key.insight.functions[FN_B].systemRole).toBe('')
     service.storage.close()
   })
 })
 
-/* ------------------------- H2：Agent flows 在 KEY 模式下的让位/撤回 ------------------------- */
+/* ------------------------- 双管线独立：KEY 不读供给 / Agent 独立装配 ------------------------- */
 
-describe('H2：Agent flows 在 KEY 模式下让位与撤回恢复', () => {
+describe('KEY 与 Agent 双管线独立装配', () => {
   beforeEach(() => {
     vi.mocked(deepseekChat).mockReset()
   })
@@ -1441,15 +1468,14 @@ describe('H2：Agent flows 在 KEY 模式下让位与撤回恢复', () => {
     return { content: text, finishReason: 'stop', truncated: false } as never
   }
 
-  it('本地核心判定后置产出不让供给 basis 漂移；撤回 flows 后本地生成恢复', async () => {
+  it('Agent 供给存在时 KEY 刷新仍产出自己的划分/脉络，Agent 管线独立保留供给结果', async () => {
     process.env.DEEPSEEK_API_KEY = 'test-key-not-real'
     const prompts: string[] = []
     vi.mocked(deepseekChat).mockImplementation(async (messages) => {
       const user = messages[messages.length - 1].content
       prompts.push(user)
       if (user.includes('请选出「核心函数」')) {
-        // 与静态核心结论相反：全部判为核心 → coreFunctionIds 必然变化（原本只有 FN_A / FN_C）
-        return fakeReply(JSON.stringify({ core: [0, 1, 2, 3].map((idx) => ({ idx, reason: '本地判定' })) }))
+        return fakeReply(JSON.stringify({ core: [0, 1].map((idx) => ({ idx, reason: '本地判定' })) }))
       }
       if (user.includes('业务主线根')) {
         return fakeReply(
@@ -1472,34 +1498,89 @@ describe('H2：Agent flows 在 KEY 模式下让位与撤回恢复', () => {
         'flows.qoder.json',
         envelope('flows', 'qoder', { root: FLOW_VALUE }, '2026-10-18T00:00:00.000Z', basisAfterPartition())
       )
-      writeSupplyFile(supplyDir, 'keySteps.qoder.json', envelope('keySteps', 'qoder', { [FN_B]: { calleeNames: ['alpha'] } }))
+      writeSupplyFile(supplyDir, 'coreRoles.qoder.json', envelope('coreRoles', 'qoder', { [FN_B]: 'Agent 给的角色。' }))
       const service = await makeService(dir)
       expect(executeMerge(service, 'p1').code).toBe('merged')
 
-      // KEY 模式的增量装配：Agent 划分先生效，本地核心判定在装配中途产出并改写核心表
-      const agent = await refreshInsightAI(service, {})
+      // KEY 管线：完全不读 supply:*（本地划分 + 本地脉络 + 本地核心判定），没有任何供给字段渗入
+      const key = await refreshInsightAI(service, {})
+      expect(key.insight.pipeline).toBe('key')
       expect(prompts.some((p) => p.includes('请选出「核心函数」'))).toBe(true)
-      expect(agent.insight.functions[FN_D].isCore).toBe(true)
-      // 供给 basis 不含核心判定 → Agent 树照常生效，本地 flows 一次都没请求
-      expect(prompts.some((p) => p.includes('业务主线根'))).toBe(false)
-      expect(agent.insight.flows?.[0]).toMatchObject({ label: '核心业务主线', source: 'agent' })
-      expect(agent.insight.flowsGeneratedAt).toBe('2026-10-18T00:00:00.000Z')
-      expect(agent.insight.aiStatus?.flows).toBe('ok')
-      expect(agent.insight.aiSource?.flows).toBe('agent')
-      // 同一批函数类供给也仍然生效
-      expect(agent.insight.functions[FN_B].keyCallIndexes).toEqual([0])
-      expect(agent.insight.aiSource?.keySteps).toBe('agent')
-
-      // 撤回 flows 供给（等价于删除文件后重新合并）：本地生成立即恢复
-      cacheOf(service).deleteGlobal('supply:flows')
-      const local = await refreshInsightAI(service, {})
-      expect(local.insight.flows?.[0]).toMatchObject({ label: '本地主线', source: 'ai' })
-      expect(local.insight.aiStatus?.flows).toBe('ok')
       expect(prompts.some((p) => p.includes('业务主线根'))).toBe(true)
+      expect(key.insight.flows?.[0]).toMatchObject({ label: '本地主线', source: 'ai' })
+      // 划分来自 KEY 自己的缓存/回退（mock 对划分返回 '{}' → 目录划分，不会被 Agent 划分顶替）
+      expect(key.insight.partitionSource).toBe('dir')
+      expect(key.insight.functions[FN_B].systemRole).toBe('')
+      expect(key.insight.agentSources).toBeUndefined()
+      expect(Object.values(key.insight.aiSource ?? {})).not.toContain('agent')
+      expect(Object.values(key.insight.aiSource ?? {})).not.toContain('mixed')
+
+      // Agent 管线：同一份存储上独立装配，供给结果原样保留（不被 KEY 刷新覆盖）
+      const agent = loadInsight(service, '', { source: 'agent' })
+      expect(agent.insight.pipeline).toBe('agent')
+      expect(agent.insight.partitionSource).toBe('agent')
+      expect(agent.insight.flows?.[0]).toMatchObject({ label: '核心业务主线', source: 'agent' })
+      expect(agent.insight.functions[FN_B].systemRole).toBe('Agent 给的角色。')
+      expect(agent.insight.aiSource?.coreRoles).toBe('agent')
+      expect(Object.values(agent.insight.aiSource ?? {})).not.toContain('mixed')
+
+      // 反向：Agent 装配后再取 KEY 视图，KEY 结果仍不含 Agent 语义
+      const keyAgain = loadInsight(service, '', { source: 'key' })
+      expect(keyAgain.insight.functions[FN_B].systemRole).toBe('')
+      expect(keyAgain.insight.agentSources).toBeUndefined()
       service.storage.close()
     } finally {
       process.env.DEEPSEEK_API_KEY = ''
     }
+  })
+
+  it('buildAgentInsight 全程零 KEY chat 调用，且不读 KEY 缓存', async () => {
+    process.env.DEEPSEEK_API_KEY = 'test-key-not-real'
+    try {
+      const dir = freshDir()
+      const supplyDir = supplyDirOfService(dir)
+      validFiles(supplyDir)
+      const service = await makeService(dir)
+      const graph = fixtureGraph()
+      // 预置一份 KEY 管线缓存：Agent 装配若误读本地缓存，就会被检测到
+      cacheOf(service).set(graph.fingerprint, 'coreRoles', { [FN_A]: 'KEY 缓存里的角色。' })
+      cacheOf(service).set(graph.fingerprint, 'coreJudgment', { [FN_A]: { core: false, reason: 'KEY 缓存判定' } })
+      expect(executeMerge(service, 'p1').code).toBe('merged')
+      vi.mocked(deepseekChat).mockClear()
+
+      const agent = loadInsight(service, '', { source: 'agent', ignoreSnapshot: true })
+      expect(agent.insight.pipeline).toBe('agent')
+      // 零网络：Agent 装配只做静态分析 + 供给缓存读取
+      expect(vi.mocked(deepseekChat)).not.toHaveBeenCalled()
+      // 零 KEY 缓存读取：KEY 缓存里的角色/核心判定不出现
+      expect(agent.insight.functions[FN_A].systemRole).toBe('')
+      expect(agent.insight.functions[FN_A].coreSource).toBe('agent')
+      // 供给语义照常生效
+      expect(agent.insight.functions[FN_B].systemRole).toBe('类方法入口。')
+      service.storage.close()
+    } finally {
+      process.env.DEEPSEEK_API_KEY = ''
+    }
+  })
+
+  it('Agent 供 partition 时 KEY 仍有自有 partition；两条结果互不覆盖', async () => {
+    const dir = freshDir()
+    const supplyDir = supplyDirOfService(dir)
+    writeSupplyFile(supplyDir, 'partition.qoder.json', envelope('partition', 'qoder', { root: PARTITION_VALUE }))
+    const service = await makeService(dir)
+    expect(executeMerge(service, 'p1').code).toBe('merged')
+
+    const key = loadInsight(service, '', { source: 'key' }).insight
+    const agent = loadInsight(service, '', { source: 'agent' }).insight
+    expect(key.partitionSource).toBe('dir')
+    expect(key.modules.map((m) => m.name)).not.toEqual(['入口层', '工具层'])
+    expect(agent.partitionSource).toBe('agent')
+    expect(agent.modules.map((m) => m.name)).toEqual(['入口层', '工具层'])
+    // 两条结果的对象图完全独立
+    expect(key.modules).not.toBe(agent.modules)
+    expect(key.functions[FN_A]).not.toBe(agent.functions[FN_A])
+    expect(key.modules.map((m) => m.name)).not.toEqual(agent.modules.map((m) => m.name))
+    service.storage.close()
   })
 })
 
@@ -1520,7 +1601,7 @@ describe('categories 供给的候选集登记（🔴5）', () => {
       const user = messages[messages.length - 1].content
       prompts.push(user)
       const text = user.includes(MARK_CATEGORIES) && categoriesAnswer ? categoriesAnswer : '{}'
-      return { ok: true, text, truncated: false, raw: text } as never
+      return { content: text, finishReason: 'stop', truncated: false } as never
     })
     try {
       const service = await makeService(freshDir())
@@ -1538,20 +1619,24 @@ describe('categories 供给的候选集登记（🔴5）', () => {
         passDataOf([['categories', FN_D, { category: 'implementation', reason: '服务于内部流程。' }]]),
         ['qoder']
       )
-      const loaded = loadInsight(service)
+      const loaded = loadInsight(service, '', { source: 'agent' })
       expect(loaded.insight.functions[FN_D].aiCategory).toBe('implementation')
       expect(loaded.graph.nodes.get(FN_D)!.category).toBe('implementation')
       // 关键断言：改写活对象后仍算候选（漏登记 WeakSet 会判 false → chunkHash 漂移 → categories 整批丢）
       expect(isCategoryCandidate(liveFnD)).toBe(true)
 
       // 第二轮：本地 categories 这次能答，候选集必须仍含 FN_D → chunk 照发
-      categoriesAnswer = JSON.stringify({ items: [{ idx: 0, category: 'business', reason: '本地也判了' }] })
+      categoriesAnswer = JSON.stringify({ 0: { category: 'business', reason: '本地也判了' } })
       const before = prompts.length
       const second = await refreshInsightAI(service, {})
       expect(prompts.slice(before).filter((p) => p.includes(MARK_CATEGORIES)).length).toBeGreaterThan(0)
       expect(second.aiChunkStats!.categories.rerun).toBe(1)
-      // Agent 供给仍赢（overlay 在本地 pass 之后）
-      expect(second.insight.functions[FN_D].aiCategory).toBe('implementation')
+      // 双管线各写各的：KEY 结果记自己的判定，不被 Agent 供给覆盖
+      expect(second.insight.functions[FN_D].aiCategory).toBe('business')
+      expect(second.insight.agentSources).toBeUndefined()
+      // Agent 管线仍是供给里的 implementation（KEY 刷新不改供给缓存）
+      const agentAgain = loadInsight(service, '', { source: 'agent' })
+      expect(agentAgain.insight.functions[FN_D].aiCategory).toBe('implementation')
       service.storage.close()
     } finally {
       process.env.DEEPSEEK_API_KEY = ''
@@ -1587,6 +1672,7 @@ describe('POST /api/agent-supply/merge 路由', () => {
       savedAt: '2026-10-01T00:00:00.000Z',
       graphFingerprint: 'fp',
       trigger: 'refresh',
+      pipeline: 'agent',
       partitionFeedback: '',
       aiEnabled: true,
       aiGenerated: true,
@@ -1595,6 +1681,7 @@ describe('POST /api/agent-supply/merge 路由', () => {
       insight: {
         generatedAt: '',
         graphFingerprint: 'fp',
+        pipeline: 'agent',
         aiEnabled: true,
         aiGenerated: true,
         partitionSource: 'dir',
@@ -1606,7 +1693,7 @@ describe('POST /api/agent-supply/merge 路由', () => {
       }
     }
     service.storage.addInsightSnapshot(snap)
-    service.storage.setActiveInsightSnapshotId('snap-1')
+    service.storage.setActiveInsightSnapshotId('snap-1', 'agent')
     const app = await makeApp(service)
     const res = await app.inject({ method: 'POST', url: '/api/agent-supply/merge' })
     expect(res.statusCode).toBe(409)
@@ -1644,7 +1731,7 @@ describe('POST /api/agent-supply/merge 路由', () => {
     expect(body.deduplicated).toBe(false)
     expect(body.stats!.agents).toEqual(['qoder'])
     expect(body.stats!.winnerCount).toBe(10)
-    expect(service.storage.getActiveInsightSnapshotId()).toBeNull()
+    expect(service.storage.getActiveInsightSnapshotId('agent')).toBeNull()
     const snap = service.storage.getInsightSnapshot(body.snapshotId!)!
     expect(snap.trigger).toBe('agent')
     expect(snap.source).toBe('agent')
@@ -1672,7 +1759,7 @@ describe('POST /api/agent-supply/merge 路由', () => {
     expect(b2.deduplicated).toBe(true)
     expect(b2.snapshotId).toBe(b1.snapshotId)
     expect(service.storage.listInsightSnapshots()).toHaveLength(1)
-    expect(service.storage.getActiveInsightSnapshotId()).toBeNull()
+    expect(service.storage.getActiveInsightSnapshotId('agent')).toBeNull()
 
     // 第三次也一样（去重稳定，不是「刚好第二次」）
     const r3 = await app.inject({ method: 'POST', url: '/api/agent-supply/merge' })
@@ -1690,13 +1777,13 @@ describe('POST /api/agent-supply/merge 路由', () => {
     const app = await makeApp(service)
     const first = (await app.inject({ method: 'POST', url: '/api/agent-supply/merge' })).json() as MergeBody
     expect(first.code).toBe('merged')
-    expect(loadInsight(service).insight.modules[0].description).toBe('负责把请求编排成一次完整调用。')
+    expect(loadInsight(service, '', { source: 'agent' }).insight.modules[0].description).toBe('负责把请求编排成一次完整调用。')
 
     // Agent 把供给全撤走：noop 也必须清缓存，否则实时视图会一直显示已撤回的语义且无入口可清
     rmSync(supplyDir, { recursive: true, force: true })
     const second = (await app.inject({ method: 'POST', url: '/api/agent-supply/merge' })).json() as MergeBody
     expect(second.code).toBe('noop')
-    const live = loadInsight(service).insight
+    const live = loadInsight(service, '', { source: 'agent' }).insight
     expect(live.modules[0].description).not.toBe('负责把请求编排成一次完整调用。')
     expect(Object.keys(live.agentSources ?? {})).toEqual([])
     // 已归档的 agent 快照按「只归档不删除」保留
@@ -1721,7 +1808,7 @@ describe('POST /api/agent-supply/merge 路由', () => {
     expect(b2.snapshotId).not.toBe(b1.snapshotId)
     expect(service.storage.listInsightSnapshots()).toHaveLength(2)
     expect(service.storage.getInsightSnapshot(b1.snapshotId!)).not.toBeNull()
-    expect(loadInsight(service).insight.functions[FN_B].systemRole).toBe('改写后的角色。')
+    expect(loadInsight(service, '', { source: 'agent' }).insight.functions[FN_B].systemRole).toBe('改写后的角色。')
     await app.close()
     service.storage.close()
   })
@@ -1738,7 +1825,7 @@ describe('POST /api/agent-supply/merge 路由', () => {
     expect(body.stats!.agents).toEqual(['codex', 'qoder'])
     const snap = service.storage.getInsightSnapshot(body.snapshotId!)!
     expect(snap.agent).toBe('codex,qoder')
-    const live = loadInsight(service).insight
+    const live = loadInsight(service, '', { source: 'agent' }).insight
     expect(live.agentSources?.[`coreRoles:${FN_A}`]).toBe('codex')
     expect(live.agentSources?.[`coreRoles:${FN_B}`]).toBe('qoder')
     await app.close()
@@ -1821,28 +1908,44 @@ describe('executeMerge（核心逻辑）', () => {
     service.storage.close()
   })
 
-  it('归档快照的来源随 aiSource 派生：本地 ok + Agent 供给 → mixed', async () => {
+  it('归档快照的来源由 pipeline 决定（不再从 aiSource 派生 mixed）', async () => {
     const service = await makeService(freshDir())
     const graph = fixtureGraph()
-    const insight: ProjectInsight = {
-      ...structuredClone(loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight),
+    // KEY 管线：即使载荷里残留旧版 mixed 来源，快照来源也只按 pipeline=key 记 api
+    const keyInsight: ProjectInsight = {
+      ...structuredClone(loadAgentBaseline(service).insight),
+      pipeline: 'key',
       aiEnabled: true,
-      agentSources: { [`coreRoles:${FN_B}`]: 'qoder' },
       aiSource: { coreRoles: 'mixed' } as Partial<Record<AiPassKey, SemanticSource>>
     }
-    const snap = saveInsightSnapshot(service, insight, graph, 'refresh')
-    expect(snap?.source).toBe('mixed')
-    expect(snap?.agent).toBe('qoder')
-    expect(snap?.trigger).toBe('refresh')
+    const keySnap = saveInsightSnapshot(service, keyInsight, graph, 'refresh')
+    expect(keySnap?.source).toBe('api')
+    expect(keySnap?.agent).toBeUndefined()
+    expect(keySnap?.pipeline).toBe('key')
+    expect(keySnap?.trigger).toBe('refresh')
+
+    // Agent 管线：来源 agent + 生效 agent 标识
+    const agentInsight: ProjectInsight = {
+      ...structuredClone(loadAgentBaseline(service).insight),
+      pipeline: 'agent',
+      aiEnabled: true,
+      agentSources: { [`coreRoles:${FN_B}`]: 'qoder' },
+      aiSource: { coreRoles: 'agent' }
+    }
+    const agentSnap = saveInsightSnapshot(service, agentInsight, graph, 'refresh')
+    expect(agentSnap?.source).toBe('agent')
+    expect(agentSnap?.agent).toBe('qoder')
+    expect(agentSnap?.pipeline).toBe('agent')
     service.storage.close()
   })
 
-  it('无 Agent 供给的刷新快照 → source=api', async () => {
+  it('无 Agent 供给的 KEY 刷新快照 → source=api', async () => {
     const service = await makeService(freshDir())
-    const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+    const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, source: 'key' })
     const snap = saveInsightSnapshot(service, insight, graph, 'refresh')
     expect(snap?.source).toBe('api')
     expect(snap?.agent).toBeUndefined()
+    expect(snap?.pipeline).toBe('key')
     service.storage.close()
   })
 })

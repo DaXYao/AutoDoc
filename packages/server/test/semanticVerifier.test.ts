@@ -518,6 +518,7 @@ function fullFixture(opts: {
   const insight: ProjectInsight = {
     generatedAt: '2026-10-21T00:00:00.000Z',
     graphFingerprint: graph.fingerprint,
+    pipeline: 'key',
     aiEnabled: true,
     aiGenerated: true,
     partitionSource: opts.partitionSource ?? 'ai',
@@ -1685,6 +1686,7 @@ describe('SG2 预算上限', () => {
     const insight: ProjectInsight = {
       generatedAt: '2026-10-21T00:00:00.000Z',
       graphFingerprint: graph.fingerprint,
+      pipeline: 'key',
       aiEnabled: true,
       aiGenerated: true,
       partitionSource: 'ai',

@@ -1,4 +1,4 @@
-import type { Annotation, AnnotationKind, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType, InsightSnapshot, InsightSnapshotMeta } from '@autodoc/shared-types'
+import type { Annotation, AnnotationKind, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType, InsightSnapshot, InsightSnapshotMeta, InsightSource } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 
 export interface NewAnnotationInput {
@@ -50,6 +50,8 @@ export function toSnapshotMeta(snapshot: InsightSnapshot): InsightSnapshotMeta {
   // G2：语义来源与 agent 标识
   if (snapshot.source !== undefined) meta.source = snapshot.source
   if (snapshot.agent !== undefined) meta.agent = snapshot.agent
+  // 双管线：快照所属生产管线（缺省=开发期合并版 legacy）
+  if (snapshot.pipeline !== undefined) meta.pipeline = snapshot.pipeline
   return meta
 }
 
@@ -171,13 +173,16 @@ export interface StorageAdapter {
   /**
    * 手动删除单条快照（H3，写操作，触发写前备份）；返回是否删除成功。
    * 系统仍不自动清理/覆盖（归档默认全留），仅此用户显式入口可删。
-   * 若被删的是当前回滚指针（activeId）指向的快照，顺带把 activeId 置 null（回到实时视图）。
+   * 若被删的是任一管线的当前回滚指针（activeId），顺带把该指针置 null（回到实时视图）。
    */
   deleteInsightSnapshot(id: string): boolean
-  /** 当前生效（回滚/历史视图）的快照 id；null=实时计算视图 */
-  getActiveInsightSnapshotId(): string | null
-  /** 设置当前生效快照 id；传 null 回到实时计算视图（写操作，触发写前备份） */
-  setActiveInsightSnapshotId(id: string | null): void
+  /**
+   * 指定管线的当前生效（回滚/历史视图）快照 id；null=实时计算视图。
+   * pipeline 缺省 'key'（兼容旧调用）；两套管线各持独立回滚指针。
+   */
+  getActiveInsightSnapshotId(pipeline?: InsightSource): string | null
+  /** 设置指定管线的当前生效快照 id；传 null 回到实时计算视图（写操作，触发写前备份） */
+  setActiveInsightSnapshotId(id: string | null, pipeline?: InsightSource): void
 
   /* ------------------------- 增量解析缓存（I1，可再生数据：写前不备份，区别于批注/变更历史等用户数据） ------------------------- */
 

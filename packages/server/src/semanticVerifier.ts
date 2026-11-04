@@ -647,21 +647,15 @@ function keyObjectRefs(insight: ProjectInsight, graph: ProjectGraph): KeyObjectR
 }
 
 interface SkippedStats {
-  agent: number
   nonTs: number
 }
 
-function skippedCounts(insight: ProjectInsight, graph: ProjectGraph): SkippedStats {
-  let agent = 0
+function skippedCounts(_insight: ProjectInsight, graph: ProjectGraph): SkippedStats {
   let nonTs = 0
-  for (const key of Object.keys(insight.agentSources ?? {})) {
-    if (key.startsWith('changes:')) continue
-    agent++
-  }
   for (const fn of graph.nodes.keys()) {
     if (!isGuaranteeFunction(graph, fn)) nonTs++
   }
-  return { agent, nonTs }
+  return { nonTs }
 }
 
 /* ------------------------- 硬事实 claim ------------------------- */
@@ -2279,7 +2273,6 @@ interface PreparedKeyObject {
 interface PreparedKeySet {
   prepared: PreparedKeyObject[]
   intentObjects: IntentObject[]
-  skippedAgent: number
   skippedNonTs: number
 }
 
@@ -2346,7 +2339,6 @@ function prepareKeyObjects(insight: ProjectInsight, graph: ProjectGraph): Prepar
   return {
     prepared,
     intentObjects,
-    skippedAgent: counts.agent,
     skippedNonTs: counts.nonTs
   }
 }
@@ -2356,7 +2348,6 @@ function emptyStats(): KeyGuaranteeStats {
     objects: 0,
     verified: 0,
     unverified: 0,
-    skippedAgent: 0,
     skippedNonTs: 0,
     llmReviews: 0,
     cacheHits: 0
@@ -2382,10 +2373,6 @@ function finalizeKeyGuarantees(
 
   for (const item of prepared) {
     const key = `${item.pass}:${item.objectId}`
-    if (existing?.[key]?.source === 'agent' || insight.agentSources?.[key] !== undefined) {
-      stats.skippedAgent++
-      continue
-    }
     try {
       const reviewOutcome = item.intent ? reviews.get(key) : undefined
       const guarantee = assembleGuarantee(
@@ -2434,8 +2421,6 @@ export interface KeyGuaranteeStats {
   objects: number
   verified: number
   unverified: number
-  /** Agent 已供给而跳过的对象键数（来源口径统计） */
-  skippedAgent: number
   /** 未接入语言函数数（仅作可观测，不代表对象数） */
   skippedNonTs: number
   /** 实际发起 LLM 复核的对象数（命中缓存的不计；重试不单独计数） */
@@ -2467,7 +2452,7 @@ export async function attachKeyGuarantees(
     console.warn(`[autodoc] SG2 语义对象枚举失败（已跳过）：${errorText(e)}`)
     return stats
   }
-  stats.skippedAgent = preparedSet.skippedAgent
+
   stats.skippedNonTs = preparedSet.skippedNonTs
 
   let reviews = new Map<string, IntentReviewOutcome>()
@@ -2510,7 +2495,7 @@ export function readBackKeyGuarantees(
     console.warn(`[autodoc] SG2 语义对象枚举失败（读取路径已跳过）：${errorText(e)}`)
     return stats
   }
-  stats.skippedAgent = preparedSet.skippedAgent
+
   stats.skippedNonTs = preparedSet.skippedNonTs
 
   const reviews = new Map<string, IntentReviewOutcome>()

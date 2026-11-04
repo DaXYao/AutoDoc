@@ -21,6 +21,7 @@ import type {
   InsightResponse,
   InsightSnapshot,
   InsightSnapshotMeta,
+  InsightSource,
   NewProjectInput,
   ProjectInfo,
   ProjectsResponse,
@@ -158,12 +159,21 @@ export async function pickFolder(): Promise<string | null> {
 
 /* ------------------------- 项目洞察 / 代码图谱 ------------------------- */
 
-/** 静态洞察 + 命中缓存的 AI（快，不触发网络）；feedback 读取对应建议版本。I3：响应附带最近增量统计 */
-export async function fetchInsight(feedback = ''): Promise<InsightResponse | null> {
-  if (mode !== 'api') return null
+/**
+ * 静态洞察 + 命中缓存的语义（快，不触发网络）；feedback 读取对应建议版本，source 选管线。
+ * I3：响应附带最近增量统计。静态导出站返回导出时选定的单来源洞察（旧导出站缺省 null）。
+ */
+export async function fetchInsight(
+  feedback = '',
+  source: InsightSource = 'key'
+): Promise<InsightResponse | null> {
+  if (mode !== 'api') return staticData?.insight ?? null
   try {
-    const qs = feedback ? `?feedback=${encodeURIComponent(feedback)}` : ''
-    return await fetchJson<InsightResponse>(`/api/insight${qs}`)
+    const qs = new URLSearchParams()
+    if (feedback) qs.set('feedback', feedback)
+    if (source !== 'key') qs.set('source', source)
+    const suffix = qs.toString()
+    return await fetchJson<InsightResponse>(`/api/insight${suffix ? `?${suffix}` : ''}`)
   } catch {
     return null
   }
@@ -240,11 +250,15 @@ export async function checkRefresh(): Promise<RefreshCheckResponse | null> {
 
 /* ------------------------- 历史 AI 洞察快照（H2） ------------------------- */
 
-/** 历史快照列表（最近 N + activeId 回滚指针）；静态模式或失败返回 null（前端降级隐藏历史区） */
-export async function fetchInsightHistory(): Promise<InsightHistoryResponse | null> {
+/** 历史快照列表（按管线作用域 + activeId 回滚指针）；静态模式或失败返回 null（前端降级隐藏历史区） */
+export async function fetchInsightHistory(
+  source: InsightSource = 'key'
+): Promise<InsightHistoryResponse | null> {
   if (mode !== 'api') return null
   try {
-    return await fetchJson<InsightHistoryResponse>('/api/insight/history')
+    return await fetchJson<InsightHistoryResponse>(
+      `/api/insight/history${source === 'agent' ? '?source=agent' : ''}`
+    )
   } catch {
     return null
   }
@@ -272,19 +286,26 @@ export async function compareInsightSnapshots(aId: string, bId: string): Promise
   return (await res.json()) as InsightDiff
 }
 
-/** 回滚：把 activeId 指向该快照（写操作，只读模式 403 抛错） */
-export async function rollbackInsightSnapshot(id: string): Promise<void> {
+/** 回滚：把该管线的回滚指针指向该快照（写操作，只读模式 403 抛错；legacy 快照 400 明确拒绝） */
+export async function rollbackInsightSnapshot(
+  id: string,
+  source: InsightSource = 'key'
+): Promise<void> {
   if (mode !== 'api') throw new Error('历史版本写操作仅服务模式可用')
-  const res = await fetch(`/api/insight/history/${encodeURIComponent(id)}/rollback`, {
-    method: 'POST'
-  })
+  const res = await fetch(
+    `/api/insight/history/${encodeURIComponent(id)}/rollback${source === 'agent' ? '?source=agent' : ''}`,
+    { method: 'POST' }
+  )
   if (!res.ok) throw await errorFromResponse(res, '回滚失败')
 }
 
-/** 清除回滚指针，回到实时视图（写操作，只读模式 403 抛错） */
-export async function clearInsightRollback(): Promise<void> {
+/** 清除该管线的回滚指针，回到实时视图（写操作，只读模式 403 抛错） */
+export async function clearInsightRollback(source: InsightSource = 'key'): Promise<void> {
   if (mode !== 'api') throw new Error('历史版本写操作仅服务模式可用')
-  const res = await fetch('/api/insight/history/active', { method: 'DELETE' })
+  const res = await fetch(
+    `/api/insight/history/active${source === 'agent' ? '?source=agent' : ''}`,
+    { method: 'DELETE' }
+  )
   if (!res.ok && res.status !== 204) throw await errorFromResponse(res, '回到实时失败')
 }
 

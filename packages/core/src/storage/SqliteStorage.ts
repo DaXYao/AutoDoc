@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { Annotation, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType, InsightSnapshot, InsightSnapshotMeta, InsightSnapshotStats, ProjectInsight } from '@autodoc/shared-types'
+import type { Annotation, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType, InsightSnapshot, InsightSnapshotMeta, InsightSnapshotStats, InsightSource, ProjectInsight } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 import { backupBaseName, pruneBackups } from './JsonStorage.js'
 import type {
@@ -17,6 +17,14 @@ import type {
   StorageAdapter
 } from './StorageAdapter.js'
 import { toSnapshotMeta } from './StorageAdapter.js'
+
+/**
+ * 两套管线各自独立的回滚指针键。
+ * key 管线沿用旧键 `activeInsightSnapshotId`，使升级前的存量指针（若指向 key 快照）继续有效。
+ */
+function activePointerKey(pipeline: InsightSource): string {
+  return pipeline === 'agent' ? 'activeInsightSnapshotId:agent' : 'activeInsightSnapshotId'
+}
 
 /**
  * SQLite 存储适配器，基于 Node 内置 node:sqlite（零原生依赖、免编译）。
@@ -77,7 +85,10 @@ export class SqliteStorage implements StorageAdapter {
         stats_json TEXT,
         insight_json TEXT,
         label TEXT,
-        note TEXT
+        note TEXT,
+        source TEXT,
+        agent TEXT,
+        pipeline TEXT
       );
       CREATE TABLE IF NOT EXISTS app_state (
         key TEXT PRIMARY KEY,
@@ -101,7 +112,8 @@ export class SqliteStorage implements StorageAdapter {
       'ALTER TABLE insight_history ADD COLUMN label TEXT',
       'ALTER TABLE insight_history ADD COLUMN note TEXT',
       'ALTER TABLE insight_history ADD COLUMN source TEXT',
-      'ALTER TABLE insight_history ADD COLUMN agent TEXT'
+      'ALTER TABLE insight_history ADD COLUMN agent TEXT',
+      'ALTER TABLE insight_history ADD COLUMN pipeline TEXT'
     ]) {
       try {
         this.db.exec(ddl)
@@ -308,7 +320,7 @@ export class SqliteStorage implements StorageAdapter {
     // 只 SELECT meta 列（不取 insight_json），按保存时间倒序（新→旧）
     const rows = this.conn()
       .prepare(
-        'SELECT id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, label, note, source, agent FROM insight_history ORDER BY saved_at DESC'
+        'SELECT id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, label, note, source, agent, pipeline FROM insight_history ORDER BY saved_at DESC'
       )
       .all()
     return rows.map((row) => this.rowToSnapshotMeta(row))
@@ -339,7 +351,7 @@ export class SqliteStorage implements StorageAdapter {
     this.backupOnce()
     this.conn()
       .prepare(
-        'INSERT INTO insight_history (id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, insight_json, label, note, source, agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO insight_history (id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, insight_json, label, note, source, agent, pipeline) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
       .run(
         snapshot.id,
@@ -355,7 +367,8 @@ export class SqliteStorage implements StorageAdapter {
         snapshot.label ?? null,
         snapshot.note ?? null,
         snapshot.source ?? null,
-        snapshot.agent ?? null
+        snapshot.agent ?? null,
+        snapshot.pipeline ?? null
       )
     return toSnapshotMeta(snapshot)
   }
@@ -390,34 +403,34 @@ export class SqliteStorage implements StorageAdapter {
   deleteInsightSnapshot(id: string): boolean {
     this.backupOnce()
     const db = this.conn()
-    // 删的是当前回滚指针指向的快照：顺带清 activeId（回到实时视图）。
+    // 删的是任一管线回滚指针指向的快照：顺带清该指针（回到实时视图）。
     // 注意：DELETE 与清 activeId 是两条语句、非单一原子事务；极端崩溃可能短暂留下悬空
     // activeId，但 loadInsight 对「activeId 指向已不存在快照」会回退实时计算，故可自愈。
-    const clearedActive = this.getActiveInsightSnapshotId() === id
+    const clearedKey = this.getActiveInsightSnapshotId('key') === id
+    const clearedAgent = this.getActiveInsightSnapshotId('agent') === id
     const result = db.prepare('DELETE FROM insight_history WHERE id = ?').run(id)
     const removed = Number(result.changes) > 0
-    if (removed && clearedActive) {
-      db.prepare(
-        "INSERT INTO app_state (key, value) VALUES ('activeInsightSnapshotId', NULL) ON CONFLICT(key) DO UPDATE SET value = NULL"
-      ).run()
+    if (removed) {
+      if (clearedKey) this.setActiveInsightSnapshotId(null, 'key')
+      if (clearedAgent) this.setActiveInsightSnapshotId(null, 'agent')
     }
     return removed
   }
 
-  getActiveInsightSnapshotId(): string | null {
-    const row = this.conn()
-      .prepare("SELECT value FROM app_state WHERE key = 'activeInsightSnapshotId'")
-      .get()
+  getActiveInsightSnapshotId(pipeline: InsightSource = 'key'): string | null {
+    const key = activePointerKey(pipeline)
+    const row = this.conn().prepare('SELECT value FROM app_state WHERE key = ?').get(key)
     return row && typeof row.value === 'string' && row.value.length > 0 ? row.value : null
   }
 
-  setActiveInsightSnapshotId(id: string | null): void {
+  setActiveInsightSnapshotId(id: string | null, pipeline: InsightSource = 'key'): void {
     this.backupOnce()
+    const key = activePointerKey(pipeline)
     this.conn()
       .prepare(
-        "INSERT INTO app_state (key, value) VALUES ('activeInsightSnapshotId', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        'INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
       )
-      .run(id)
+      .run(key, id)
   }
 
   loadParseCache(): ParseCache | null {
@@ -496,7 +509,9 @@ export class SqliteStorage implements StorageAdapter {
       note: typeof row.note === 'string' ? row.note : undefined,
       // G2：语义来源与 agent 标识
       source: row.source === 'agent' || row.source === 'mixed' || row.source === 'api' ? row.source : undefined,
-      agent: typeof row.agent === 'string' && row.agent.length > 0 ? row.agent : undefined
+      agent: typeof row.agent === 'string' && row.agent.length > 0 ? row.agent : undefined,
+      // 双管线：缺省（旧行）= 开发期合并版 legacy
+      pipeline: row.pipeline === 'key' || row.pipeline === 'agent' ? row.pipeline : undefined
     }
   }
 

@@ -210,15 +210,20 @@ program
   .option('-r, --root <dir>', '目标项目根目录', '.')
   .option('-c, --config <file>', '显式指定 autodoc 配置文件')
   .option('-o, --out <dir>', '输出目录', 'autodoc-site')
-  .action(async (options: { root: string; config?: string; out: string }) => {
+  .option('-s, --source <key|agent>', '单来源语义管线（key=本地 KEY API 缓存；agent=外部 Agent 供给）', 'key')
+  .action(async (options: { root: string; config?: string; out: string; source: string }) => {
+    const source = options.source
+    if (source !== 'key' && source !== 'agent') {
+      throw new Error(`--source 必须为 key 或 agent：${source}`)
+    }
     const rootDir = resolveRoot(options.root)
     const configPath = options.config ? resolve(process.cwd(), options.config) : undefined
     const outDir = resolve(process.cwd(), options.out)
     // exportProject 内部先 loadConfig 检查 team 段，再创建 service；
     // 团队配置必须在 TeamStorage.init() 写团队仓库之前被拒绝。
-    const data = await exportProject(rootDir, configPath, outDir, WEB_DIST, warn)
+    const data = await exportProject(rootDir, configPath, outDir, WEB_DIST, warn, source)
     console.log(
-      `[autodoc] 静态站点已导出到 ${outDir}（${data.files.length} 个文件，只读模式）`
+      `[autodoc] 静态站点已导出到 ${outDir}（${data.files.length} 个文件，语义来源 ${source}，只读模式）`
     )
   })
 

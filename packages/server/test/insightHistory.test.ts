@@ -93,6 +93,7 @@ function mkInsight(over: Partial<ProjectInsight> = {}): ProjectInsight {
   return {
     generatedAt: '2026-01-01T00:00:00.000Z',
     graphFingerprint: 'fp',
+    pipeline: 'key',
     aiEnabled: true,
     aiGenerated: true,
     partitionSource: 'ai',

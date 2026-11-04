@@ -223,7 +223,7 @@ function parseModIndex(objectId: string): number | null {
 /**
  * partition → 整项目划分（结构层，唯一键 root）。
  * 与其它 pass 不同，它会重写 modules / moduleIds / chain.moduleId / 模块核心表，
- * 因此必须**先于**其它 pass 套用（overlay 的顺序由 applySupplyOverlay 保证）。
+ * 因此必须**先于**其它 pass 套用（Agent 管线的顺序由 buildAgentInsight / applyAgentSemantics 保证）。
  */
 function applyPartitionMerge(
   insight: ProjectInsight,
@@ -558,13 +558,11 @@ export function computePassUniverse(
 }
 
 /**
- * 按裁决②写 aiStatus / aiSource（两者正交：前者=有没有语义/完整度，后者=谁给的）：
- * - 本地已 'ok'/'partial' → 状态原样保留（禁止把本地算出的降级信号抹成 ok），来源 'mixed'；
- * - 本地 'failed'/'skipped'/缺省 → 状态按 Agent 的实际覆盖度记 'ok'/'partial'，来源 'agent'。
- *
- * 调用前提是 insight.aiStatus 为**纯本地**状态（loadInsight / refreshInsightAI 都满足：
- * 缓存里存的 aiStatus 写在 overlay 之前）。为防重复套用把 'agent' 悄悄升级成 'mixed'，
- * 这里把「aiSource 已是 agent」视作本地无产出，使同一份供给重复套用结果稳定。
+ * 各 pass 的 aiStatus / aiSource（仅 Agent 管线使用）：
+ * - 结构层（partition/flows）整份替换 → 恒 'ok' + 'agent'；
+ * - 其余 pass 按本轮覆盖度记 'ok'/'partial'，来源恒 'agent'。
+ * 双管线分离后不再有 'mixed'：KEY 管线根本不读 supply:*，不存在「一半本地一半 Agent」。
+ * 输入是 Agent 管线静态基线的 aiStatus（通常为空），重复套用同一批供给结果稳定。
  */
 export function applyPassSemantics(
   insight: ProjectInsight,
@@ -576,7 +574,6 @@ export function applyPassSemantics(
   for (const [pass, count] of supplied) {
     if (count <= 0) continue
     // partition / flows 是整份替换：Agent 一旦供给就是完整结构，状态恒 ok、来源恒 agent
-    //（绝无 mixed——本地旧划分/旧树已被整份替换，不存在「一半本地一半 Agent」的结构）
     if (pass === 'partition' || pass === 'flows') {
       aiStatus[pass] = 'ok'
       aiSource[pass] = 'agent'
@@ -584,53 +581,47 @@ export function applyPassSemantics(
     }
     const key = PASS_TO_AI_KEY[pass]
     if (!key) continue
-    const local = aiSource[key] === 'agent' ? undefined : aiStatus[key]
-    if (local === 'ok' || local === 'partial') {
-      aiSource[key] = 'mixed'
-    } else {
-      const total = universe.get(pass) ?? 0
-      aiStatus[key] = total === 0 || count >= total ? 'ok' : 'partial'
-      aiSource[key] = 'agent'
-    }
+    const total = universe.get(pass) ?? 0
+    aiStatus[key] = total === 0 || count >= total ? 'ok' : 'partial'
+    aiSource[key] = 'agent'
   }
   insight.aiStatus = aiStatus
   insight.aiSource = aiSource
 }
 
-/** 快照级来源：由 insight.aiSource / agentSources 派生（无 Agent 字段 → 'api'） */
+/**
+ * 快照级来源：由 pipeline 直接决定。
+ * key → 'api'；agent → 'agent' + 生效 agent 标识。
+ * 'mixed' 仅为开发期合并版旧快照（无 pipeline 字段）的只读渲染保留，新快照永不产生。
+ */
 export function snapshotSourceOf(insight: ProjectInsight): { source: SemanticSource; agent?: string } {
+  if (insight.pipeline !== 'agent') return { source: 'api' }
   const agents = [...new Set(Object.values(insight.agentSources ?? {}))]
     .filter((a) => typeof a === 'string' && a.length > 0)
     .sort()
-  if (agents.length === 0) return { source: 'api' }
-  const sources = Object.values(insight.aiSource ?? {})
-  const source: SemanticSource = sources.includes('mixed') ? 'mixed' : 'agent'
-  return { source, agent: agents.join(',') }
+  return { source: 'agent', ...(agents.length > 0 ? { agent: agents.join(',') } : {}) }
 }
 
 /* ------------------------- 供给套用（增量路径） ------------------------- */
 
 /**
- * 在 loadInsight / refreshInsightAI(非 force) 的装配末尾套用供给缓存。
- * 本地 pass 先跑完，供给再覆盖冲突字段（Agent 赢）。返回是否有字段被改写。
- * 与 mergeAgentSupply 同口径（并集 agentSources、同值也记来源、覆盖度分母先算），
- * 保证「实时视图」与「归档快照」的内容哈希一致，重复扫描不会多存快照。
+ * Agent 管线装配末尾套用供给缓存（**仅** buildAgentInsight 调用；KEY 管线完全不读 supply:*）。
+ * 静态基线先就位，供给覆盖冲突字段（Agent 赢）。返回是否有字段被改写。
  *
  * **partition 永远最先套用**：它是结构层，其余 pass 的 basis / 位置化 id 都以新划分为准。
- * **flows 紧随其后**：整树引用的 mod:N / functionId / chain:N 依赖 partition 应用后的划分身份；
- * 它整树替换洞察里的脉络树，早于其余语义 pass 套用，避免来源/覆盖度先被其它 pass 记一遍。
- * skipPartition=true 用于调用方已经在前面亲手应用过同一份划分（loadInsight / refreshInsightAI）：
- * 不再重复应用（避免结构签名比较之外的无谓改写），但仍要登记来源与 aiStatus。
+ * **flows 紧随其后**：整树引用的 mod:N / functionId / chain:N 依赖 partition 应用后的划分身份。
+ * skipPartition/skipFlows=true 用于调用方已亲手应用过结构层（buildAgentInsight 在读取装配缓存前
+ * 必须先应用 partition 才能算 basis），此时只登记来源与状态，不重复改写。
  */
-export function applySupplyOverlay(
+export function applyAgentSemantics(
   insight: ProjectInsight,
   graph: ProjectGraph,
   cache: AiCache,
-  opts: { skipPartition?: boolean } = {}
+  opts: { skipPartition?: boolean; skipFlows?: boolean } = {}
 ): boolean {
   let changed = false
   const supplied = new Map<AgentSupplyPass, number>()
-  // 并集合并：基线可能已带来源标记，整份替换会让旧键丢失（Agent 写的字段被标成本地）
+  // 并集合并：基线可能已带来源标记，整份替换会让旧键丢失
   const agentSources: InsightAgentSources = { ...insight.agentSources }
   // 语义担保只跟随「实际套用成功」的供给条目；缺 guarantee 的 winner 也传入
   //（用于清掉同 key 的旧担保——内容已被本轮 winner 覆盖，旧担保失效）。
@@ -661,14 +652,16 @@ export function applySupplyOverlay(
   }
 
   // 2) 整树语义层：flows 按「应用 partition 之后」的 basis 读取，并在其余语义 pass 之前整树替换。
-  //    该 basis 只含划分身份（模块/函数归属），不含 coreFunctionIds——核心判定不改变供给 id 的指向，
-  //    本地/Agent 任一侧的核心判定先后都不该让整批供给静默失效。
+  //    该 basis 只含划分身份（模块/函数归属），不含 coreFunctionIds。
   //    构建失败（引用已失效）按 missing 处理：不计来源/覆盖度，保留洞察里现有的树作为兜底展示。
   const basis = flowsBasis(graph)
   const flows = readFlowsSupply(cache, graph.fingerprint, basis)
   if (flows) {
-    const outcome = applyAgentFlowsToInsight(insight, graph, flows.value, flows.writtenAt)
-    if (outcome === 'changed') changed = true
+    let outcome: ApplyOutcome = 'same'
+    if (!opts.skipFlows) {
+      outcome = applyAgentFlowsToInsight(insight, graph, flows.value, flows.writtenAt)
+      if (outcome === 'changed') changed = true
+    }
     if (outcome !== 'missing') {
       supplied.set('flows', 1)
       agentSources['flows:root'] = flows.agent

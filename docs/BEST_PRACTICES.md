@@ -8,6 +8,7 @@
 - 记录标准：这个做法确实解决了问题、且以后可能再次用到。
 
 ## 经验索引（快速扫描）
+- [ ] **双管线独立装配的测试写法**：夹具补 `pipeline` + 断言显式 `source`（`key` 默认 / `agent` 显式）+ 供给叠加用 `agentBaselineOnly` 底座再调 `applyAgentSemantics`；每条用例同时验「KEY 自有结果」与「Agent 自有结果」并互不覆盖、`aiSource` 无 mixed、`force` 不清 `supply:*`（见 2026-11-05 条）。
 - [ ] **一键 Agent 任务包**：本地任务目录（短提示 + 完整索引 + answers/）+ partition 先应用得到新 basis + 符号引用（模块名 / 链路 symbolicKey / 函数稳定 ID）归一 + 复用既有 scan/merge + repair.md + 完成标记；任务过期要同时看图谱与函数体指纹（见 2026-10-22 条）。
 - [ ] **团队 Git 数据仓库同步**：独立 TeamGitClient（execFile 参数数组、显式 ok/error）+ 只提交已知路径（commit pathspec 取已暂存具体文件）+ fetch/merge/push 状态机 + 冲突两阶段版本（`:2:`/`:3:`/both 生成副本）+ 真实 bare remote 双 clone 测试（见 2026-10-21 条）。
 - [ ] **团队仓库安全加固**：`rev-parse --show-toplevel` realpath 必须等于 teamRoot（父仓库/bare 拒绝）+ 清 `GIT_DIR` 等环境变量并设 `GIT_CEILING_DIRECTORIES` + 托管目录 lstat/realpath containment + 冲突 stage 三态（ls-files 失败≠删除）+ 同目录临时文件 `wx`+rename + 每客户端缓存根校验（见 2026-10-22 条）。
@@ -51,6 +52,15 @@
 ---
 
 ## 成功经验条目
+
+### 2026-11-05 · 一条装配线拆成两条独立管线的迁移顺序
+- **场景**：本地 API 语义与外部 Agent 供给原本混装（overlay 覆盖 + mixed 来源），要拆成两条各自完整、互不覆盖的管线。**适用条件**：两类语义来源的输入/缓存/历史都不同，且用户要求能分别回滚。
+- **做法**：
+  1. **先在返回类型上钉住来源**：载荷加必填 `pipeline`（来源），历史加可选 `pipeline`（缺省 legacy 只读）；不要在字段级猜来源。
+  2. **单一分派点**：`loadInsight({ source })` 分派到两个 build 函数；每个 build 只能读自己那侧的缓存（KEY 不读 `supply:*`，Agent 不读 KEY 缓存、不 chat），用注入桩断言「另一侧零调用」。
+  3. **指针/历史按来源分桶**：回滚指针、列表过滤、去重都带 pipeline 作用域；legacy 两边可见但拒绝回滚与跨管线对比。
+  4. **删除混合语义**：overlay 改名并在文档注释里限定只用方；来源枚举不再有 mixed，迁移测试时把「混合」断言改写成「两条各自结果 + 互不覆盖」。
+  5. **force 只作用于自己**：KEY 的 force/forcePartition 不得清对方缓存。
 
 ### 2026-10-22 · 一键 Agent 任务包：符号引用一次交接
 - **场景**：外部 Agent 供给需要同时完成整项目划分与多 pass 语义，旧两轮契约（先 partition、再重新导出）认知负担高。**适用条件**：需要把「结构层 + 语义层」交给一个外部 Agent 一次性产出，且服务端能复用严格校验/合并管线。

@@ -18,7 +18,8 @@ import type {
   AnnotationTargetType,
   ChangeRecord,
   InsightSnapshot,
-  InsightSnapshotMeta
+  InsightSnapshotMeta,
+  InsightSource
 } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 import type {
@@ -821,12 +822,12 @@ export class TeamStorage implements StorageAdapter {
     this.local.setGitWatermark(hash)
   }
 
-  getActiveInsightSnapshotId(): string | null {
-    return this.local.getActiveInsightSnapshotId()
+  getActiveInsightSnapshotId(pipeline: InsightSource = 'key'): string | null {
+    return this.local.getActiveInsightSnapshotId(pipeline)
   }
 
-  setActiveInsightSnapshotId(id: string | null): void {
-    this.local.setActiveInsightSnapshotId(id)
+  setActiveInsightSnapshotId(id: string | null, pipeline: InsightSource = 'key'): void {
+    this.local.setActiveInsightSnapshotId(id, pipeline)
   }
 
   loadParseCache(): ParseCache | null {
@@ -924,9 +925,12 @@ export class TeamStorage implements StorageAdapter {
     if (!existing || existing.id !== id) return false
     this.backupTeamFile(path)
     rmSync(path, { force: true })
-    // activeId 是本机状态：删的正是当前回滚指针时顺带清空（回到实时视图），不留悬空指针
-    if (this.local.getActiveInsightSnapshotId() === id) {
-      this.local.setActiveInsightSnapshotId(null)
+    // activeId 是本机状态：删的正是任一管线的回滚指针时顺带清空（回到实时视图），不留悬空指针
+    if (this.local.getActiveInsightSnapshotId('key') === id) {
+      this.local.setActiveInsightSnapshotId(null, 'key')
+    }
+    if (this.local.getActiveInsightSnapshotId('agent') === id) {
+      this.local.setActiveInsightSnapshotId(null, 'agent')
     }
     return true
   }

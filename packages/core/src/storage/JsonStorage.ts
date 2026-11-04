@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, w
 import { readFileSync } from 'node:fs'
 import { dirname, join, basename, extname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { Annotation, ChangeRecord, ChangeSource, InsightSnapshot, InsightSnapshotMeta } from '@autodoc/shared-types'
+import type { Annotation, ChangeRecord, ChangeSource, InsightSnapshot, InsightSnapshotMeta, InsightSource } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 import type {
   AnnotationPatch,
@@ -28,6 +28,8 @@ interface JsonData {
   insightHistory?: InsightSnapshot[]
   /** 当前生效（回滚/历史视图）快照 id；旧数据缺省视为 undefined（实时计算） */
   activeInsightSnapshotId?: string
+  /** Agent 管线的回滚指针（key 管线复用 activeInsightSnapshotId 以兼容旧数据） */
+  activeAgentInsightSnapshotId?: string
   /** 增量解析缓存（I1，可再生数据非用户数据）；旧数据缺省视为无缓存 */
   parseCache?: ParseCache
 }
@@ -310,20 +312,28 @@ export class JsonStorage implements StorageAdapter {
     const removed = next.length !== list.length
     if (!removed) return false
     this.data.insightHistory = next
-    // 删的是当前回滚指针指向的快照：顺带清 activeId（回到实时视图），不留悬空指针
+    // 删的是任一管线回滚指针指向的快照：顺带清该指针（回到实时视图），不留悬空指针
     if (this.data.activeInsightSnapshotId === id) delete this.data.activeInsightSnapshotId
+    if (this.data.activeAgentInsightSnapshotId === id) delete this.data.activeAgentInsightSnapshotId
     this.save()
     return true
   }
 
-  getActiveInsightSnapshotId(): string | null {
+  getActiveInsightSnapshotId(pipeline: InsightSource = 'key'): string | null {
     this.init()
-    return this.data.activeInsightSnapshotId ?? null
+    return (
+      (pipeline === 'agent'
+        ? this.data.activeAgentInsightSnapshotId
+        : this.data.activeInsightSnapshotId) ?? null
+    )
   }
 
-  setActiveInsightSnapshotId(id: string | null): void {
+  setActiveInsightSnapshotId(id: string | null, pipeline: InsightSource = 'key'): void {
     this.mutate()
-    if (id === null) delete this.data.activeInsightSnapshotId
+    if (pipeline === 'agent') {
+      if (id === null) delete this.data.activeAgentInsightSnapshotId
+      else this.data.activeAgentInsightSnapshotId = id
+    } else if (id === null) delete this.data.activeInsightSnapshotId
     else this.data.activeInsightSnapshotId = id
     this.save()
   }

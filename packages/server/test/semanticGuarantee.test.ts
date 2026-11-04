@@ -31,7 +31,7 @@ import { flowsBasis } from '../src/flow.js'
 import { AiCache } from '../src/aiCache.js'
 // 注意 import 顺序：supplyCache 必须在 agentSupply 之前（agentSupply → insight → supplyCache 的循环里，
 // supplyCache 顶层要用 agentSupply 的 SUPPLY_PASSES；先从 supplyCache 进循环才能保证常量已初始化）。
-import { applySupplyOverlay, writeSupplyCache, type SupplyValueEntry } from '../src/supplyCache.js'
+import { applyAgentSemantics, writeSupplyCache, type SupplyValueEntry } from '../src/supplyCache.js'
 import { generateSupplyRulesText, scanAgentSupply } from '../src/agentSupply.js'
 import { mergeAgentSupply, insightContentHash } from '../src/agentSupplyMerge.js'
 import {
@@ -884,6 +884,7 @@ function baseInsightOf(graph: ProjectGraph): ProjectInsight {
   return {
     generatedAt: '2026-10-21T00:00:00.000Z',
     graphFingerprint: graph.fingerprint,
+    pipeline: 'key',
     aiEnabled: false,
     aiGenerated: false,
     partitionSource: graph.partition.source,
@@ -3659,7 +3660,7 @@ describe('partition / flows root 断言', () => {
 
 /* ------------------------- 合并 / overlay ------------------------- */
 
-describe('mergeAgentSupply / applySupplyOverlay 写入 semanticGuarantees', () => {
+describe('mergeAgentSupply / applyAgentSemantics 写入 semanticGuarantees', () => {
   it('合并后写入担保；旧 agent 担保不残留，未被覆盖的 key/API 担保保留', () => {
     const dir = freshDir()
     mkdirSync(dir, { recursive: true })
@@ -3738,13 +3739,13 @@ describe('mergeAgentSupply / applySupplyOverlay 写入 semanticGuarantees', () =
     })
     writeSupplyCache(cache, GRAPH.fingerprint, flowsBasis(GRAPH), passData, ['qoder'])
     const insight = insightOf(GRAPH)
-    expect(applySupplyOverlay(insight, GRAPH, new AiCache(dir))).toBe(true)
+    expect(applyAgentSemantics(insight, GRAPH, new AiCache(dir))).toBe(true)
     expect(insight.functions[ALPHA].systemRole).toBe('缓存角色。')
     expect(insight.semanticGuarantees?.[`coreRoles:${ALPHA}`]?.status).toBe('declared')
     expect(insight.semanticGuarantees?.[`coreRoles:${ALPHA}`]?.reviewedBy).toBe('qoder')
     // 重复 overlay 同内容：不重复改写、哈希稳定
     const hash = insightContentHash(insight)
-    expect(applySupplyOverlay(insight, GRAPH, new AiCache(dir))).toBe(false)
+    expect(applyAgentSemantics(insight, GRAPH, new AiCache(dir))).toBe(false)
     expect(insightContentHash(insight)).toBe(hash)
   })
 

@@ -21,7 +21,6 @@ import { computeSnapshotStats, loadInsight } from './insight.js'
 import { collectAgentSupply, SUPPLY_PASSES } from './agentSupply.js'
 import { applyAgentPartitionToInsight } from './supplyPartition.js'
 import { applyAgentGuaranteesToInsight } from './semanticGuarantee.js'
-import { readBackKeyGuarantees } from './semanticVerifier.js'
 import {
   applyPassSemantics,
   applyWinnerToInsight,
@@ -63,7 +62,7 @@ export interface MergeResult {
 }
 
 export interface MergeInput {
-  /** 合并基线：必须是「纯本地视图」（loadInsight 的 supplyOverlay:false），否则叠加不可幂等 */
+  /** 合并基线：必须是 Agent 管线的「纯静态基线」（loadInsight 的 agentBaselineOnly:true），否则叠加不可幂等 */
   insight: ProjectInsight
   graph: ProjectGraph
   winners: AgentSupplyWinner[]
@@ -81,6 +80,8 @@ function entryKey(e: { pass: string; objectId: string; agent: string; file: stri
 export function mergeAgentSupply(input: MergeInput): MergeResult {
   const { graph, winners, entries } = input
   const insight: ProjectInsight = structuredClone(input.insight)
+  // 合并产物恒属 Agent 管线（调用方基线也来自 Agent 静态基线）
+  insight.pipeline = 'agent'
   const provenance: MergeProvenanceEntry[] = []
   const agentSources: InsightAgentSources = { ...input.insight.agentSources }
   let changed = false
@@ -339,20 +340,23 @@ export interface ArchiveOptions {
 const DEDUP_LOOKBACK = 3
 
 /**
- * 归档合并结果为新快照。
- * 内容哈希去重：与最近若干份归档完全一致则不重复归档。
- * 归档后**清空回滚指针**（与 saveInsightSnapshot 同口径）：生效不靠指针，而靠
- * 「供给缓存 + 实时装配路径的 overlay」——实时视图本来就显示合并结果；快照只承担版本化/回滚/diff。
+ * 归档 Agent 管线的合并结果为新的 agent 快照（pipeline:'agent'）。
+ * 内容哈希去重只在 agent 管线历史内比较（不与 key/legacy 快照去重，两套历史独立）。
+ * 归档后**清空 Agent 管线回滚指针**（与 saveInsightSnapshot 同口径）：生效不靠指针，而靠
+ * 「供给缓存 + Agent 管线的实时装配」——实时视图本来就显示合并结果；快照只承担版本化/回滚/diff。
  * 若把指针指向新快照，supplyBaselineOf 会判 rolledBack=true，第二次合并永远 409（自锁）。
  */
-export function archiveMergedInsight(opts: ArchiveOptions): ArchiveResult {
+export function archiveAgentInsight(opts: ArchiveOptions): ArchiveResult {
   const { service, insight, graph } = opts
   const contentHash = insightContentHash(insight)
 
-  const recent = service.storage.listInsightSnapshots().slice(0, DEDUP_LOOKBACK)
+  const recent = service.storage
+    .listInsightSnapshots()
+    .filter((s) => s.pipeline === 'agent')
+    .slice(0, DEDUP_LOOKBACK)
   for (const meta of recent) {
     const snap = service.storage.getInsightSnapshot(meta.id)
-    if (snap && insightContentHash(snap.insight) === contentHash) {
+    if (snap && snap.pipeline === 'agent' && insightContentHash(snap.insight) === contentHash) {
       return { snapshotId: meta.id, deduplicated: true }
     }
   }
@@ -370,12 +374,13 @@ export function archiveMergedInsight(opts: ArchiveOptions): ArchiveResult {
     summary: insight.summary,
     stats,
     source,
+    pipeline: 'agent',
     ...(agent ? { agent } : {}),
     insight
   }
 
   service.storage.addInsightSnapshot(snapshot)
-  service.storage.setActiveInsightSnapshotId(null)
+  service.storage.setActiveInsightSnapshotId(null, 'agent')
   return { snapshotId: snapshot.id, deduplicated: false }
 }
 
@@ -409,13 +414,14 @@ export function executeMerge(service: DocService, projectId: string): MergeEndpo
     return { code: 'blocked', merged: false, reason: ctx.baseline.mergeBlockedReason }
   }
 
-  // supplyOverlay:false —— 基线取「纯本地视图」。若吃已 overlay 过的视图，
-  // aiStatus/aiSource 会在上一轮结果上再判一次（agent 被误升为 mixed），且合并不可幂等。
+  // supplyOverlay:false 等价语义 —— 基线取「Agent 管线的纯静态基线」（目录划分 + 启发式脉络），
+  // 不套用任何既有供给：合并必须幂等，且内容哈希去重不受上一轮结果影响。
   // 注意：这份 graph 与 collectAgentSupply 的 graph 是两次独立构建，partition 胜者必须由本函数自己应用
   //（mergeAgentSupply 内部第一步做），不能假设沿用扫描时的划分。
   const { insight: baseInsight, graph } = loadInsight(service, '', {
     ignoreSnapshot: true,
-    supplyOverlay: false,
+    source: 'agent',
+    agentBaselineOnly: true,
     guarantees: false
   })
   const agents = [...new Set(ctx.scan.winners.map((w) => w.agent))].sort()
@@ -439,15 +445,8 @@ export function executeMerge(service: DocService, projectId: string): MergeEndpo
     entries: ctx.scan.entries
   })
 
-  // 归档前补齐 KEY 担保：结构重置（partition/flows winner）会清掉旧的 source='api' 担保，
-  // 这里按复核缓存回放重建，保证归档快照里本地 KEY 产物仍带担保。失败不阻塞合并。
-  try {
-    readBackKeyGuarantees(mergeResult.insight, graph, cache)
-  } catch (e) {
-    console.warn(
-      `[autodoc] 合并归档前担保回放失败（已忽略，不影响合并）：${e instanceof Error ? e.message : String(e)}`
-    )
-  }
+  // 双管线分离：Agent 快照只承载 Agent 语义与 Agent 担保（declared 上限），
+  // 不再回放 KEY 担保（KEY 担保属于 key 管线的洞察与快照）。
 
   // 供给缓存以本次扫描为事实来源整份重写（无条目的 pass 会被删掉），必须早于 noop 早退：
   // 否则 Agent 把文件全撤走时缓存永远不清，实时视图会继续套用已撤回的旧供给。
@@ -478,7 +477,7 @@ export function executeMerge(service: DocService, projectId: string): MergeEndpo
     }
   }
 
-  const archiveResult = archiveMergedInsight({
+  const archiveResult = archiveAgentInsight({
     service,
     insight: mergeResult.insight,
     graph

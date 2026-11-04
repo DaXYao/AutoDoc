@@ -88,7 +88,11 @@ export function toFunctionIndex(service: DocService): FunctionIndexEntry[] {
   return entries
 }
 
-export function toMeta(service: DocService, readOnly = false): ServerMeta {
+export function toMeta(
+  service: DocService,
+  readOnly = false,
+  pipeline?: ServerMeta['pipeline']
+): ServerMeta {
   return {
     generatedAt: service.generatedAt,
     root: service.rootDir,
@@ -97,6 +101,7 @@ export function toMeta(service: DocService, readOnly = false): ServerMeta {
     editor: service.normalized.config.editor ?? {},
     storage: { type: service.storage.kind },
     fileCount: service.files.length,
-    functionCount: service.files.reduce((n, f) => n + f.functions.length, 0)
+    functionCount: service.files.reduce((n, f) => n + f.functions.length, 0),
+    ...(pipeline ? { pipeline } : {})
   }
 }

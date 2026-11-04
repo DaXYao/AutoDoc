@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AgentSupplyResponse, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse, TeamConflictChoice } from '@autodoc/shared-types'
+import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AgentSupplyResponse, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, InsightSource, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse, TeamConflictChoice } from '@autodoc/shared-types'
 import { inspectParseCache, resolveShowRecent } from '@autodoc/core'
 import { regenerate, type DocService } from './context.js'
 import { pickFolder } from './pickFolder.js'
@@ -57,6 +57,17 @@ export interface BuildAppOptions {
 }
 
 const TARGET_TYPES: AnnotationTargetType[] = ['function', 'file', 'module', 'call']
+
+/** 查询参数里的管线：缺省 key；非法值返回 null（路由 400，不静默回退） */
+function parseInsightSource(raw: unknown): InsightSource | null {
+  if (raw === undefined || raw === '') return 'key'
+  return raw === 'key' || raw === 'agent' ? raw : null
+}
+
+/** 快照所属管线：缺省 = 开发期合并版（legacy），在两套历史里只读展示 */
+function snapshotPipelineOf(meta: { pipeline?: InsightSource }): InsightSource | 'legacy' {
+  return meta.pipeline === 'key' || meta.pipeline === 'agent' ? meta.pipeline : 'legacy'
+}
 
 /**
  * I3：把洞察载荷与「最近一次增量统计」拼成 InsightResponse。
@@ -276,12 +287,15 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   /* ------------------------- 项目洞察 / 代码图谱 ------------------------- */
 
-  // 静态洞察 + 命中缓存的 AI（不触发网络，快）；feedback 用于读取对应建议版本的划分缓存
+  // 静态洞察 + 命中缓存的语义（不触发网络，快）；feedback 用于读取对应建议版本的划分缓存。
+  // source=key|agent 选择完全独立的生产管线（缺省 key）；两套管线各自装配完整洞察。
   app.get('/api/insight', async (req, reply) => {
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
-    const { feedback } = req.query as { feedback?: string }
-    return toInsightResponse(service, loadInsight(service, feedback ?? '').insight)
+    const { feedback, source: rawSource } = req.query as { feedback?: string; source?: string }
+    const source = parseInsightSource(rawSource)
+    if (!source) return reply.code(400).send({ error: `source 必须为 key 或 agent：${rawSource}` })
+    return toInsightResponse(service, loadInsight(service, feedback ?? '', { source }).insight)
   })
 
   // 按需生成 AI 洞察（force=true 忽略缓存）；无 key/失败降级为静态
@@ -313,18 +327,27 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   /* ------------------------- 历史 AI 洞察快照（H1） ------------------------- */
 
-  // 历史列表：全归档、只返回最近 N（读操作，不受 readOnly 拦截）
+  // 历史列表：按管线作用域（source=key|agent，缺省 key）。
+  // 开发期合并版（无 pipeline 字段）是 legacy：在两套列表都显示、只读可对比。
   app.get('/api/insight/history', async (req, reply) => {
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
-    const all = service.storage.listInsightSnapshots()
+    const { source: rawSource } = req.query as { source?: string }
+    const source = parseInsightSource(rawSource)
+    if (!source) return reply.code(400).send({ error: `source 必须为 key 或 agent：${rawSource}` })
+    const all = service.storage
+      .listInsightSnapshots()
+      .filter((meta) => {
+        const pipeline = snapshotPipelineOf(meta)
+        return pipeline === source || pipeline === 'legacy'
+      })
     const showRecent = resolveShowRecent(service.normalized)
     const snapshots = all.slice(0, showRecent)
     const body: InsightHistoryResponse = {
       snapshots,
       total: all.length,
       archivedCount: Math.max(all.length - showRecent, 0),
-      activeId: service.storage.getActiveInsightSnapshotId(),
+      activeId: service.storage.getActiveInsightSnapshotId(source),
       showRecent
     }
     return body
@@ -339,7 +362,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     return snap
   })
 
-  // 对比两版：结构化摘要 diff（读，不受 readOnly 拦截）
+  // 对比两版：结构化摘要 diff（读，不受 readOnly 拦截）。
+  // 管线作用域：key/agent 两套历史不互相对比；legacy 可与任一管线对比（只读回看）。
   app.post('/api/insight/history/compare', async (req, reply) => {
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
@@ -352,17 +376,39 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     const b = service.storage.getInsightSnapshot(body.bId)
     if (!a) return reply.code(404).send({ error: `snapshot not found: ${body.aId}` })
     if (!b) return reply.code(404).send({ error: `snapshot not found: ${body.bId}` })
+    const pa = snapshotPipelineOf(a)
+    const pb = snapshotPipelineOf(b)
+    if (pa !== 'legacy' && pb !== 'legacy' && pa !== pb) {
+      return reply
+        .code(400)
+        .send({ error: '不能跨管线对比：KEY 管线与 Agent 管线的历史各自独立（legacy 开发期合并版可与任一管线对比）' })
+    }
     return diffInsightSnapshots(a, b)
   })
 
-  // 回滚为当前：把 activeId 指向该快照（写操作，readOnly 403）
+  // 回滚为当前：把该管线的回滚指针指向该快照（写操作，readOnly 403）。
+  // legacy 快照只读：拒绝回滚并给出明确文案（不属于任何一条独立管线，无法作为实时视图底座）。
   app.post<{ Params: { id: string } }>('/api/insight/history/:id/rollback', async (req, reply) => {
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
+    const { source: rawSource } = req.query as { source?: string }
+    const source = parseInsightSource(rawSource)
+    if (!source) return reply.code(400).send({ error: `source 必须为 key 或 agent：${rawSource}` })
     const snap = service.storage.getInsightSnapshot(req.params.id)
     if (!snap) return reply.code(404).send({ error: `snapshot not found: ${req.params.id}` })
-    service.storage.setActiveInsightSnapshotId(req.params.id)
+    const pipeline = snapshotPipelineOf(snap)
+    if (pipeline === 'legacy') {
+      return reply.code(400).send({
+        error: '该快照是开发期合并版（legacy），只读可对比，不支持回滚。请回滚到 KEY 或 Agent 管线自己的快照。'
+      })
+    }
+    if (pipeline !== source) {
+      return reply.code(400).send({
+        error: `该快照属于 ${pipeline === 'key' ? 'KEY' : 'Agent'} 管线，不能回滚到当前 ${source === 'key' ? 'KEY' : 'Agent'} 视图`
+      })
+    }
+    service.storage.setActiveInsightSnapshotId(req.params.id, source)
     return { ok: true, activeId: req.params.id }
   })
 
@@ -395,18 +441,23 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
-    const clearedActive = service.storage.getActiveInsightSnapshotId() === req.params.id
+    const clearedActive =
+      service.storage.getActiveInsightSnapshotId('key') === req.params.id ||
+      service.storage.getActiveInsightSnapshotId('agent') === req.params.id
     const removed = service.storage.deleteInsightSnapshot(req.params.id)
     if (!removed) return reply.code(404).send({ error: `snapshot not found: ${req.params.id}` })
     return { ok: true, clearedActive }
   })
 
-  // 清除当前生效快照，回到实时计算视图（写操作，readOnly 403）
+  // 清除指定管线的生效快照，回到实时计算视图（写操作，readOnly 403）
   app.delete('/api/insight/history/active', async (req, reply) => {
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
-    service.storage.setActiveInsightSnapshotId(null)
+    const { source: rawSource } = req.query as { source?: string }
+    const source = parseInsightSource(rawSource)
+    if (!source) return reply.code(400).send({ error: `source 必须为 key 或 agent：${rawSource}` })
+    service.storage.setActiveInsightSnapshotId(null, source)
     return { ok: true, activeId: null }
   })
 
@@ -446,9 +497,11 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         const snapshotRecords = service.storage.listChangeRecords({ source: 'snapshot' })
         const supplyId = scopeToSupplyId(scope, snapshotRecords)
         if (supplyId) {
+          // 变更侧供给的 chain:N / stepId 以 Agent 管线结构为基准（与供给契约同源）；
+          // 变更影响页在 Agent 模式下展示的正是同一套结构。
           const { insight, graph } = loadInsight(service, '', {
             ignoreSnapshot: true,
-            supplyOverlay: false,
+            source: 'agent',
             guarantees: false
           })
           const light = collectChangesSupplyLight(service, projectId, graph, snapshotRecords)

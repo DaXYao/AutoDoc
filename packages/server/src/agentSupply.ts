@@ -3241,7 +3241,8 @@ export interface AgentSupplyContext {
  * 与实时划分不是同一套位置 id —— 此时合并必然错配，故直接给出拒绝原因（用户已裁决：先回实时视图）。
  */
 function supplyBaselineOf(service: DocService, graph: ProjectGraph): AgentSupplyBaseline {
-  const pointerId = service.storage.getActiveInsightSnapshotId()
+  // 供给层与 Agent 管线同源：只看 Agent 视图是否处于回滚态（KEY 视图回滚不影响 Agent 结构）
+  const pointerId = service.storage.getActiveInsightSnapshotId('agent')
   // 悬空指针（快照已被删）按「无生效快照」处理：loadInsight 本身也会回退实时计算
   const activeSnapshotId =
     pointerId !== null && service.storage.getInsightSnapshot(pointerId) !== null ? pointerId : null
@@ -3258,15 +3259,14 @@ function supplyBaselineOf(service: DocService, graph: ProjectGraph): AgentSupply
 
 /** 四条供给路由共用的一次性收集：实时图谱 + 扫描 + 建议 + 合并基线（同一请求内只算一遍） */
 export function collectAgentSupply(service: DocService, projectId: string): AgentSupplyContext {
-  // ignoreSnapshot：供给层一律走实时视图（graph 已套用缓存里的 AI 划分，且只读缓存、绝不发起 AI 请求）。
-  // 不吃快照短路——那条路径的 graph 是目录划分版本，mod:i 语义与界面所见不一致，且快照可能陈旧到漏掉新文件的函数。
-  // supplyOverlay:false：其余 pass 的基准只由「静态 + 本地 AI 划分」决定，不能吃 Agent 自己的语义供给；
-  // partition 是例外——它由 scanAgentSupply 在本请求私有的 graph 上先应用（见下），故返回的 graph 已是
-  // 「本地划分 + Agent partition」的最终结构视图，index / 建议 / baseline 全部基于它。
+  // ignoreSnapshot：供给层一律走实时视图。
+  // 双管线分离后，供给契约/索引/校验/建议/一键任务包的 basis **固定取 Agent 管线结构**
+  // （静态基线 + 当前缓存里的 Agent 划分），与页面上 Agent 视图所见一致。
+  // partition 还会由 scanAgentSupply 在本请求私有的 graph 上先应用新文件（见下），
+  // 故返回的 graph 是「静态 + Agent partition」的最终结构视图，index / 建议 / baseline 全部基于它。
   const { graph } = loadInsight(service, '', {
     ignoreSnapshot: true,
-    supplyOverlay: false,
-    guarantees: false
+    source: 'agent'
   })
   const dir = supplyDirOf(service.storage.dataPath, projectId, service.team?.root)
   const indexPath = supplyIndexPathFor(service, dir)

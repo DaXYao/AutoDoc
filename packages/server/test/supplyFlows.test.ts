@@ -115,6 +115,7 @@ function emptyInsight(): ProjectInsight {
   return {
     generatedAt: '',
     graphFingerprint: GRAPH.fingerprint,
+    pipeline: 'agent',
     aiEnabled: false,
     aiGenerated: false,
     partitionSource: 'dir',

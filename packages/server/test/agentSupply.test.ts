@@ -1964,8 +1964,12 @@ describe('Agent 供给路由', () => {
     writeSupply(supplyDir, 'coreRoles.qoder.json', envelope('coreRoles', 'qoder', { [FN_D]: '新函数的角色。' }))
     const service = await makeService(dir, fixtureFiles())
     const stale = makeSnapshot('stale-1', [], {})
+    // Agent 管线的历史快照 + Agent 管线回滚指针（KEY 指针与 Agent 指针互相隔离）
+    stale.pipeline = 'agent'
+    stale.source = 'agent'
+    stale.insight.pipeline = 'agent'
     service.storage.addInsightSnapshot(stale)
-    service.storage.setActiveInsightSnapshotId(stale.id)
+    service.storage.setActiveInsightSnapshotId(stale.id, 'agent')
     const app = await makeApp(service)
     const supply = await app.inject({ method: 'GET', url: '/api/agent-supply' })
     expect(supply.statusCode).toBe(200)
@@ -2052,6 +2056,7 @@ function makeSnapshot(id: string, modules: ProjectInsight['modules'], functions:
   const insight: ProjectInsight = {
     generatedAt: savedAt,
     graphFingerprint: 'stale-fp',
+    pipeline: 'key',
     aiEnabled: true,
     aiGenerated: true,
     partitionSource: 'ai',

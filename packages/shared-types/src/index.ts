@@ -461,6 +461,8 @@ export interface ServerMeta {
   storage: { type: 'sqlite' | 'json' }
   fileCount: number
   functionCount: number
+  /** 静态导出站的单一语义来源（serve 模式缺省；导出时写入 key/agent） */
+  pipeline?: InsightSource
 }
 
 /** export 模式内嵌数据 */
@@ -469,6 +471,8 @@ export interface ExportData {
   files: FileDocView[]
   summaries: FileSummary[]
   functionIndex: FunctionIndexEntry[]
+  /** 静态导出站的单来源洞察（--source 选定的管线；旧导出站缺省） */
+  insight?: InsightResponse
 }
 
 /* ------------------------- 多项目（hub 模式） ------------------------- */
@@ -657,6 +661,12 @@ export interface ExternalSymbolInfo {
 export interface ProjectInsight {
   generatedAt: string
   graphFingerprint: string
+  /**
+   * 本份洞察由哪条生产链路装配：key=本地 KEY API 管线（静态 + 本地 AI 缓存）；
+   * agent=外部 Agent 供给管线（静态基线 + 供给，无供给的 pass 回退目录划分/启发式脉络）。
+   * 两条管线各自产出完整洞察（含结构层与脉络树），互不覆盖。
+   */
+  pipeline: InsightSource
   /** 是否配置了 AI（DeepSeek key） */
   aiEnabled: boolean
   /** AI 摘要是否已生成（缓存命中或本次生成） */
@@ -763,12 +773,18 @@ export interface InsightSnapshotMeta {
   /** 用户可编辑的备注（长文本补充）；缺省/空串则列表不显示备注行 */
   note?: string
   /**
-   * 本快照的语义来源（G2 落库：SQLite insight_history.source 列 / JSON 存储整份对象）。
-   * 缺省（旧快照）= 本地 KEY API。'mixed' = 该版本既有本地产出又叠了 Agent 供给。
+   * 本快照的语义来源（SQLite insight_history.source 列 / JSON 存储整份对象）。
+   * 双管线分离后：key 管线固定 'api'，agent 管线固定 'agent'。
+   * 'mixed' 仅为开发期合并版（legacy，无 pipeline 字段）的只读历史保留。
    */
   source?: SemanticSource
   /** source 含 'agent' 时生效的 agent 标识（多家以逗号连接，排序去重） */
   agent?: string
+  /**
+   * 快照所属生产管线。缺省 = 开发期合并版（legacy）：在两套历史列表都展示，
+   * 只读可对比，禁止回滚。
+   */
+  pipeline?: InsightSource
 }
 
 /** 完整快照：元信息 + 整份 ProjectInsight */
@@ -916,14 +932,17 @@ export interface AskResponse {
 /* ------------------------- Agent 语义供给通道（G1） ------------------------- */
 
 /**
- * AI 语义层的单值来源口径：api=本地 KEY API（DeepSeek）生成；agent=外部订阅制 Agent 供给；
- * mixed=同一 pass 内两条链路都出了内容（本地已 ok/partial，Agent 又覆盖了一部分对象）。
- * 两条链路地位平等，最终都表现为洞察（及其历史快照）里的同一批字段，只是来源标记不同。
+ * AI 语义层的单值来源口径：api=本地 KEY API（DeepSeek）生成；agent=外部 Agent 供给。
+ * 双管线分离后不再产生 'mixed'（两条链路各自产出完整洞察、不合并）；
+ * 'mixed' 仅为开发期合并版旧快照的只读渲染口径保留。
  * 注意：`AiPassStatus`（ok/partial/failed/skipped）表达的是**质量状态**而非来源，故不扩该枚举；
  * 来源统一由本类型（ProjectInsight.aiSource / InsightSnapshotMeta.source）
  * + ProjectInsight.agentSources + FunctionInsight.coreSource='agent' 表达。
  */
 export type SemanticSource = 'api' | 'agent' | 'mixed'
+
+/** 洞察生产管线（展示/生成/历史/导出的作用域维度；默认 key） */
+export type InsightSource = 'key' | 'agent'
 
 /**
  * G1 预留（G2 合并时写入 ProjectInsight.agentSources）：字段级来源标记。

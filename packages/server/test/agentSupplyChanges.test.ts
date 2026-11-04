@@ -122,6 +122,7 @@ function fixtureInsight(): ProjectInsight {
   return {
     generatedAt: '2026-10-19T00:00:00.000Z',
     graphFingerprint: FIXTURE.fingerprint,
+    pipeline: 'agent',
     aiEnabled: false,
     aiGenerated: false,
     partitionSource: FIXTURE.partition.source,

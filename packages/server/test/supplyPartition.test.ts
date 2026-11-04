@@ -251,7 +251,7 @@ function flowRoot(label: string): FlowNode {
 
 /** 模拟「本地 AI 已判核心」后的 insight：graph 与 insight 两份字段一致（同 refresh 里的 syncCore） */
 function aiJudgedFixture(service: DocService): { insight: ProjectInsight; graph: ProjectGraph } {
-  const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false })
+  const { insight, graph } = loadInsight(service, '', { ignoreSnapshot: true, source: 'agent', agentBaselineOnly: true })
   applyCoreJudgment(graph, {
     [FN_B]: { core: true, reason: 'AI：入口方法。' }
   })
@@ -358,7 +358,7 @@ describe('mergeAgentSupply（partition 先行）', () => {
     const graph = fixtureGraph()
     const scan = scanAgentSupply({ dir, graph })
     const service = await makeService(freshDir())
-    const base = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const base = loadInsight(service, '', { ignoreSnapshot: true, source: 'agent', agentBaselineOnly: true }).insight
 
     const result = mergeAgentSupply({ insight: base, graph, winners: scan.winners, entries: scan.entries })
 
@@ -394,7 +394,7 @@ describe('mergeAgentSupply（partition 先行）', () => {
 
   it('insightContentHash：成员集合变化改哈希；完全相同或仅成员重排不变', async () => {
     const service = await makeService(freshDir())
-    const base = loadInsight(service, '', { ignoreSnapshot: true, supplyOverlay: false }).insight
+    const base = loadInsight(service, '', { ignoreSnapshot: true, source: 'agent', agentBaselineOnly: true }).insight
     const build = (value: AgentSupplyPartitionValue): ProjectInsight => {
       const insight = structuredClone(base)
       applyAgentPartitionToInsight(insight, fixtureGraph(), value)
@@ -435,7 +435,7 @@ describe('loadInsight（partition 先应用，语义供给按新 basis 读取）
       [FN_A]: { value: { core: true, reason: '新划分下判定为核心。' }, agent: 'new' }
     })
 
-    const { insight, graph } = loadInsight(service)
+    const { insight, graph } = loadInsight(service, '', { source: 'agent' })
 
     expect(insight.modules.map((m) => m.name)).toEqual(['入口层', '工具层'])
     expect(insight.partitionSource).toBe('agent')

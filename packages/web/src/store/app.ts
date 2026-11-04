@@ -7,6 +7,7 @@ import type {
   ImpactChangeset,
   IncrementalParseStats,
   InsightResponse,
+  InsightSource,
   NewProjectInput,
   ProjectInfo,
   ProjectsResponse,
@@ -73,6 +74,11 @@ export interface AppState {
   activationRecovering: boolean
   summaries: FileSummary[]
   functionIndex: FunctionIndexEntry[]
+  /**
+   * 全局语义管线开关（顶栏分段控件；默认 KEY）。两套管线各自产出完整洞察，
+   * 历史/回滚/生成动作都跟随本值；静态导出站固定为导出时选定的单来源（无开关）。
+   */
+  source: InsightSource
   /** 项目洞察/代码图谱（静态+可选AI）；I3：响应类型附带最近增量统计（parseStats/aiChunkStats） */
   insight: InsightResponse | null
   /**
@@ -105,6 +111,22 @@ export interface AppState {
   fileViews: Map<string, FileDocView>
 }
 
+/**
+ * 从 URL hash query 读取初始管线（`#/insight?source=agent`）。
+ * 首屏不依赖 vue-router（store 不 import router，避免 views→store→router 环）：
+ * 直接解析 location.hash，保证带 `?source=agent` 刷新后仍落在 Agent 视图。
+ */
+function initialInsightSource(): InsightSource {
+  try {
+    const hash = globalThis.location?.hash ?? ''
+    const at = hash.indexOf('?')
+    if (at < 0) return 'key'
+    return new URLSearchParams(hash.slice(at + 1)).get('source') === 'agent' ? 'agent' : 'key'
+  } catch {
+    return 'key'
+  }
+}
+
 export const appState = reactive<AppState>({
   loading: false,
   error: null,
@@ -116,6 +138,7 @@ export const appState = reactive<AppState>({
   activationRecovering: false,
   summaries: [],
   functionIndex: [],
+  source: initialInsightSource(),
   insight: null,
   workspaceChangeset: null,
   agentSupply: null,

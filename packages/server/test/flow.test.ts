@@ -144,6 +144,7 @@ function makeInsight(graph: ProjectGraph): ProjectInsight {
   return {
     generatedAt: new Date().toISOString(),
     graphFingerprint: graph.fingerprint,
+    pipeline: 'key',
     aiEnabled: true,
     aiGenerated: false,
     partitionSource: graph.partition.source,

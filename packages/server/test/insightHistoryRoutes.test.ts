@@ -35,6 +35,7 @@ function mkSnapshot(id: string, savedAt: string, summary: string): InsightSnapsh
   const insight: ProjectInsight = {
     generatedAt: savedAt,
     graphFingerprint: `fp-${id}`,
+    pipeline: 'key',
     aiEnabled: true,
     aiGenerated: true,
     partitionSource: 'ai',
@@ -228,5 +229,97 @@ describe('DELETE /api/insight/history/:id（手动删除单条）', () => {
     expect(service.storage.getActiveInsightSnapshotId()).toBeNull()
     expect(service.storage.listInsightSnapshots()).toHaveLength(2)
     await app.close()
+  })
+})
+
+describe('POST /api/insight/history/:id/rollback（按管线作用域）', () => {
+  it('两套历史独立回滚：key / agent 指针互不影响，跨管线回滚被拒', async () => {
+    const service = await makeService(freshDir())
+    const keySnap: InsightSnapshot = {
+      ...mkSnapshot('key-1', '2026-10-01T00:00:00.000Z', 'KEY 版'),
+      pipeline: 'key',
+      source: 'api'
+    }
+    const agentSnap: InsightSnapshot = {
+      ...mkSnapshot('agent-1', '2026-10-02T00:00:00.000Z', 'Agent 版'),
+      pipeline: 'agent',
+      source: 'agent',
+      agent: 'qoder'
+    }
+    agentSnap.insight.pipeline = 'agent'
+    service.storage.addInsightSnapshot(keySnap)
+    service.storage.addInsightSnapshot(agentSnap)
+    const app = await makeApp(service)
+
+    const rk = await app.inject({ method: 'POST', url: '/api/insight/history/key-1/rollback?source=key' })
+    expect(rk.statusCode).toBe(200)
+    expect(rk.json()).toEqual({ ok: true, activeId: 'key-1' })
+    const ra = await app.inject({ method: 'POST', url: '/api/insight/history/agent-1/rollback?source=agent' })
+    expect(ra.statusCode).toBe(200)
+    // 两条指针各指各的，互不覆盖
+    expect(service.storage.getActiveInsightSnapshotId('key')).toBe('key-1')
+    expect(service.storage.getActiveInsightSnapshotId('agent')).toBe('agent-1')
+
+    // 跨管线：Agent 快照不能回滚到 KEY 视图，反之亦然
+    const cross = await app.inject({ method: 'POST', url: '/api/insight/history/agent-1/rollback?source=key' })
+    expect(cross.statusCode).toBe(400)
+    expect((cross.json() as { error: string }).error).toContain('不能回滚')
+    const cross2 = await app.inject({ method: 'POST', url: '/api/insight/history/key-1/rollback?source=agent' })
+    expect(cross2.statusCode).toBe(400)
+
+    // 列表按管线过滤：agent 列表只见 agent 快照，key 列表只见 key 快照
+    const keyList = (await app.inject({ method: 'GET', url: '/api/insight/history?source=key' })).json() as {
+      snapshots: { id: string }[]
+      activeId: string | null
+    }
+    const agentList = (await app.inject({ method: 'GET', url: '/api/insight/history?source=agent' })).json() as {
+      snapshots: { id: string }[]
+      activeId: string | null
+    }
+    expect(keyList.snapshots.map((s) => s.id)).toEqual(['key-1'])
+    expect(keyList.activeId).toBe('key-1')
+    expect(agentList.snapshots.map((s) => s.id)).toEqual(['agent-1'])
+    expect(agentList.activeId).toBe('agent-1')
+    await app.close()
+    service.storage.close()
+  })
+
+  it('legacy 快照只读：回滚被拒且指针不变（两套历史列表都可见）', async () => {
+    const service = await makeService(freshDir())
+    // 无 pipeline 字段 = 开发期合并版（legacy）
+    const legacy = mkSnapshot('legacy-1', '2026-10-01T00:00:00.000Z', '合并版')
+    service.storage.addInsightSnapshot(legacy)
+    const app = await makeApp(service)
+
+    const res = await app.inject({ method: 'POST', url: '/api/insight/history/legacy-1/rollback?source=key' })
+    expect(res.statusCode).toBe(400)
+    expect((res.json() as { error: string }).error).toContain('legacy')
+    expect(service.storage.getActiveInsightSnapshotId('key')).toBeNull()
+
+    const res2 = await app.inject({ method: 'POST', url: '/api/insight/history/legacy-1/rollback?source=agent' })
+    expect(res2.statusCode).toBe(400)
+
+    // 只读可对比：两套列表都展示 legacy
+    for (const source of ['key', 'agent']) {
+      const list = (await app.inject({ method: 'GET', url: `/api/insight/history?source=${source}` })).json() as {
+        snapshots: { id: string }[]
+      }
+      expect(list.snapshots.map((s) => s.id)).toEqual(['legacy-1'])
+    }
+    await app.close()
+    service.storage.close()
+  })
+
+  it('source 非法 → 400（不静默回退到 key）', async () => {
+    const service = await makeService(freshDir())
+    const snap = mkSnapshot('s1', '2026-10-01T00:00:00.000Z', 'v1')
+    service.storage.addInsightSnapshot(snap)
+    const app = await makeApp(service)
+    const rollback = await app.inject({ method: 'POST', url: '/api/insight/history/s1/rollback?source=bogus' })
+    expect(rollback.statusCode).toBe(400)
+    const list = await app.inject({ method: 'GET', url: '/api/insight/history?source=bogus' })
+    expect(list.statusCode).toBe(400)
+    await app.close()
+    service.storage.close()
   })
 })

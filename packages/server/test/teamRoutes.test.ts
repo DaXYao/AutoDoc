@@ -103,6 +103,7 @@ function mkSnapshot(id: string): InsightSnapshot {
   const insight: ProjectInsight = {
     generatedAt: '2026-01-01T00:00:00.000Z',
     graphFingerprint: 'fp-graph',
+    pipeline: 'key',
     aiEnabled: false,
     aiGenerated: false,
     partitionSource: 'dir',

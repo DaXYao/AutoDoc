@@ -14,6 +14,7 @@ import type {
   InsightSnapshot,
   InsightSnapshotStats,
   InsightSnapshotTrigger,
+  InsightSource,
   InternalStep,
   ProjectInsight
 } from '@autodoc/shared-types'
@@ -37,12 +38,12 @@ import { applyCoreJudgment, applyPartition, buildGraph, syncModuleCores, type Co
 import { collectWorkspacePackageNames } from './workspacePackages.js'
 import { isCategoryCandidate, markClassified } from './categoryCandidates.js'
 import {
-  applySupplyOverlay,
-  clearSupplyCache,
+  applyAgentSemantics,
   readFlowsSupply,
   readPartitionSupply,
   snapshotSourceOf
 } from './supplyCache.js'
+import { applyAgentFlowsToInsight } from './supplyFlows.js'
 import { applyAgentPartitionToInsight } from './supplyPartition.js'
 import { attachKeyGuarantees, readBackKeyGuarantees } from './semanticVerifier.js'
 
@@ -1180,7 +1181,8 @@ function toPartition(graph: ProjectGraph, env: PartitionEnvelope): Partition {
 function buildInsight(
   graph: ProjectGraph,
   aiEnabled: boolean,
-  feedback: string
+  feedback: string,
+  pipeline: InsightSource = 'key'
 ): ProjectInsight {
   const modules: InsightModule[] = graph.modules.map((m) => ({
     ...m,
@@ -1195,6 +1197,7 @@ function buildInsight(
   return {
     generatedAt: new Date().toISOString(),
     graphFingerprint: graph.fingerprint,
+    pipeline,
     aiEnabled,
     aiGenerated: false,
     partitionSource: graph.partition.source,
@@ -1389,7 +1392,7 @@ export function saveInsightSnapshot(
   trigger: InsightSnapshotTrigger
 ): InsightSnapshot | null {
   try {
-    // 归档必须能反映来源：overlay 已在调用前叠好，agentSources/aiSource 就是这一版的出处凭据
+    // 归档必须能反映来源：pipeline 决定 source；agent 管线另记生效 agent 标识
     const { source, agent } = snapshotSourceOf(insight)
     const snapshot: InsightSnapshot = {
       id: randomUUID(),
@@ -1402,12 +1405,13 @@ export function saveInsightSnapshot(
       summary: insight.summary,
       stats: computeSnapshotStats(insight, graph),
       source,
+      pipeline: insight.pipeline,
       ...(agent ? { agent } : {}),
       insight
     }
     service.storage.addInsightSnapshot(snapshot)
     // 回滚指针清空：新快照仅入历史归档，当前视图回到实时计算（不指向最新快照）
-    service.storage.setActiveInsightSnapshotId(null)
+    service.storage.setActiveInsightSnapshotId(null, insight.pipeline)
     return snapshot
   } catch (e) {
     console.warn(
@@ -1433,77 +1437,103 @@ export interface RefreshOptions {
 }
 
 export interface LoadInsightOptions {
+  /** 生产管线（缺省 key）。两套管线各自完整装配，互不覆盖。 */
+  source?: InsightSource
   /**
-   * G1：忽略回滚指针（activeInsightSnapshotId），一律走「实时视图」计算路径。
-   * 实时路径 = 静态图谱 + ai-cache 只读回读（含 AI 划分 applyPartition），**绝不发起 AI 网络请求**。
-   * 供给层的索引/校验/建议必须与 G2 的合并基线同源，故不能吃快照短路（快照路径的 graph 未套用 AI 划分）。
+   * G1：忽略回滚指针，一律走「实时视图」计算路径。
+   * 实时路径 = 静态图谱 + 只读缓存回读，**绝不发起 AI 网络请求**。
+   * 供给层的索引/校验/建议必须与合并基线同源，故不能吃快照短路（快照路径的 graph 未套用划分）。
    */
   ignoreSnapshot?: boolean
   /**
-   * G2：是否套用 Agent 供给缓存（缺省 true = 实时视图所见即含供给）。
-   * 供给层自身（collectAgentSupply 的 basis/索引/建议、executeMerge 的合并基线）必须传 false：
-   * ① basis 只该由「静态 + 本地 AI 划分」决定，否则 Agent 的 coreJudgment 供给会反过来改掉供给口径；
-   * ② 基线若已 overlay 过，aiStatus/aiSource 会在上一轮结果上再判一次（agent 被误升为 mixed），
-   *    且合并结果依赖上一轮状态 → 不幂等，内容哈希去重失效。
+   * Agent 管线专用：只装配静态基线（目录划分 + 启发式脉络），不套用任何供给。
+   * 供 executeMerge 拿「纯静态基线」做字段级合并（合并幂等/内容哈希去重依赖它）。
    */
-  supplyOverlay?: boolean
+  agentBaselineOnly?: boolean
   /**
-   * SG2：是否回放 KEY 语义担保缓存（缺省 true）。
-   * 供给层/变更侧/合并基线只需要结构、不需要担保，传 false 可避免为纯内部读路径重建担保。
+   * SG2：是否回放 KEY 语义担保缓存（缺省 true，仅 key 管线有效）。
+   * 供给层/变更侧只需要结构、不需要担保，传 false 可避免为纯内部读路径重建担保。
    */
   guarantees?: boolean
 }
 
-/** 读取洞察：静态 + 命中缓存的 AI（不触发网络） */
+/**
+ * 两条完全独立的生产管线：key=本地 KEY API，agent=外部 Agent 供给。
+ * 返回的 ProjectInsight.pipeline 标明来源；两套管线各自含结构层与脉络树，不互相覆盖。
+ */
 export function loadInsight(
   service: DocService,
   feedback = '',
   opts: LoadInsightOptions = {}
 ): InsightBundle {
+  const source: InsightSource = opts.source ?? 'key'
   const graph = buildGraph(service.files)
-  // H1：回滚/历史视图——若设了 activeId 且快照命中，直接返回该快照的 insight；
-  // graph 仍实时构建（其它消费方需要）。activeId 为空或快照不存在时，走现有缓存计算逻辑。
-  const activeId = opts.ignoreSnapshot ? null : service.storage.getActiveInsightSnapshotId()
+  // H1：回滚/历史视图——按管线作用域读各自回滚指针，快照命中即整份返回；
+  // 快照的 pipeline 必须与请求管线一致（legacy 快照只读，永远不进入装配短路）。
+  const activeId = opts.ignoreSnapshot ? null : service.storage.getActiveInsightSnapshotId(source)
   if (activeId) {
     const snap = service.storage.getInsightSnapshot(activeId)
-    if (snap) return { insight: snap.insight, graph }
+    if (snap && snap.pipeline === source) return { insight: snap.insight, graph }
   }
   const aiEnabled = getDeepSeekConfig() !== null
-  const insight = buildInsight(graph, aiEnabled, feedback)
   const cache = new AiCache(dirname(service.storage.dataPath))
-  const overlay = opts.supplyOverlay !== false
-  // 无 KEY 时 Agent 供给同样是合法来源，增量路径也要套用（两条链路地位平等，不许显示「未生成」）。
-  // partition 是结构层：先单独应用（只读缓存、无网络），再让 overlay 只叠语义 pass（skipPartition 防重复应用）。
-  if (!aiEnabled) {
-    let agentPartitionApplied = false
-    if (overlay) {
-      const ap = readPartitionSupply(cache, graph.fingerprint)
-      if (ap) {
-        agentPartitionApplied = applyAgentPartitionToInsight(insight, graph, ap.value) !== 'missing'
-      }
+  if (source === 'agent') {
+    return {
+      insight: buildAgentInsight(graph, cache, {
+        aiEnabled,
+        baselineOnly: opts.agentBaselineOnly === true,
+        flowCaps: resolveFlowCaps(service)
+      }),
+      graph
     }
-    if (overlay) applySupplyOverlay(insight, graph, cache, { skipPartition: agentPartitionApplied })
-    return { insight, graph }
   }
+  return {
+    insight: buildKeyInsight(graph, cache, {
+      aiEnabled,
+      feedback,
+      guarantees: opts.guarantees !== false
+    }),
+    graph
+  }
+}
+
+/** 脉络树配额（配置驱动，不写死） */
+function resolveFlowCaps(service: DocService): FlowCaps {
+  const flowCfg = service.normalized.config.insight?.flow ?? {}
+  return {
+    maxDepth: flowCfg.maxDepth ?? DEFAULT_FLOW_CAPS.maxDepth,
+    maxChildrenPerNode: flowCfg.maxChildrenPerNode ?? DEFAULT_FLOW_CAPS.maxChildrenPerNode,
+    maxNodesTotal: flowCfg.maxNodesTotal ?? DEFAULT_FLOW_CAPS.maxNodesTotal
+  }
+}
+
+export interface BuildKeyInsightOptions {
+  aiEnabled: boolean
+  feedback?: string
+  guarantees?: boolean
+}
+
+/**
+ * KEY 管线装配（同步、只读缓存、零网络）：静态基线 + 本地 AI 划分/核心判定/分类/
+ * 主干/内部步骤/外部补全/角色/叙事/脉络树 + KEY 担保回放。
+ * **完全不读取 supply:* 缓存**：Agent 供给既不补充也不抑制本管线（十个 pass 全跑）。
+ */
+export function buildKeyInsight(
+  graph: ProjectGraph,
+  cache: AiCache,
+  opts: BuildKeyInsightOptions
+): ProjectInsight {
+  const feedback = opts.feedback ?? ''
+  const insight = buildInsight(graph, opts.aiEnabled, feedback, 'key')
+  if (!opts.aiEnabled) return insight
   const fp = graph.fingerprint
   let touched = false
-  // ⓪ 结构层：Agent partition 优先于本地 partition:latest（整份替换，Agent 赢）。
-  // 必须先于本地划分/核心判定/分类/叙事等所有 pass 应用：它们的位置化 id 与模块核心表都以新划分为准。
-  let agentPartitionApplied = false
-  if (overlay) {
-    const ap = readPartitionSupply(cache, graph.fingerprint)
-    if (ap) {
-      agentPartitionApplied = applyAgentPartitionToInsight(insight, graph, ap.value) !== 'missing'
-      if (agentPartitionApplied) touched = true
-    }
-  }
   // M1：feedback='' 时优先用 partition:latest（与 refresh 的 previous 语义对齐），
   // 使"采纳建议后"的默认页面加载能读到最新划分，避免树因 basis 不符被永久忽略。
-  // Agent partition 已生效时跳过本地划分（两份划分不能叠加）。
-  const p = agentPartitionApplied
-    ? undefined
-    : feedback === ''
-      ? cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? cache.get<PartitionEnvelope>(fp, `partition:${hash8(feedback)}`)
+  const p =
+    feedback === ''
+      ? cache.get<PartitionEnvelope>(fp, 'partition:latest') ??
+        cache.get<PartitionEnvelope>(fp, `partition:${hash8(feedback)}`)
       : cache.get<PartitionEnvelope>(fp, `partition:${hash8(feedback)}`)
   if (p) {
     applyPartition(graph, toPartition(graph, p))
@@ -1557,8 +1587,7 @@ export function loadInsight(
    */
   let flowsStatus: AiPassStatus | undefined
   // M-R1：applyPartition 之后计算当前 basis，与快照 basis 比对——不符则忽略（不展示矛盾树）。
-  // 无 basis 的旧缓存（H1 之前写入）一律视同不匹配：生产阶段不做向后兼容，否则 Agent 重划后树会按旧划分展示/深链错位。
-  // 本地树缓存用 flowTreeBasis（含核心表）；Agent 供给用 flowsBasis（不含核心，见下方 overlay）。
+  // 无 basis 的旧缓存（H1 之前写入）一律视同不匹配：生产阶段不做向后兼容。
   const currentBasis = flowTreeBasis(graph)
   const basisMatch = flowsTree?.basis === currentBasis
   if (flowsTree && flowsTree.tree.length > 0 && basisMatch) {
@@ -1586,13 +1615,9 @@ export function loadInsight(
       blocks: blocksStatusOf(blocksRead.out, blocksRead.misses, true)
     }
   }
-  // G2：增量路径套用供给缓存（本地 pass 之后再叠一层 Agent 供给，冲突以 Agent 为准）。
-  // partition 已在最前面应用，overlay 只叠其余 pass 并按新 basis 读取；skipPartition 防重复改写。
-  if (overlay) applySupplyOverlay(insight, graph, cache, { skipPartition: agentPartitionApplied })
   insight.aiGenerated = touched || insight.aiGenerated
-  // SG2：读取路径只回放复核缓存（绝不发网络、绝不写/删缓存），保证页面刷新、
-  // 合并基线或回滚后 KEY 语义仍带 source='api' 担保。逐对象 try/catch 在函数内部。
-  // guarantees:false 用于纯内部读路径（供给索引 / 变更集 / 合并基线），避免无谓重建担保。
+  // SG2：读取路径只回放复核缓存（绝不发网络、绝不写/删缓存），保证页面刷新/回滚后 KEY 语义仍带 source='api' 担保。
+  // guarantees:false 用于纯内部读路径（供给索引 / 变更集），避免无谓重建担保。
   if (opts.guarantees !== false) {
     try {
       readBackKeyGuarantees(insight, graph, cache)
@@ -1602,7 +1627,89 @@ export function loadInsight(
       )
     }
   }
-  return { insight, graph }
+  return insight
+}
+
+export interface BuildAgentInsightOptions {
+  aiEnabled: boolean
+  /** 只装配静态基线（不读任何 supply:*） */
+  baselineOnly?: boolean
+  flowCaps: FlowCaps
+}
+
+/** Agent 装配结果的缓存信封：basis + 供给内容修订号双重校验，任一不符即重装。 */
+interface AgentInsightCacheEntry {
+  basis: string
+  revision: string
+  insight: ProjectInsight
+}
+
+/** 供给内容修订号：只看 CACHEABLE 供给键的合并时间/对象集合/值，任何写入都会改变它 */
+function supplyRevisionOf(cache: AiCache): string {
+  const h = createHash('sha256')
+  for (const pass of ['partition', 'flows', 'modules', 'narratives', 'categories', 'coreJudgment', 'coreRoles', 'blocks', 'keySteps', 'externals']) {
+    const entry = cache.getGlobal<unknown>(`supply:${pass}`)
+    h.update(pass)
+    h.update(entry === undefined ? '\u0000missing' : JSON.stringify(entry))
+  }
+  return h.digest('hex')
+}
+
+/**
+ * Agent 管线装配（同步、零网络）：静态基线 + Agent 供给。
+ * - 无 partition 供给 → 目录划分（静态基线）；无 flows 供给 → 启发式脉络（静态基线）；
+ *   其余 pass 无供给 → 基线字段保持原值。
+ * - **绝不读取本地 KEY 缓存、绝不调用 chat**（独立性由测试注入的 chat 桩断言）。
+ * - 装配结果按 `agentInsight:<fingerprint>:<basis>` 缓存；供给写入（revision 变化）自然失效。
+ */
+export function buildAgentInsight(
+  graph: ProjectGraph,
+  cache: AiCache,
+  opts: BuildAgentInsightOptions
+): ProjectInsight {
+  const insight = buildInsight(graph, opts.aiEnabled, '', 'agent')
+  const caps = opts.flowCaps
+  if (opts.baselineOnly === true) {
+    // 纯静态基线（executeMerge 的合并底座）：目录划分 + 启发式脉络，不读任何供给
+    applyHeuristicFlows(insight, graph, caps)
+    return insight
+  }
+  // 结构层：Agent partition 优先；缺省保持目录划分。
+  const partition = readPartitionSupply(cache, graph.fingerprint)
+  if (partition) applyAgentPartitionToInsight(insight, graph, partition.value)
+  // 整树语义层：按 partition 应用后的划分身份读整树；缺省回退启发式脉络。
+  const basis = flowsBasis(graph)
+  const cacheKey = `agentInsight:${graph.fingerprint}:${basis}`
+  const revision = supplyRevisionOf(cache)
+  const cached = cache.getGlobal<AgentInsightCacheEntry>(cacheKey)
+  if (cached && cached.basis === basis && cached.revision === revision && cached.insight.pipeline === 'agent') {
+    return structuredClone(cached.insight)
+  }
+  const flows = readFlowsSupply(cache, graph.fingerprint, basis)
+  if (flows) {
+    applyAgentFlowsToInsight(insight, graph, flows.value, flows.writtenAt)
+  } else {
+    applyHeuristicFlows(insight, graph, caps)
+  }
+  // 其余语义 pass + aiStatus/aiSource/agentSources + Agent 担保（declared 上限）
+  applyAgentSemantics(insight, graph, cache, { skipPartition: true, skipFlows: true })
+  const entry: AgentInsightCacheEntry = { basis, revision, insight }
+  try {
+    cache.setGlobal(cacheKey, entry)
+  } catch {
+    // 缓存写失败只影响下次装配性能，不影响本次结果
+  }
+  return structuredClone(insight)
+}
+
+/** 静态基线脉络：启发式树（source='heuristic'，不算 aiGenerated，不挂 flows 语义状态） */
+function applyHeuristicFlows(insight: ProjectInsight, graph: ProjectGraph, caps: FlowCaps): void {
+  try {
+    const roots = heuristicFlows(graph, insight, { caps })
+    if (roots.length > 0) applyFlows(insight, graph, roots, { caps })
+  } catch (e) {
+    console.warn(`[autodoc] 启发式脉络生成失败（已忽略）：${e instanceof Error ? e.message : String(e)}`)
+  }
 }
 
 /** 划分改变后，用 graph 的最新 modules 重建 insight 的模块与摘要 */
@@ -1632,26 +1739,11 @@ export async function refreshInsightAI(
   const feedback = opts.feedback ?? ''
   const graph = buildGraph(service.files)
   const aiEnabled = getDeepSeekConfig() !== null
-  const insight = buildInsight(graph, aiEnabled, feedback)
+  const insight = buildInsight(graph, aiEnabled, feedback, 'key')
   const cache = new AiCache(dirname(service.storage.dataPath))
-  // G2：force（整份重算）与 forcePartition（重新划分）都清除供给缓存——谁跑谁赢，旧版本留在快照里。
-  // forcePartition 尤其必须清：graph.fingerprint 只含节点 id + 边对，重新划分后指纹不变，
-  // 旧 modules/chain:N 供给会被贴到新划分下的另一个对象上（张冠李戴）。
-  const skipSupply = opts.force === true || opts.forcePartition === true
-  if (skipSupply) clearSupplyCache(cache)
-  // 无 KEY 也要套用供给：Agent 供给是合法来源，两条链路地位平等（早退之前就得叠上）。
-  // 与 loadInsight 同序：先应用 partition 结构层，再叠语义 pass（skipPartition 防重复应用）。
-  if (!aiEnabled) {
-    let agentPartitionApplied = false
-    if (!skipSupply) {
-      const ap = readPartitionSupply(cache, graph.fingerprint)
-      if (ap) {
-        agentPartitionApplied = applyAgentPartitionToInsight(insight, graph, ap.value) !== 'missing'
-      }
-      applySupplyOverlay(insight, graph, cache, { skipPartition: agentPartitionApplied })
-    }
-    return { insight, graph }
-  }
+  // 双管线分离：KEY 刷新只服务 key 管线，**不再清除/套用 supply:***（Agent 供给是另一条独立管线）。
+  // 无 KEY 时 KEY 管线就是静态基线，不读 Agent 供给、不归档快照。
+  if (!aiEnabled) return { insight, graph }
   const fp = graph.fingerprint
   const fbKey = `partition:${hash8(feedback)}`
   const status: Partial<Record<AiPassKey, AiPassStatus>> = {}
@@ -1665,50 +1757,32 @@ export async function refreshInsightAI(
     blocks: { reused: 0, rerun: 0 }
   }
 
-  // 1) 划分（结构层，最先应用）
-  // Agent partition 缓存优先于本地 AI 划分：整份替换、不再调用 aiPartition、也不写本地 partition 缓存。
-  // force / forcePartition 已在入口清空 supply:*，因此这里读不到 Agent 划分，走原有本地流程。
-  let agentPartitionApplied = false
-  if (!skipSupply) {
-    const ap = readPartitionSupply(cache, fp)
-    if (ap) {
-      agentPartitionApplied = applyAgentPartitionToInsight(insight, graph, ap.value) !== 'missing'
-      // Agent 划分不是本地 AI 的产物：状态只能由 overlay 在内存里记（aiSource='agent'）。
-      // 写进 aiStatus 缓存会在供给撤回后留下「划分已生成」的假状态；这里只按本地划分缓存的实际存在性记录本地口径。
-      if (agentPartitionApplied) {
-        const localCached =
-          cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? cache.get<PartitionEnvelope>(fp, fbKey)
-        if (localCached) status.partition = 'ok'
-      }
+  // 1) 划分（结构层，最先应用）：只读本地 KEY 划分缓存，Agent 供给不参与本管线。
+  let p: PartitionEnvelope | undefined
+  p = opts.force || opts.forcePartition ? undefined : cache.get<PartitionEnvelope>(fp, fbKey)
+  if (p) {
+    status.partition = 'ok'
+  } else {
+    const previous = cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? null
+    try {
+      p = (await aiPartition(graph, feedback, previous)) ?? undefined
+      status.partition = p ? 'ok' : 'failed'
+    } catch (e) {
+      status.partition = 'failed'
+      console.warn(`[autodoc] AI 划分失败，回退目录划分：${e instanceof Error ? e.message : String(e)}`)
+    }
+    if (p) {
+      cache.set(fp, fbKey, p)
+      cache.set(fp, 'partition:latest', p)
     }
   }
-  let p: PartitionEnvelope | undefined
-  if (!agentPartitionApplied) {
-    p = opts.force || opts.forcePartition ? undefined : cache.get<PartitionEnvelope>(fp, fbKey)
-    if (p) {
-      status.partition = 'ok'
-    } else {
-      const previous = cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? null
-      try {
-        p = (await aiPartition(graph, feedback, previous)) ?? undefined
-        status.partition = p ? 'ok' : 'failed'
-      } catch (e) {
-        status.partition = 'failed'
-        console.warn(`[autodoc] AI 划分失败，回退目录划分：${e instanceof Error ? e.message : String(e)}`)
-      }
-      if (p) {
-        cache.set(fp, fbKey, p)
-        cache.set(fp, 'partition:latest', p)
-      }
-    }
-    if (p) {
-      applyPartition(graph, toPartition(graph, p))
-      rebuildInsightFromGraph(insight, graph, p.summary)
-      insight.partitionFeedback = feedback
-    } else {
-      // 划分失败回退目录：不记录 feedback，避免误导「已采纳」
-      insight.partitionFeedback = ''
-    }
+  if (p) {
+    applyPartition(graph, toPartition(graph, p))
+    rebuildInsightFromGraph(insight, graph, p.summary)
+    insight.partitionFeedback = feedback
+  } else {
+    // 划分失败回退目录：不记录 feedback，避免误导「已采纳」
+    insight.partitionFeedback = ''
   }
 
   // 2) AI 核心判定（按功能重要性，覆盖静态中心度；函数多时内部分批合并）
@@ -1871,16 +1945,9 @@ export async function refreshInsightAI(
   const invalidateFlows = opts.force === true || opts.forcePartition === true
   // M-R1：cache-hit 分支也需验证 basis 一致性（划分可能在前面的 pass 被 force 重算过）；
   // 无 basis 的旧缓存视同不匹配，走重算/兜底而不是按旧划分复用。
-  // 本地树缓存用 flowTreeBasis（含核心表）；供给文件用 flowsBasis（不含核心：本地核心判定
-  // 在装配里早于 flows，若算进供给 basis，KEY 路径会把刚合并的 Agent 供给整批判成过期）。
   const pass6Basis = flowTreeBasis(graph)
-  // H2：Agent 已供给整树 → 本地完全让位：不读回 flows:tree、不生成/启发式、不清子缓存、也不写回。
-  // 保留旧树是刻意的（供给文件撤回后仍可兜底展示）。这里只记 skipped；
-  // 函数末尾的 applySupplyOverlay 会按整树语义把状态改成 ok 并登记 flows:root 来源。
-  const agentFlows = skipSupply ? null : readFlowsSupply(cache, fp, flowsBasis(graph))
-  if (agentFlows) {
-    status.flows = 'skipped'
-  } else {
+  // 双管线分离：KEY 管线恒用本地 flows:tree（Agent 整树供给只属于 Agent 管线，不抑制本管线）。
+  {
     const rawCachedTree = invalidateFlows ? undefined : cache.get<FlowTreeCache>(fp, 'flows:tree')
     const cachedTree = rawCachedTree && rawCachedTree.basis === pass6Basis
       ? rawCachedTree
@@ -1965,7 +2032,6 @@ export async function refreshInsightAI(
 
   insight.aiGenerated = !!(
     p ||
-    agentPartitionApplied ||
     Object.keys(cj ?? {}).length ||
     Object.keys(cats).length ||
     Object.keys(roles ?? {}).length ||
@@ -1977,17 +2043,9 @@ export async function refreshInsightAI(
   )
   cache.set(fp, 'aiStatus', status)
   insight.aiStatus = status
-  // G2：force / forcePartition 不套用供给（已在入口清掉 supply:* 键）；其余路径叠一层 Agent 供给（Agent 字段赢）。
-  // 写前重读：本实例全程持有一份内存副本，AiCache 每次写已自带 staleness 重读，
-  // 这里再显式对齐一次，确保读到的是并发 merge 刚写入的最新 supply:*。
-  if (!skipSupply) {
-    cache.reload()
-    // partition 已在本函数最前面应用；overlay 只登记来源与状态（aiStatus.partition='ok'、aiSource='agent'），不重复改写结构。
-    applySupplyOverlay(insight, graph, cache, { skipPartition: agentPartitionApplied })
-  }
-  // SG2：本地语义与 Agent overlay 全部套用后，为已接入语义担保的语言对象生成语义担保。
+  // SG2：KEY 语义全部套用后，为已接入语义担保的语言对象生成语义担保。
   // 硬事实走静态校验；意图类走 KEY 第二遍 LLM（命中 guarantee:* 缓存则不重复请求）。
-  // attachKeyGuarantees 内部逐对象 try/catch，失败只写 unverified，不得拖垮刷新/快照。
+  // 双管线分离后本管线不含任何 Agent 断言，不再为 Agent 对象做第二遍复核。
   try {
     const sg2 = await attachKeyGuarantees(insight, graph, cache, {
       force: opts.force === true,

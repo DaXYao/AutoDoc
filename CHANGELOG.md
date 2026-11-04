@@ -2,6 +2,17 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-05 · KEY 与 Agent 语义双管线独立装配（P1–P3）· shared-types+core+server+web+docs
+
+- **动机**：开发期合并版把「本地 KEY API 语义」与「外部 Agent 供给」压在一条装配线上（`supplyOverlay` 把 Agent 覆盖到 KEY 结果、`aiSource` 出现 mixed、一条洞察既含 KEY 又含 Agent、担保拿 KEY 去复核 Agent），来源口径与历史回滚都无法自洽。用户确认改为**完全独立双管线**。
+- **P1 装配 + 路由**：`ProjectInsight.pipeline` 必填（`key`/`agent`）并新增 `InsightSource`；`loadInsight(service, feedback, { source })` 按来源分派——`buildKeyInsight` 十个 pass 全跑、零 `supply:*` 读取、零 Agent 抑制；`buildAgentInsight` 静态基线 + 供给、零 KEY 缓存读取与零 chat、按 basis + 供给修订号缓存结果（`agentBaselineOnly` 供合并取纯静态底座）。`applySupplyOverlay` 更名 `applyAgentSemantics` 且仅服务 Agent 装配。`?source=` 贯穿 insight / history / rollback / agent-supply 各路由，非法值 400 不静默回退。
+- **P2 快照与历史**：`InsightSnapshot.pipeline`（缺省 = legacy 开发期合并版）；回滚指针按管线双份（SQLite `activeInsightSnapshotId` / `activeInsightSnapshotId:agent`，JSON 同构）；两套历史各自过滤、legacy 两边只读展示且禁止回滚与跨管线回滚/对比；归档去重只在本管线历史内比较。`force` / `forcePartition` 只重跑 KEY 自己的 pass，不再清 `supply:*`；Agent 担保上限记 `declared`，不再用 KEY 复核 Agent。
+- **P3 去耦合 + 导出**：`aiSource` 新快照永不产生 `mixed`（仅 legacy 快照只读保留）；`docgen export --source key|agent` 写入 `meta.pipeline` 并只导出单来源洞察，导出站不提供切换。
+- **测试**：server 全量迁移到新语义（夹具补 `pipeline`、`supplyOverlay` → `source`/`agentBaselineOnly`、原先「Agent 覆盖 KEY / mixed」断言改写为双管线断言）；新增「Agent 供 partition 时 KEY 仍有自有 partition」「`buildAgentInsight` 全程零 KEY chat 调用（注入桩未被调用 + 不读 KEY 缓存）」「两套历史独立回滚 + legacy 回滚被拒 + 非法 source 400」「force/forcePartition 不清 `supply:*`」等；server 667→671，全仓 1423→1427（core 427 / server 671 / web 329）通过。
+- **校验**：`pnpm --filter @autodoc/server typecheck`、`pnpm --filter @autodoc/server test`、`pnpm lint`、`pnpm build` 全部通过。web 仅 API 客户端/状态补 `source` 形参（默认 key，行为不变），未改 UI。
+- **边界**：legacy 快照无 `pipeline` 字段，只读可对比不可回滚；前端顶栏管线切换 UI 与实跑验收留待下一阶段。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-03 · 任务导航重构：变更影响首屏 + 项目洞察/文件文档 + 空工作区回退 · web+docs
 
 - **导航与路由**：serve 默认 `/` 改为变更影响，`/impact` 重定向首页，项目洞察独立到 `/insight`；顶栏按「变更影响 → 项目洞察 → 文件文档」重排，补图标、价值说明与模块/文件详情激活态。项目切换、统计、重新生成与项目管理收进项目菜单，团队状态胶囊保留；全局搜索不再随 `lg` 断点隐藏，窄屏独占一行。
