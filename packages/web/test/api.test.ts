@@ -2,12 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
   addAnnotation,
+  clearInsightRollback,
   continueTeamMerge,
   createAgentTaskPackage,
   exportAgentSupplyRules,
   fetchAgentTask,
   fetchAgentSupply,
   fetchAgentSupplyRules,
+  fetchInsight,
+  fetchInsightHistory,
   fetchMeta,
   fetchTeamStatus,
   getMode,
@@ -19,6 +22,7 @@ import {
   requestInsightAI,
   requestInsightPartition,
   resolveTeamConflict,
+  rollbackInsightSnapshot,
   setNoActiveProjectHandler,
   syncTeamRepo,
   validateAgentTaskPackage
@@ -467,6 +471,69 @@ describe('团队接口的错误口径', () => {
 
     const urls = stubRoutes({})
     await expect(fetchTeamStatus()).rejects.toThrow('团队状态仅本地服务可用')
+    expect(urls).toEqual([])
+  })
+})
+
+describe('双管线来源：洞察/历史/回滚请求携带 source', () => {
+  it('fetchInsight：agent 带 ?source=agent，key 不带（缺省即 KEY）', async () => {
+    await enterHubMode()
+    const urls = stubRoutes({
+      '/api/insight?source=agent': () => json({ pipeline: 'agent' }),
+      '/api/insight': () => json({ pipeline: 'key' })
+    })
+
+    await fetchInsight('', 'agent')
+    await fetchInsight('', 'key')
+
+    expect(urls).toEqual(['/api/insight?source=agent', '/api/insight'])
+  })
+
+  it('历史列表按 source 分域拉取', async () => {
+    await enterHubMode()
+    const urls = stubRoutes({
+      '/api/insight/history?source=agent': () =>
+        json({ snapshots: [{ id: 'a1', pipeline: 'agent' }], total: 1, archivedCount: 0, activeId: null, showRecent: 10 }),
+      '/api/insight/history': () =>
+        json({ snapshots: [], total: 0, archivedCount: 0, activeId: null, showRecent: 10 })
+    })
+
+    const agent = await fetchInsightHistory('agent')
+    const key = await fetchInsightHistory('key')
+
+    expect(agent?.snapshots.map((s) => s.id)).toEqual(['a1'])
+    expect(key?.snapshots).toEqual([])
+    expect(urls).toEqual(['/api/insight/history?source=agent', '/api/insight/history'])
+  })
+
+  it('回滚 / 回到实时同样带 source，避免写错管线回滚指针', async () => {
+    await enterHubMode()
+    const urls = stubRoutes({
+      '/api/insight/history/s1/rollback?source=agent': () => json({ ok: true, activeId: 's1' }),
+      '/api/insight/history/active?source=agent': () => new Response(null, { status: 204 })
+    })
+
+    await rollbackInsightSnapshot('s1', 'agent')
+    await clearInsightRollback('agent')
+
+    expect(urls).toEqual([
+      '/api/insight/history/s1/rollback?source=agent',
+      '/api/insight/history/active?source=agent'
+    ])
+  })
+
+  it('静态导出站：fetchInsight 忽略 source 且不发任何请求', async () => {
+    stubRoutes({
+      '/api/projects': () => json({ error: 'not found' }, 404),
+      '/api/meta': () => json({ error: 'not found' }, 404),
+      'autodoc-data.json': () => json(EXPORT_DATA)
+    })
+    await initDataSource()
+    expect(getMode()).toBe('static')
+
+    const urls = stubRoutes({})
+    await expect(fetchInsight('', 'agent')).resolves.toBeNull()
+    await expect(fetchInsight('', 'key')).resolves.toBeNull()
     expect(urls).toEqual([])
   })
 })

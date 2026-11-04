@@ -14,7 +14,7 @@ import {
   repartitionInsight
 } from '../store/app'
 import { AI_PASS_LABELS, AI_PASS_ORDER, AI_STATUS_META } from '../utils/format'
-import { PASS_SOURCE_META, resolvePassSourceState, summarizeAgentSupply } from '../utils/agentSupply'
+import { PASS_SOURCE_META, isAgentStaticBaseline, resolvePassSourceState, summarizeAgentSupply } from '../utils/agentSupply'
 import { adAgentTagSkin } from '../theme'
 import { formatIncrementalSummary } from '../utils/incremental'
 import { fnJumpQuery } from '../utils/nav'
@@ -38,11 +38,17 @@ const partitionBusy = ref(false)
 /** 历史版本区（每次生成 AI 后新快照入档，需要刷新列表） */
 const historyRef = ref<InstanceType<typeof InsightHistory> | null>(null)
 
+/** 当前语义来源（顶栏 KEY/Agent 开关）；所有取数已由 store 按该值完成 */
+const source = computed(() => appState.source)
+const agentMode = computed(() => source.value === 'agent')
+
 onMounted(() => {
-  void triggerAI(false)
+  // 仅 KEY 管线允许自动触发本地 AI；Agent 视图的语义由外部供给决定
+  if (!agentMode.value) void triggerAI(false)
 })
 
 async function triggerAI(force: boolean): Promise<void> {
+  if (agentMode.value) return
   const cur = appState.insight
   if (!cur || !cur.aiEnabled) return
   if (!force && cur.aiGenerated) return
@@ -63,6 +69,7 @@ async function triggerAI(force: boolean): Promise<void> {
 
 /** 提交用户建议，让 AI 在当前划分基础上重新划分 */
 async function handleRepartition(): Promise<void> {
+  if (agentMode.value) return
   if (!feedback.value.trim()) {
     message.warning('请先填写对当前划分的建议')
     return
@@ -256,6 +263,14 @@ const isStatic = computed(() => appReady.value && getMode() === 'static')
 /** 状态条摘要；null = 供给未就绪（无活动项目/拉取失败）→ 状态条隐藏，不制造错误噪音 */
 const supplySummary = computed(() => summarizeAgentSupply(appState.agentSupply))
 
+/**
+ * Agent 视图「尚无供给」空态：以装配结果为准（pipeline=agent 且既无 Agent 划分也无 agentSources），
+ * 扫描明确报告目录非空时不判空态（交给状态条展示错误/忽略）。
+ */
+const agentSupplyAbsent = computed(() =>
+  isAgentStaticBaseline(insight.value, appState.agentSupply?.empty ?? null)
+)
+
 const supplyDrawer = ref(false)
 
 /**
@@ -264,9 +279,14 @@ const supplyDrawer = ref(false)
  * store.mergeAgentSupplyIfNeeded / api.mergeAgentSupply 里，视图只负责发起。
  */
 watch(
-  [appReady, () => appState.activeProjectId, () => appState.activationRecovering],
+  [
+    appReady,
+    () => appState.activeProjectId,
+    () => appState.activationRecovering,
+    () => appState.source
+  ],
   ([ready, , recovering]) => {
-    if (!ready || isStatic.value || recovering) return
+    if (!ready || isStatic.value || recovering || !agentMode.value) return
     void mergeAgentSupplyIfNeeded()
   },
   { immediate: true }
@@ -292,13 +312,13 @@ watch(
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <n-tag v-if="insight?.aiGenerated" size="small" type="success" :bordered="false">
-          {{ !insight.aiEnabled && hasAgentSupply ? 'Agent 已增强' : 'AI 已增强' }}
+          {{ agentMode && hasAgentSupply ? 'Agent 已增强' : 'AI 已增强' }}
         </n-tag>
         <n-tag v-else-if="insight?.aiEnabled" size="small" :bordered="false">
           静态分析
         </n-tag>
         <n-button
-          v-if="insight?.aiEnabled"
+          v-if="!agentMode && insight?.aiEnabled"
           size="small"
           secondary
           :loading="aiBusy"
@@ -326,9 +346,12 @@ watch(
       </template>
     </n-empty>
     <template v-else>
-      <!-- G3：Agent 语义供给状态条（静态导出站隐藏）；整条即抽屉开关。
+      <!-- G3：Agent 语义供给状态条（仅 Agent 视图；静态导出站隐藏）；整条即抽屉开关。
            置于历史区之上：回滚态时「合并被拒」与紧随其后的「回到实时」按钮上下相邻，动线连贯 -->
-      <section v-if="!isStatic && supplySummary" class="ad-card ad-card--hover mb-3 px-4 py-2">
+      <section
+        v-if="!isStatic && agentMode && supplySummary"
+        class="ad-card ad-card--hover mb-3 px-4 py-2"
+      >
         <button
           class="flex w-full flex-wrap items-center gap-x-2 gap-y-1 text-left text-xs"
           :aria-expanded="supplyDrawer"
@@ -369,9 +392,24 @@ watch(
       <!-- 历史版本区（含回滚态横幅 +「回到实时」；静态模式自动隐藏） -->
       <InsightHistory ref="historyRef" />
 
-      <!-- AI 状态提示 -->
+      <!-- AI 状态提示 / Agent 无供给空态 -->
       <n-alert
-        v-if="insight.aiEnabled && !insight.aiGenerated"
+        v-if="!isStatic && agentMode && agentSupplyAbsent"
+        type="info"
+        class="mb-3"
+        title="尚无 Agent 供给，当前为静态基线"
+      >
+        <div class="flex items-center gap-2">
+          <span class="text-xs">
+            模块划分回退目录结构、脉络为启发式结果；按契约写入供给并合并后即切换为 Agent 语义。
+          </span>
+          <n-button size="tiny" type="primary" @click="supplyDrawer = true">
+            打开 Agent 供给面板
+          </n-button>
+        </div>
+      </n-alert>
+      <n-alert
+        v-else-if="!agentMode && insight.aiEnabled && !insight.aiGenerated"
         type="info"
         class="mb-3"
         title="可生成 AI 洞察"
@@ -394,9 +432,9 @@ watch(
           契约、错误与建议可在上方「Agent 供给」中查看。
         </span>
       </n-alert>
-      <n-alert v-else-if="!insight.aiEnabled" type="warning" class="mb-3" title="未配置 AI">
+      <n-alert v-else-if="!agentMode && !insight.aiEnabled" type="warning" class="mb-3" title="未配置 AI">
         <span class="text-xs">
-          当前为纯静态图谱。可配置 DEEPSEEK_API_KEY，或让外部 Agent 按规则契约供给语义（模块划分、脉络树、三分类、调用主干等）。
+          当前为纯静态图谱。可配置 DEEPSEEK_API_KEY，或切换到 Agent 视图，让外部 Agent 按规则契约供给语义（模块划分、脉络树、三分类、调用主干等）。
         </span>
       </n-alert>
 
@@ -436,8 +474,11 @@ watch(
         </p>
       </section>
 
-      <!-- 模块划分反馈（AI 主导划分 + 用户建议迭代）；Agent 划分在无 KEY 时也要能看见来源 -->
-      <section v-if="insight.aiEnabled || insight.partitionSource === 'agent'" class="ad-card mb-5 px-4 py-3">
+      <!-- 模块划分反馈（仅 KEY 管线可提交建议；Agent 划分只读展示来源） -->
+      <section
+        v-if="(!agentMode && insight.aiEnabled) || insight.partitionSource === 'agent'"
+        class="ad-card mb-5 px-4 py-3"
+      >
         <div class="flex items-center gap-2 mb-2">
           <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">功能模块划分</h3>
           <n-tag size="tiny" :type="insight.partitionSource === 'ai' ? 'success' : insight.partitionSource === 'agent' ? 'info' : 'default'" :bordered="false">
@@ -447,7 +488,7 @@ watch(
             已采纳建议：{{ insight.partitionFeedback.slice(0, 40) }}
           </span>
         </div>
-        <template v-if="insight.aiEnabled">
+        <template v-if="!agentMode && insight.aiEnabled">
           <n-input
             v-model:value="feedback"
             type="textarea"
@@ -592,7 +633,8 @@ watch(
       </template>
     </template>
 
-    <!-- G3：Agent 语义供给抽屉（接入指南 / 基线 / 统计 / 错误 / 忽略 / 建议 / 本次合并明细） -->
-    <AgentSupplyPanel v-model:show="supplyDrawer" />
+    <!-- G3：Agent 语义供给抽屉（接入指南 / 基线 / 统计 / 错误 / 忽略 / 建议 / 本次合并明细）；
+         KEY 视图不展示任何 Agent 入口（契约/任务包均在此面板内） -->
+    <AgentSupplyPanel v-if="agentMode" v-model:show="supplyDrawer" />
   </div>
 </template>

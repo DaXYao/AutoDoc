@@ -1,9 +1,54 @@
-import type { AiPassStatus, InsightDiff, InsightSnapshotMeta, InsightSnapshotStats, InsightSnapshotTrigger } from '@autodoc/shared-types'
+import type {
+  AiPassStatus,
+  InsightDiff,
+  InsightSnapshotMeta,
+  InsightSnapshotStats,
+  InsightSnapshotTrigger,
+  InsightSource
+} from '@autodoc/shared-types'
 import { AI_PASS_LABELS, AI_STATUS_META, CATEGORY_LABELS, CATEGORY_ORDER } from './format'
 
 /**
  * 历史 AI 洞察快照相关的纯展示逻辑（H2/H3）：可独立单测，不含任何 Vue/网络依赖。
  */
+
+/** 无 pipeline 字段 = 开发期合并版（legacy），在两套历史里只读可对比 */
+export function isLegacySnapshot(meta: Pick<InsightSnapshotMeta, 'pipeline'>): boolean {
+  return meta.pipeline !== 'key' && meta.pipeline !== 'agent'
+}
+
+export interface SnapshotRollbackState {
+  allowed: boolean
+  /** 不可回滚的可读原因（allowed=true 时为空串） */
+  reason: string
+}
+
+/**
+ * 回滚可用性（与后端 /api/insight/history/:id/rollback 口径一致）：
+ * - legacy（无 pipeline）只读可对比，禁止回滚；
+ * - 快照属于另一条管线时禁止（正常列表不会出现，防御旧缓存/并发）；
+ * - 其余允许。
+ */
+export function snapshotRollbackState(
+  meta: Pick<InsightSnapshotMeta, 'pipeline'>,
+  source: InsightSource
+): SnapshotRollbackState {
+  if (isLegacySnapshot(meta)) {
+    return {
+      allowed: false,
+      reason: '开发期合并版（legacy）快照只读：可与其他版本对比，不支持回滚'
+    }
+  }
+  if (meta.pipeline !== source) {
+    const owner = meta.pipeline === 'agent' ? 'Agent' : 'KEY'
+    const current = source === 'agent' ? 'Agent' : 'KEY'
+    return {
+      allowed: false,
+      reason: `该快照属于 ${owner} 管线，不能回滚到当前 ${current} 视图`
+    }
+  }
+  return { allowed: true, reason: '' }
+}
 
 /** 快照触发来源 → 中文标签 */
 export function snapshotTriggerLabel(trigger: InsightSnapshotTrigger): string {

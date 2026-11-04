@@ -189,6 +189,8 @@ afterEach(() => {
 describe('hub 活动项目记住与 409 自愈', () => {
   it('bootstrap 记住活动项目；重启后并发的多个 409 只自动激活一次并重载数据', async () => {
     const { store, hub, ls } = await setup()
+    // 供给只在 Agent 视图拉取（KEY 视图不请求 Agent 供给）；本用例关注自愈后供给同步刷新
+    store.appState.source = 'agent'
     await store.bootstrap()
     expect(store.appState.activeProjectId).toBe('p1')
     expect(ls.get(LAST_ACTIVE_KEY)).toBe('p1')

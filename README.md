@@ -30,7 +30,7 @@ AutoDoc 把函数级变更映射回业务图谱：
 
 ## 技术亮点
 
-**两条 AI 生产链路平等并存。** 一条走本地 KEY API（DeepSeek），另一条由外部 Agent（如 Codex、Qoder CN）按契约产出同形状的语义结果。两条链路落到同一组语义 pass；洞察侧合并时字段级覆盖、逐对象标注来源，并归档为可回滚的历史版本（变更侧语义按请求实时合并，不进入快照）；撤掉供给文件后，本地生成路径会恢复。
+**两条 AI 生产链路完全独立。** 一条走本地 KEY API（DeepSeek），另一条由外部 Agent（如 Codex、Qoder CN）按契约产出同形状的语义结果。两套管线各自装配完整洞察（结构层与脉络树），互不覆盖：KEY 视图只读 KEY 缓存、不读供给；Agent 视图只读供给、不读 KEY 缓存，也不触发任何 KEY AI 请求。顶栏 KEY/Agent 开关按来源取数并同步 URL（`?source=agent`），刷新、分享与页面切换保持；两套历史与回滚指针相互独立，开发期合并版（无 `pipeline` 字段）作为 legacy 在两套列表中都只读展示、可对比但不可回滚。变更侧语义仍按请求实时合并、不进入快照。静态导出用 `--source key|agent` 固定单一来源并写入 `meta.pipeline`，导出站不提供切换开关。
 
 **契约化 Agent 供给与防错位。** AutoDoc 从实时图谱生成规则契约与机器可读索引，并把未覆盖项整理成建议任务。采用两轮契约：先供 `partition`（整项目划分），刷新 basis 后再供 `flows` 与其余语义。位置化 id（`mod:N`、`chain:N`）用「文件级 basis + 条目锚点」双重对账；`flows` 整树原子替换，任一引用失效则整树拒绝，避免半截生效或张冠李戴。
 
@@ -53,19 +53,18 @@ AutoDoc 把函数级变更映射回业务图谱：
 - **Java**：只解析 `.java`；包+类路径写入 `className`（如 `com.example.Widget`），类型推断结果用 `::Type` 接收者；支持普通/static/嵌套类 import、同包类与全限定名调用；无 receiver 时先本类方法、再 static import。不做 `::super`/继承、method reference、`this()`/`super()`、空类（无 FunctionDoc）与匿名类方法的独立条目；重载/多构造器/外部 JDK 类型保持未解析，不做简单类名全局兜底。
 - **Go**：只解析 `.go`；方法 `className=包.类型`、接口方法 `包.接口`、包级函数 className 为 null；支持 `::pkg`/`::pkg?`/`::Type`/`::?` receiver、包目录/go.mod module、普通/别名 import、同包跨文件函数与导出名；类型推断使用词法作用域，函数值局部变量调用不连包级函数。dot/blank import、嵌入/提升方法、继承/接口实现、链式返回值、顶层 var func 值、build tags/cgo 不建模；stdlib 多段路径不做后缀兜底。
 - **变更追踪**：每次生成都会记录工作区指纹快照；Git 可用时额外回填提交历史，两者并存。非 Git 仓库或 Git 不可用时只有快照，仍记录最近三次变更，但无法回溯提交叙事。合并提交中的 evil merge 与冲突解决改动不在覆盖范围内。
-- **静态导出**：`export` 生成只读站点，包含文件文档、三分类、批注与搜索；洞察、变更影响、Agent 供给依赖本地服务，导出站中不提供，写操作与供给入口也会隐藏。
+- **静态导出**：`export --source key|agent` 生成只读站点，包含文件文档、三分类、批注、搜索与选定来源的完整洞察；来源由 `meta.pipeline` 固定，导出站不提供切换开关，URL 上的 `source` 会被忽略并清理。变更影响与 Agent 供给入口依赖本地服务，导出站中不提供，写操作也会隐藏。
 - **运行形态**：本地单机工具，服务默认监听 `127.0.0.1`，无多用户协作、远程同步与鉴权。
 - **数据位置**：分析数据默认写入目标项目的 `.autodoc/`（`autodoc.db` 或 `autodoc.json`），可通过 `storage.path` 指向其他位置；静态站点默认导出到 `autodoc-site/`。
 
 ## 语义担保（按语言逐轮落地）
 
-**TypeScript / JavaScript / TSX 与 C#、Vue SFC、C++、Python、Java、Go 已落地（SG1/SG2/SG3）。** 在此之前，Agent 供给与洞察合并只校验结构、字段与引用：一条链路叙事可能所有 id 都存在、字段完全合规，却与代码实际行为不符，形成「听着很像但完全错误」的结论。语义担保把每条语义断言拆成最小可核验的 **claim**，并如实标注可信等级：
+**TypeScript / JavaScript / TSX 与 C#、Vue SFC、C++、Python、Java、Go 已落地（SG1/SG2/SG3）。** 在此之前，Agent 供给只校验结构、字段与引用：一条链路叙事可能所有 id 都存在、字段完全合规，却与代码实际行为不符，形成「听着很像但完全错误」的结论。语义担保把每条语义断言拆成最小可核验的 **claim**，并如实标注可信等级：
 
 - 硬事实（调用/顺序/包含/import/类型/装饰器/可见性/外部调用点/代码块）走静态证据；意图类（叙事、角色、模块职责、节点文本、分类/核心判定、关键步骤/内部步骤、外部符号用途）由服务端逐片段拆解后复核。C# 复用通用证据包：`[Attribute]` 作为 decorators（`[Obsolete]` / `ObsoleteAttribute` 归一），可见性、调用边、注释块、签名/参数/返回类型均取自现有解析结果；`type` 只认参数类型/返回类型，参数名与完整签名不算类型。C# 当前仅覆盖文件内可解析的内部调用，`external` claim 与跨文件调用尚未接入。Vue SFC 同样复用通用证据包：`.vue` 的 script 函数（`<script setup>` 与 Options API methods，后者 `className=[component]`）使用签名/参数/返回类型/可见性/装饰器/调用边/注释块；合成的 `[template]` 入口用模板事件产生的调用边（`stepId` 或调用行）担保，模板节点没有函数体，`block` claim 不适用。C++ 复用通用证据包：attributes 作为 decorators（`[[nodiscard]]` / `nodiscard` 归一）、命名空间与类作用域编码在 `className`、quoted include 只连项目内文件；`type` 按 C++ 声明提取参数类型（`const std::string& name` → `const std::string&`、`char *name` → `char*`、`int x = 0` → `int`），参数名与完整声明不算类型；未解析调用没有 `externalModule`，`external` claim 与外部库补全暂不生成（跨文件内部调用仍走 quoted include 解析）。Python 复用通用证据包：装饰器（`@app.route(...)` / `@staticmethod`，系统去 `@` 与参数后归一）、类与嵌套作用域编码在 `className`、docstring 进 `docComment`、函数体内「`#` 注释 + 紧随语句」进注释块；`type` 只认参数注解/返回注解（`page: int` → `int`、`name: Optional[str]` → `Optional[str]`、`x: list[int] = []` → `list[int]`），默认值与前导 `*` / `**` 先去掉，无注解的 `self` / `cls` / `*args` / `**kwargs` 没有类型文本，参数名与默认值不算类型；跨文件 import 可解析为内部调用边，未解析调用按 import 源记录 `externalModule`，但 `import` claim 仍一律未证实。Java 复用通用证据包：注解作为 decorators（`@Deprecated` / `@GetMapping("/x")` 去 `@` 与参数后归一）、包+类路径编码在 `className`、`type` 只认参数/返回类型（`String name` → `String`、`final int page` → `int`、`String... args` → `String...`、`Map<String, Integer> map` → `Map<String, Integer>`、`int[] values` → `int[]`），参数名与完整声明不算类型；import 可解析内部调用，`import` claim 仍未证实。Go 复用通用证据包：包/类型编码在 `className`、导出性按首字母大写、`type` 只认 `name type` 右侧的类型（`page int` → `int`、`ctx context.Context` → `context.Context`、`args ...string` → `...string`、`ch chan int` → `chan int`、`fn func(int) error` → `func(int) error`、`values map[string]int` → `map[string]int`），参数名不算类型；import 可解析内部调用，`import` claim 仍未证实。
 - 担保等级：`verified`（系统静态证据 + KEY 第二遍 LLM 逐片段复核）/ `declared`（Agent 自带证据 + 自审，系统验证证据结构与范围）/ `unverified`（缺证据、校验失败、复核否定、低置信或历史遗留）。Agent 自审最高只到 `declared`。
 - 主叙事只展示 `verified` / `declared`；未证实正文默认收进「未证实（N）」折叠区，可展开看 claim、证据锚点与原因，并支持跳转函数/链路/行。分类、核心判定与结构导航保留可见但打「未证实」徽标，避免整页无法导航。
-- KEY 担保在刷新时生成并写入复核缓存；页面读取只回放缓存，不重新调用 LLM。Agent 供给信封与变更侧 `changes` 文件都可携带可选 `guarantees`；变更侧 scope 证据必须落在其声明的 `affectedChains` / `changeRoles` 内，最高 `declared`。
-- 扫描/合并时验证并随洞察与快照持久化；历史版本保留当时的担保等级。缺少证据的存量供给照常合并但标为未证实。
+- 担保随各自管线的洞察与快照持久化，互不覆盖：KEY 担保在刷新时生成并写入复核缓存，页面读取只回放缓存，不重新调用 LLM；Agent 管线不使用 KEY 复核，供给信封与变更侧 `changes` 文件可携带可选 `guarantees`（Agent 自审最高 `declared`；变更侧 scope 证据必须落在其声明的 `affectedChains` / `changeRoles` 内）。历史版本保留当时的担保等级；缺少证据的存量供给照常合并但标为未证实。
 - 数据模型只做**新增可选字段/独立映射**。语言顺序：TypeScript / JavaScript / TSX（已落地）→ C#（已落地）→ Vue SFC（已落地）→ C++（已落地）→ Python（已落地）→ Java（已落地）→ Go（已落地）。当前所有已接入语言均支持语义担保；未接入的新语言沿用结构校验，语义内容统一视为未证实。
 
 详版设计、claim/证据结构、供给契约与每轮完成标准见 [`docs/SEMANTIC_GUARANTEE.md`](docs/SEMANTIC_GUARANTEE.md)。

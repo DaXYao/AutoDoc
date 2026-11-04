@@ -9,6 +9,8 @@
 - 已被 AGENTS.md 沉淀为硬规则的教训，在本文件保留一条链接即可，不重复展开。
 
 ## 避坑清单（快速扫描）
+- [ ] 静态导出站清理 URL `source` 要「删除该键」而不是「改写为 `meta.pipeline`」：后者让分享链接带上看似可切换的来源参数，误导静态站仍可切管线（双管线前端实跑发现）。
+- [ ] Agent 供给只在 Agent 视图拉取（KEY 视图不请求、不残留）：依赖供给的旧测试/实跑脚本必须显式把 `appState.source` 切到 `agent`，否则 `agentSupply` 恒 null（双管线前端迁移发现）。
 - [ ] 迁移语义断言前先核对 chat 桩返回形状：`{ ok, text }` 与 `{ content }` 不等价，形状错时 `reply.content` 为 undefined → 解析恒失败；旧断言被「供给覆盖」掩盖成通过，一改成断言 KEY 自有结果就暴露（双管线迁移发现）。
 - [ ] `getMode()` 这类模块级非响应式值不能单独包进 `computed`：bootstrap 前首算会永久缓存错误模式；必须用 `appReady` 等响应式门闩参与求值（静态导航实跑发现）。
 - [ ] 「链路入口函数稳定 ID」不保证唯一：同一入口可能对应多条链路。任务包/契约用入口 ID 做链路符号引用时必须附加路径（如 path hash 的 symbolicKey），否则 narratives/flows 会无法唯一解析（一键任务包实跑发现）。
@@ -67,6 +69,11 @@
 ---
 
 ## 教训条目
+
+### 2026-11-05 · 静态站把 URL source「改写」成 meta.pipeline 而非清理
+- **现象**：Agent 导出站带 `?source=key` 打开，地址栏被改成 `?source=agent`；页面本身正确，但看起来像导出站仍认 URL 来源。
+- **根因**：来源同步复用了双管线共用的 `withInsightSourceQuery(query, appState.source)`，静态分支把固定来源写回了 URL。
+- **正确做法**：静态站分支直接 `delete query.source`（只清理、不回写）；双管线分支才按当前 source 写/删。验收时同时检查导出站地址栏与页头无开关。
 
 ### 2026-11-05 · 迁移断言时 chat 桩形状不匹配被「后置覆盖」掩盖
 - **现象**：双管线迁移后，categories 用例断言 KEY 自有分类恒为 null；将该断言改回旧口径（Agent 覆盖后的值）则通过。

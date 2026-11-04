@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import type { InsightHistoryResponse, InsightSnapshotMeta } from '@autodoc/shared-types'
 import {
@@ -16,8 +16,10 @@ import { isExpanded, toggle } from '../store/expand'
 import { formatDate } from '../utils/format'
 import {
   formatSnapshotStats,
+  isLegacySnapshot,
   snapshotDisplayLabel,
   snapshotDisplayNote,
+  snapshotRollbackState,
   snapshotTriggerLabel,
   summarizeDiff
 } from '../utils/insightHistory'
@@ -59,6 +61,8 @@ const savingMeta = ref(false)
 const deletingId = ref<string | null>(null)
 
 const readOnly = computed(() => appState.meta?.readOnly ?? false)
+/** 顶栏语义来源：两套历史完全独立，列表/回滚都按当前管线作用域 */
+const source = computed(() => appState.source)
 const snapshots = computed<InsightSnapshotMeta[]>(() => history.value?.snapshots ?? [])
 const activeId = computed<string | null>(() => history.value?.activeId ?? null)
 const activeSnapshot = computed(
@@ -67,12 +71,17 @@ const activeSnapshot = computed(
 const archivedCount = computed(() => history.value?.archivedCount ?? 0)
 const canCompare = computed(() => selectedIds.value.length === 2)
 
-/**
- * G3 快照级来源：id → { label, agent }（本地 KEY API 生成的旧快照为 null，不额外标注）。
- * 预计算成 Map：模板里 v-if 与内容共用同一份结果，避免每行调两次函数。
- */
+/** 快照级来源：id → { label, agent }（本地 KEY API 生成的旧快照为 null，不额外标注）。 */
 const sourceTags = computed(
   () => new Map(snapshots.value.map((s) => [s.id, snapshotSourceTag(s)]))
+)
+
+/**
+ * 回滚可用性（id → 状态）：legacy（无 pipeline）只读可对比、禁止回滚；
+ * 正常列表只会出现当前管线 + legacy，跨管线分支属防御。
+ */
+const rollbackStates = computed(
+  () => new Map(snapshots.value.map((s) => [s.id, snapshotRollbackState(s, source.value)]))
 )
 
 /** 生成时图谱指纹与当前图谱不一致的快照 id（列表与回滚态横幅共用） */
@@ -99,12 +108,13 @@ function toggleHistory(): void {
 }
 
 async function reload(): Promise<void> {
+  if (!available.value) return
   loading.value = true
   try {
-    const resp = await fetchInsightHistory()
+    const resp = await fetchInsightHistory(source.value)
     available.value = resp !== null
     history.value = resp
-    // 清理已不在列表中的勾选（如切项目后残留）
+    // 清理已不在列表中的勾选（如切项目/切来源后残留）
     const ids = new Set((resp?.snapshots ?? []).map((s) => s.id))
     selectedIds.value = selectedIds.value.filter((id) => ids.has(id))
   } finally {
@@ -116,7 +126,19 @@ onMounted(() => {
   if (available.value) void reload()
 })
 
+/** 切换 KEY/Agent：两套历史独立，重载当前管线的列表与回滚指针 */
+watch(source, () => {
+  selectedIds.value = []
+  showDiff.value = false
+  cancelEdit()
+  void reload()
+})
+
 defineExpose({ reload })
+
+function rollbackOf(snapshot: InsightSnapshotMeta): { allowed: boolean; reason: string } {
+  return rollbackStates.value.get(snapshot.id) ?? { allowed: true, reason: '' }
+}
 
 function toggleSelect(id: string, checked: boolean): void {
   if (checked) {
@@ -127,9 +149,15 @@ function toggleSelect(id: string, checked: boolean): void {
 }
 
 async function handleRollback(snapshot: InsightSnapshotMeta): Promise<void> {
+  const state = rollbackOf(snapshot)
+  if (!state.allowed) {
+    // 按钮已禁用，此处防键盘/程序触发；文案与后端拒绝原因同口径
+    message.warning(state.reason)
+    return
+  }
   rollingBackId.value = snapshot.id
   try {
-    await rollbackInsightSnapshot(snapshot.id)
+    await rollbackInsightSnapshot(snapshot.id, source.value)
     await refreshInsight()
     await reload()
     const name = snapshotDisplayLabel(snapshot) || formatDate(snapshot.savedAt)
@@ -144,7 +172,7 @@ async function handleRollback(snapshot: InsightSnapshotMeta): Promise<void> {
 async function handleClearRollback(): Promise<void> {
   clearBusy.value = true
   try {
-    await clearInsightRollback()
+    await clearInsightRollback(source.value)
     await refreshInsight()
     await reload()
     message.success('已回到实时视图')
@@ -269,6 +297,9 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
         @click="toggleHistory"
       >
         <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">历史版本</h3>
+        <n-tag size="tiny" :bordered="false" :type="source === 'agent' ? 'info' : 'default'">
+          {{ source === 'agent' ? 'Agent 管线' : 'KEY 管线' }}
+        </n-tag>
         <span
           v-if="history"
           class="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full text-[11px] font-semibold bg-[color:var(--ad-canvas)] text-[color:var(--ad-ink-2)]"
@@ -298,7 +329,9 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
 
         <n-spin v-if="loading" size="small" />
         <div v-else-if="snapshots.length === 0" class="text-xs text-[color:var(--ad-ink-3)] py-1">
-          暂无历史快照；点击「重新生成 AI」后每次生成会自动归档一份。
+          {{ source === 'agent'
+            ? '暂无 Agent 管线快照；在 Agent 供给面板合并供给后会自动归档一份。'
+            : '暂无历史快照；点击「重新生成 AI」后每次生成会自动归档一份。' }}
         </div>
         <n-list v-else bordered size="small">
           <n-list-item
@@ -366,6 +399,15 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
                     {{ snapshotTriggerLabel(snapshot.trigger) }}
                   </n-tag>
                   <n-tag
+                    v-if="isLegacySnapshot(snapshot)"
+                    size="tiny"
+                    type="warning"
+                    :bordered="false"
+                    title="无 pipeline 字段的开发期合并版：两套历史都展示，只读可对比，不支持回滚"
+                  >
+                    开发期合并版（只读）
+                  </n-tag>
+                  <n-tag
                     v-if="staleSnapshotIds.has(snapshot.id)"
                     size="tiny"
                     type="warning"
@@ -424,7 +466,8 @@ async function handleDelete(snapshot: InsightSnapshotMeta): Promise<void> {
                   v-if="!readOnly"
                   size="tiny"
                   secondary
-                  :disabled="snapshot.id === activeId || editingId === snapshot.id"
+                  :disabled="snapshot.id === activeId || editingId === snapshot.id || !rollbackOf(snapshot).allowed"
+                  :title="rollbackOf(snapshot).allowed ? undefined : rollbackOf(snapshot).reason"
                   :loading="rollingBackId === snapshot.id"
                   @click="handleRollback(snapshot)"
                 >

@@ -2,6 +2,18 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-05 · KEY / Agent 双管线前端收尾（P4–P5）· web+docs
+
+- **来源开关**：`store.switchSource(next)` 同值早退、更新 `appState.source` 后按新来源重拉洞察（历史区由自身 watch 重载）；`loadActiveDocs` / `refreshInsight` 统一带 `source` 取数，Agent 视图才拉 `agent-supply`，KEY 视图清空供给残留；`ensureInsightAI` / `regenerateInsightAI` / `repartitionInsight` 仅在 KEY 模式可达，Agent 视图零 KEY AI 请求；`mergeAgentSupplyIfNeeded` 仅在 Agent 视图触发。
+- **顶栏与 URL**：新增 D1 令牌样式的 KEY/Agent 分段控件（`aria-label="语义来源"`、`aria-pressed`、原生 button 键盘可达），切换用 `router.replace` 同步 query（hash 模式 `?source=agent`），跨页/刷新/分享保持；静态导出站隐藏开关并清理 URL 上的 `source`（删除该键，不改写固定值）。项目菜单「重新生成」只在 `!isStatic && source==='key'` 出现。
+- **洞察页**：KEY 视图隐藏 Agent 供给状态条、抽屉、契约与任务包入口；Agent 视图隐藏「重新生成 AI」、自动 AI 触发与按建议划分，并显示 Agent 供给入口。无供给空态以装配结果判定（`pipeline==='agent'` 且 `partitionSource!=='agent'`、`agentSources` 为空；扫描明确目录非空时不判空态），提供「打开 Agent 供给面板」。变更影响/模块/脉络继续只消费 `appState.insight`，实跑确认无绕过 source 的直连拉取。
+- **两套历史**：列表按 `appState.source` 拉取并在切换时重载；展示「KEY 管线 / Agent 管线」标识；legacy（无 `pipeline`）标「开发期合并版（只读）」，回滚按钮禁用并带原因 title；回滚/回到实时均带 `source`，对比沿用后端「同管线或含 legacy」能力，前端不做跨管线猜测。
+- **纯函数**：新增 `utils/insightSource.ts`（hash 解析、query 写/删、静态来源固定）与 `insightHistory.snapshotRollbackState`/`isLegacySnapshot`、`agentSupply.isAgentStaticBaseline`，均可独立单测。
+- **测试**：web 329→345（URL 来源解析/同步、api 带 source、legacy 不可回滚、静态来源固定、Agent 空态判据）；全仓 1427→1443（core 427 / server 671 / web 345）。`pnpm test`、`pnpm lint`、`pnpm build` 全绿。既有供给测试显式切到 Agent 视图（KEY 视图不再拉供给）。
+- **实跑**：隔离 fixture（2 文件/6 函数，JSON 存储，注入 legacy 快照与 `coreRoles` 供给）起 `serve --port 7795`，headless Edge 验证默认 KEY、切 Agent（URL `?source=agent`、无「重新生成 AI」、供给入口/任务包可见）、刷新保持、切回 KEY（清 query、供给入口消失、重新生成可见、项目菜单有「重新生成」而 Agent 菜单无）、Agent 无供给空态与打开面板、两套历史及 legacy 回滚禁用、影响页跟随且仅一次 `?source=agent` 洞察请求。`export --source key|agent` 各导出一份，静态服务（7801/7802）验证页头无开关、URL `source` 被清理、来源按 `meta.pipeline` 固定（Agent 导出显示「Agent 已增强」）。fixture/导出/临时进程已清理，未触碰用户 `.autodoc`。
+- **文档**：README「两条 AI 生产链路」改为完全独立双管线口径，「语义担保」改为各管线独立持久化/Agent 不用 KEY 复核，并修正静态导出的来源说明。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-05 · KEY 与 Agent 语义双管线独立装配（P1–P3）· shared-types+core+server+web+docs
 
 - **动机**：开发期合并版把「本地 KEY API 语义」与「外部 Agent 供给」压在一条装配线上（`supplyOverlay` 把 Agent 覆盖到 KEY 结果、`aiSource` 出现 mixed、一条洞察既含 KEY 又含 Agent、担保拿 KEY 去复核 Agent），来源口径与历史回滚都无法自洽。用户确认改为**完全独立双管线**。

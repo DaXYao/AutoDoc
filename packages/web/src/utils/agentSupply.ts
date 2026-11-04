@@ -9,6 +9,7 @@ import type {
   AiPassStatus,
   ImpactChangesetAgentSemantics,
   InsightSnapshotMeta,
+  ProjectInsight,
   SemanticSource
 } from '@autodoc/shared-types'
 import { formatDate } from './format'
@@ -179,8 +180,7 @@ export function summarizeAgentSupply(resp: AgentSupplyResponse | null): AgentSup
   }
 }
 
-/**
- * 快照级来源标签（历史列表用）：
+/** 快照级来源标签（历史列表用）：
  * source 缺省或 'api' → null（本地生成，不额外标注）；
  * 'agent' → 「Agent 供给」；'mixed' → 「部分 Agent 供给」。agent 为生效标识串。
  */
@@ -190,6 +190,23 @@ export function snapshotSourceTag(
   if (!meta.source || meta.source === 'api') return null
   const label = meta.source === 'mixed' ? '部分 Agent 供给' : 'Agent 供给'
   return { label, agent: meta.agent ?? '' }
+}
+
+/**
+ * Agent 视图是否仍是无供给的静态基线（空态判据）。
+ * 真实依据是**装配结果**而非扫描请求：pipeline 必须是 agent，且 partition 未由 Agent 划分、
+ * agentSources 也为空（没有任何 pass 被供给覆盖）。
+ * supplyEmpty=false（扫描确认目录里有文件）时不判空态——那种情况交给状态条展示错误/忽略，
+ * 避免「有供给但全不合法」被误解成「尚无供给」。supplyEmpty 未就绪（null）时按洞察基线判定。
+ */
+export function isAgentStaticBaseline(
+  insight: Pick<ProjectInsight, 'pipeline' | 'partitionSource' | 'agentSources'> | null,
+  supplyEmpty: boolean | null
+): boolean {
+  if (!insight || insight.pipeline !== 'agent') return false
+  if (insight.partitionSource === 'agent') return false
+  if (Object.keys(insight.agentSources ?? {}).length > 0) return false
+  return supplyEmpty !== false
 }
 
 /* ------------------------- G6：变更侧（changes pass）展示层 ------------------------- */

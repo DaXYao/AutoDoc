@@ -123,6 +123,8 @@ async function setup(svc = new FakeSupplyService()): Promise<{
   vi.resetModules()
   vi.stubGlobal('fetch', svc.handle)
   const store = await import('../src/store/app')
+  // 自动合并只服务 Agent 管线（KEY 视图不展示供给入口）；本文件全部用例都按 Agent 视图运行
+  store.appState.source = 'agent'
   return { store, svc }
 }
 

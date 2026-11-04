@@ -49,6 +49,7 @@ import {
   type AgentSupplyMergeResponse
 } from '../data/api'
 import { buildWinnerIndex } from '../utils/agentSupply'
+import { parseInsightSourceFromHash, resolveStaticInsightSource } from '../utils/insightSource'
 import { toast } from '../utils/toast'
 
 /** 全局应用状态：元信息、项目列表、文件列表、函数索引与按需加载的文件视图缓存 */
@@ -112,19 +113,12 @@ export interface AppState {
 }
 
 /**
- * 从 URL hash query 读取初始管线（`#/insight?source=agent`）。
- * 首屏不依赖 vue-router（store 不 import router，避免 views→store→router 环）：
- * 直接解析 location.hash，保证带 `?source=agent` 刷新后仍落在 Agent 视图。
+ * 首屏初始管线：从 URL hash query 读取（`#/insight?source=agent`）。
+ * 解析逻辑见 utils/insightSource（纯函数可测）；静态导出站的来源在 loadActiveDocs
+ * 拿到 meta 后固定为 meta.pipeline，不采信 URL。
  */
 function initialInsightSource(): InsightSource {
-  try {
-    const hash = globalThis.location?.hash ?? ''
-    const at = hash.indexOf('?')
-    if (at < 0) return 'key'
-    return new URLSearchParams(hash.slice(at + 1)).get('source') === 'agent' ? 'agent' : 'key'
-  } catch {
-    return 'key'
-  }
+  return parseInsightSourceFromHash(globalThis.location?.hash ?? '')
 }
 
 export const appState = reactive<AppState>({
@@ -371,6 +365,8 @@ let autoMergePending = false
  */
 export async function mergeAgentSupplyIfNeeded(): Promise<void> {
   if (getMode() !== 'api') return
+  // 合并只服务 Agent 管线：KEY 视图不展示供给入口，也不应触发供给写请求
+  if (appState.source !== 'agent') return
   if (appState.meta?.readOnly) return
   if (autoMergeInFlight) {
     autoMergePending = true
@@ -438,55 +434,88 @@ async function loadActiveDocs(): Promise<void> {
   appState.meta = meta
   appState.summaries = summaries
   appState.functionIndex = index
+  // 静态导出站固定为导出时选定的单一管线：忽略 URL 上的 source（App 会清理 query）
+  if (getMode() === 'static') appState.source = resolveStaticInsightSource(meta.pipeline)
   // C3：变更集与文档数据同属活动项目，随 bootstrap/reloadAll/切项目一起刷新
   //（regenerateActive 走 reloadAll → 本函数，重生后的新快照批次即在此拉回）；
-  // G3：Agent 供给同口径——只随活动项目数据拉一次，内部吞错不拖垮 Promise.all；
-  // 洞察/变更集/供给互不依赖，并行拉取减少串行等待
+  // 双管线：洞察按当前 source 拉取；Agent 供给只在 Agent 视图需要（KEY 视图不请求、不残留），
+  // 内部吞错不拖垮 Promise.all；洞察/变更集/供给互不依赖，并行拉取减少串行等待
+  const agentMode = appState.source === 'agent'
   const [insight] = await Promise.all([
-    fetchInsight(),
+    fetchInsight('', appState.source),
     loadWorkspaceChangeset(token),
-    applyAgentSupply(fetchAgentSupply, token),
+    agentMode ? applyAgentSupply(fetchAgentSupply, token) : Promise.resolve(null),
     // 团队状态与文档数据并行拉取；失败/非团队项目静默 null，不拖垮页面
     loadTeamStatus(token)
   ])
   if (token !== loadToken) return
+  if (!agentMode) appState.agentSupply = null
   appState.insight = insight
 }
 
-/** 若已配置 AI 且尚未生成摘要，按需触发一次 AI 生成（命中缓存则秒回） */
+/**
+ * 若已配置 AI 且尚未生成摘要，按需触发一次 AI 生成（命中缓存则秒回）。
+ * 仅 KEY 管线可达：Agent 视图的语义来自外部供给，不得触发任何 KEY AI 请求。
+ */
 export async function ensureInsightAI(): Promise<void> {
+  if (appState.source !== 'key') return
   const cur = appState.insight
   if (!cur || !cur.aiEnabled || cur.aiGenerated) return
   const enriched = await requestInsightAI(false)
   if (enriched) appState.insight = enriched
 }
 
-/** 强制重新生成 AI 洞察 */
+/** 强制重新生成 AI 洞察（仅 KEY 管线；Agent 视图由供给管线负责语义） */
 export async function regenerateInsightAI(): Promise<void> {
+  if (appState.source !== 'key') return
   const enriched = await requestInsightAI(true)
   if (enriched) appState.insight = enriched
 }
 
-/** 按用户建议重新划分功能模块（仅重生成划分，其余 AI 结果走缓存） */
+/** 按用户建议重新划分功能模块（仅 KEY 管线） */
 export async function repartitionInsight(feedback: string): Promise<void> {
+  if (appState.source !== 'key') return
   const enriched = await requestInsightPartition(feedback)
   if (enriched) appState.insight = enriched
 }
 
 /**
  * 重新拉取当前生效洞察（回滚/清除回滚后调用）。
- * 后端 loadInsight 在 activeId 命中时返回历史快照，否则返回实时计算结果。
+ * 后端 loadInsight 在 activeId 命中时返回历史快照，否则返回实时计算结果；
+ * 回滚指针按管线作用域隔离，source 必须跟随顶栏开关。
  */
 export async function refreshInsight(): Promise<void> {
   const token = loadToken
-  const insight = await fetchInsight()
+  const agentMode = appState.source === 'agent'
+  const insight = await fetchInsight('', appState.source)
   if (token !== loadToken) return
   appState.insight = insight
   // C3：回滚路径不经过 reloadAll，但徽标变更集须与当前生效数据同步刷新，此处一并拉取
   await loadWorkspaceChangeset(token)
   // G3：回滚 / 回到实时 / 删除当前回滚快照都会改变供给的合并基线（rolledBack 与拒绝原因），
   // 不一起刷新，状态条与抽屉会一直挂着过期的「回滚视图 · 合并被拒」
-  await applyAgentSupply(fetchAgentSupply, token)
+  if (agentMode) await applyAgentSupply(fetchAgentSupply, token)
+  else appState.agentSupply = null
+}
+
+/**
+ * 顶栏 KEY/Agent 切换：同值早退；更新来源后按新来源重拉洞察（历史区由自身 watch source 重载）。
+ * 静态导出站固定单来源，不允许切换（URL 上的 source 也不采信）。
+ * Agent 模式不触发任何 KEY AI 请求：loadActiveDocs 只按 source 取数与供扫描。
+ */
+export async function switchSource(next: InsightSource): Promise<void> {
+  if (next === appState.source) return
+  if (getMode() === 'static') return
+  appState.source = next
+  // 合并明细属于上一条管线的动作：切换后不残留
+  appState.agentSupplyMerge = null
+  if (appState.activeProjectId === null && appState.hubEnabled) return
+  appState.loading = true
+  try {
+    await loadActiveDocs()
+  } finally {
+    appState.loading = false
+  }
 }
 
 /* ------------------------- 团队协作（team） ------------------------- */

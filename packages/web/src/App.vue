@@ -1,11 +1,20 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import type { DropdownOption } from 'naive-ui'
+import type { InsightSource } from '@autodoc/shared-types'
 import { getMode } from './data/api'
-import { appReady, appState, bootstrap, regenerateActive, switchProject } from './store/app'
+import {
+  appReady,
+  appState,
+  bootstrap,
+  regenerateActive,
+  switchProject,
+  switchSource
+} from './store/app'
 import { formatDate } from './utils/format'
 import { formatIncrementalSummary } from './utils/incremental'
+import { INSIGHT_SOURCE_OPTIONS, withInsightSourceQuery } from './utils/insightSource'
 import { teamStatusPill } from './utils/team'
 import { toast } from './utils/toast'
 import { themeOverrides, adBtnOutlineOverrides } from './theme'
@@ -28,6 +37,54 @@ onMounted(async () => {
 
 const readOnly = computed(() => appState.meta?.readOnly ?? false)
 const isStatic = computed(() => appReady.value && getMode() === 'static')
+
+/* ------------------------- KEY / Agent 双管线来源开关 ------------------------- */
+
+/**
+ * 顶栏分段控件的选中态 → URL query（hash 模式 `#/insight?source=agent`）：
+ * - 刷新/分享：store 首屏从 hash 解析 source，历史/洞察按同一来源取数；
+ * - 所有页跟随：路由切换后由下方 watch 把当前来源补回 query（含函数定位等其他 query）；
+ * - 静态导出站固定单来源：清理 URL 上的 source，不显示开关。
+ */
+async function syncSourceQuery(): Promise<void> {
+  if (!appReady.value) return
+  const route = router.currentRoute.value
+  const hasSource = route.query.source !== undefined
+  if (isStatic.value) {
+    // 静态站来源由 meta.pipeline 固定，URL 上的 source 一律忽略并清掉（不写入固定值）
+    if (hasSource) {
+      const query = { ...route.query }
+      delete query.source
+      await router.replace({ query })
+    }
+    return
+  }
+  const next = withInsightSourceQuery({ ...route.query }, appState.source)
+  const unchanged =
+    (appState.source === 'agent' && route.query.source === 'agent') ||
+    (appState.source === 'key' && !hasSource)
+  if (!unchanged) await router.replace({ query: next })
+}
+
+watch(
+  [() => router.currentRoute.value.fullPath, appReady, () => appState.source],
+  () => {
+    void syncSourceQuery()
+  },
+  { immediate: true }
+)
+
+async function handleSelectSource(next: InsightSource): Promise<void> {
+  if (isStatic.value || next === appState.source) return
+  try {
+    await switchSource(next)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : String(error))
+    return
+  }
+  await syncSourceQuery()
+}
+
 
 /** 团队状态胶囊（非团队项目/未加载为 null，顶栏不显示团队入口） */
 const teamPill = computed(() => teamStatusPill(appState.teamStatus))
@@ -80,7 +137,8 @@ const projectMenuOptions = computed(() => {
       })
     }
   }
-  if (!isStatic.value && appState.activeProjectId !== null) {
+  // 重新生成只属于 KEY 管线（Agent 语义由外部供给合并产生）；静态导出站同样不出现
+  if (!isStatic.value && appState.activeProjectId !== null && appState.source === 'key') {
     options.push({ label: '重新生成', key: 'refresh', disabled: appState.loading })
   }
   if (appState.hubEnabled) options.push({ label: '项目管理', key: 'projects' })
@@ -176,6 +234,26 @@ async function handleRefresh(): Promise<void> {
               <span class="ad-nav-description">{{ item.description }}</span>
             </router-link>
           </nav>
+
+          <div
+            v-if="!isStatic"
+            class="ad-source-switch shrink-0"
+            role="group"
+            aria-label="语义来源"
+          >
+            <button
+              v-for="option in INSIGHT_SOURCE_OPTIONS"
+              :key="option.value"
+              type="button"
+              class="ad-source-switch__btn"
+              :class="{ 'ad-source-switch__btn--active': appState.source === option.value }"
+              :aria-pressed="appState.source === option.value"
+              :title="option.title"
+              @click="handleSelectSource(option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
 
           <div class="ad-search">
             <SearchBar />
