@@ -232,9 +232,13 @@ export async function fetchImpactCommits(limit?: number): Promise<ImpactCommit[]
  * 某一范围（workspace / commit:<hash> / range:<a>..<b>）的函数级变更集。
  * 静态模式返回 null；409（无活动项目）/400（scope 非法）等失败抛错，由调用方弹 message。
  */
-export async function fetchChangeset(scope: string): Promise<ImpactChangeset | null> {
+export async function fetchChangeset(
+  scope: string,
+  source: InsightSource = 'key'
+): Promise<ImpactChangeset | null> {
   if (mode !== 'api') return null
-  const res = await fetch(`/api/impact/changeset?scope=${encodeURIComponent(scope)}`)
+  const suffix = source === 'agent' ? '&source=agent' : ''
+  const res = await fetch(`/api/impact/changeset?scope=${encodeURIComponent(scope)}${suffix}`)
   if (!res.ok) throw await errorFromResponse(res, '加载变更集失败')
   return (await res.json()) as ImpactChangeset
 }

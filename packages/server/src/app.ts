@@ -82,7 +82,9 @@ function toInsightResponse(
   return {
     ...insight,
     parseStats: service.lastParseStats,
-    aiChunkStats: freshAiChunkStats ?? service.lastAiChunkStats
+    // 增量统计属于 KEY 管线；Agent 视图不展示、不下发，避免跨管线口径混用
+    aiChunkStats:
+      insight.pipeline === 'agent' ? undefined : freshAiChunkStats ?? service.lastAiChunkStats
   }
 }
 
@@ -485,10 +487,14 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     const service = manager.getActive()
     const projectId = manager.getActiveId()
     if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
-    const { scope } = req.query as { scope?: string }
+    const { scope, source: rawSource } = req.query as { scope?: string; source?: string }
     if (typeof scope !== 'string' || scope.trim().length === 0) {
       return reply.code(400).send({ error: '缺少 scope（workspace / commit:<hash> / range:<hashA>..<hashB>）' })
     }
+    if (rawSource !== undefined && rawSource !== 'key' && rawSource !== 'agent') {
+      return reply.code(400).send({ error: 'source 仅支持 key / agent' })
+    }
+    const source = rawSource === 'agent' ? 'agent' : 'key'
     try {
       const changeset = getChangeset(service, scope)
       // 🟡5：轻量读时合并——复用 changeset 已取到的 snapshotRecords，供给目录无文件即早退。
@@ -496,7 +502,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       try {
         const snapshotRecords = service.storage.listChangeRecords({ source: 'snapshot' })
         const supplyId = scopeToSupplyId(scope, snapshotRecords)
-        if (supplyId) {
+        // 变更侧 Agent 语义只属于 Agent 视图：KEY 视图不合并、不校验，避免 @agent 徽标漏进 KEY 影响页
+        if (supplyId && source === 'agent') {
           // 变更侧供给的 chain:N / stepId 以 Agent 管线结构为基准（与供给契约同源）；
           // 变更影响页在 Agent 模式下展示的正是同一套结构。
           const { insight, graph } = loadInsight(service, '', {

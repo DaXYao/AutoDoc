@@ -477,10 +477,18 @@ export function executeMerge(service: DocService, projectId: string): MergeEndpo
     }
   }
 
+  // 归档必须与实时 Agent 视图同源：合并底座是「纯静态基线」，partition 胜者会清空脉络；
+  // 若本轮没有 flows 胜者，实时装配会补启发式树，而直接归档 mergeResult 会得到 flows=[] 的旧结构。
+  // 供给缓存已重写，这里按正式 Agent 装配重读一次，保证归档快照 == 切到 Agent 视图看到的内容。
+  const canonical = loadInsight(service, '', {
+    ignoreSnapshot: true,
+    source: 'agent',
+    guarantees: false
+  })
   const archiveResult = archiveAgentInsight({
     service,
-    insight: mergeResult.insight,
-    graph
+    insight: canonical.insight,
+    graph: canonical.graph
   })
 
   if (archiveResult.deduplicated) {

@@ -190,7 +190,7 @@ async function loadChangeset(): Promise<void> {
   const token = ++changesetToken
   changesetLoading.value = true
   try {
-    const result = await fetchChangeset(scope)
+    const result = await fetchChangeset(scope, appState.source)
     if (token !== changesetToken) return
     changeset.value = result
     if (result !== null && shouldResolveLanding && result.scope === 'workspace') {

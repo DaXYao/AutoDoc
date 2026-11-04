@@ -47,6 +47,11 @@ onMounted(() => {
   if (!agentMode.value) void triggerAI(false)
 })
 
+// 切回 KEY 时补一次按需 AI（组件不重挂载，onMounted 不会再跑；命中缓存则秒回）
+watch(source, (next) => {
+  if (next === 'key') void triggerAI(false)
+})
+
 async function triggerAI(force: boolean): Promise<void> {
   if (agentMode.value) return
   const cur = appState.insight

@@ -417,15 +417,21 @@ async function handleMigrate(): Promise<void> {
             <li v-for="(line, index) in syncSummary.lines" :key="index">{{ line }}</li>
           </ul>
           <p v-if="syncSummary.supplyHint" class="mt-1 text-xs">
-            若本次同步拉取了团队供给（supply/），请到
-            <router-link
-              :to="{ name: 'insight' }"
-              class="underline"
-              @click="visible = false"
-            >
-              洞察页的 Agent 供给面板
-            </router-link>
-            重新扫描/合并；同步不会自动应用供给。
+            <template v-if="appState.source === 'agent'">
+              若本次同步拉取了团队供给（supply/），请到
+              <router-link
+                :to="{ name: 'insight' }"
+                class="underline"
+                @click="visible = false"
+              >
+                洞察页的 Agent 供给面板
+              </router-link>
+              重新扫描/合并；同步不会自动应用供给。
+            </template>
+            <template v-else>
+              若本次同步拉取了团队供给（supply/），请先切换到 Agent 视图，再到洞察页的 Agent
+              供给面板重新扫描/合并；同步不会自动应用供给。
+            </template>
           </p>
         </n-alert>
 

@@ -108,7 +108,7 @@ function toggleHistory(): void {
 }
 
 async function reload(): Promise<void> {
-  if (!available.value) return
+  // 不因上一次失败而永久短路：切管线/重进页面都应重新尝试（失败时 available 仍会置 false 并隐藏区域）
   loading.value = true
   try {
     const resp = await fetchInsightHistory(source.value)
@@ -123,7 +123,8 @@ async function reload(): Promise<void> {
 }
 
 onMounted(() => {
-  if (available.value) void reload()
+  if (getMode() === 'api') void reload()
+  else available.value = false
 })
 
 /** 切换 KEY/Agent：两套历史独立，重载当前管线的列表与回滚指针 */
@@ -131,7 +132,7 @@ watch(source, () => {
   selectedIds.value = []
   showDiff.value = false
   cancelEdit()
-  void reload()
+  if (getMode() === 'api') void reload()
 })
 
 defineExpose({ reload })

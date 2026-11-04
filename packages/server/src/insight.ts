@@ -1641,6 +1641,8 @@ export interface BuildAgentInsightOptions {
 interface AgentInsightCacheEntry {
   basis: string
   revision: string
+  /** 装配维度（aiEnabled / 脉络配额）：配置变化必须重装，不能沿用旧 aiEnabled 与旧配额 */
+  dims: string
   insight: ProjectInsight
 }
 
@@ -1676,25 +1678,42 @@ export function buildAgentInsight(
   }
   // 结构层：Agent partition 优先；缺省保持目录划分。
   const partition = readPartitionSupply(cache, graph.fingerprint)
-  if (partition) applyAgentPartitionToInsight(insight, graph, partition.value)
-  // 整树语义层：按 partition 应用后的划分身份读整树；缺省回退启发式脉络。
+  let partitionApplied = false
+  if (partition) {
+    partitionApplied = applyAgentPartitionToInsight(insight, graph, partition.value) !== 'missing'
+  }
+  // 整树语义层：按 partition 应用后的划分身份读整树；缺省或引用失效都回退启发式脉络。
   const basis = flowsBasis(graph)
+  const dims = `${opts.aiEnabled ? 1 : 0}:${caps.maxDepth}:${caps.maxChildrenPerNode}:${caps.maxNodesTotal}`
   const cacheKey = `agentInsight:${graph.fingerprint}:${basis}`
   const revision = supplyRevisionOf(cache)
   const cached = cache.getGlobal<AgentInsightCacheEntry>(cacheKey)
-  if (cached && cached.basis === basis && cached.revision === revision && cached.insight.pipeline === 'agent') {
+  if (
+    cached &&
+    cached.basis === basis &&
+    cached.revision === revision &&
+    cached.dims === dims &&
+    cached.insight.pipeline === 'agent'
+  ) {
     return structuredClone(cached.insight)
   }
   const flows = readFlowsSupply(cache, graph.fingerprint, basis)
+  let flowsApplied = false
   if (flows) {
-    applyAgentFlowsToInsight(insight, graph, flows.value, flows.writtenAt)
-  } else {
-    applyHeuristicFlows(insight, graph, caps)
+    flowsApplied = applyAgentFlowsToInsight(insight, graph, flows.value, flows.writtenAt) !== 'missing'
   }
+  if (!flowsApplied) applyHeuristicFlows(insight, graph, caps)
   // 其余语义 pass + aiStatus/aiSource/agentSources + Agent 担保（declared 上限）
-  applyAgentSemantics(insight, graph, cache, { skipPartition: true, skipFlows: true })
-  const entry: AgentInsightCacheEntry = { basis, revision, insight }
+  applyAgentSemantics(insight, graph, cache, {
+    skipPartition: true,
+    skipFlows: true,
+    partitionApplied,
+    flowsApplied
+  })
+  const entry: AgentInsightCacheEntry = { basis, revision, dims, insight }
   try {
+    // 单槽回收：只保留当前装配结果，避免跨指纹/配额的历史整份洞察无限堆积在 ai-cache.json
+    cache.clearGlobalByPrefix('agentInsight:')
     cache.setGlobal(cacheKey, entry)
   } catch {
     // 缓存写失败只影响下次装配性能，不影响本次结果

@@ -2,6 +2,18 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-05 · 双管线终审修复：快照一致性、变更语义隔离与缓存有界 · server+web
+
+- **Agent 归档与实时一致**（`agentSupplyMerge.ts`）：合并归档前按正式 Agent 装配重读一次，避免「只供 partition、不供 flows」时实时视图有启发式脉络、归档快照却 `flows=[]`。
+- **结构层 missing 不登记**（`supplyCache.ts` / `insight.ts`）：`skipPartition/skipFlows` 改为回传真实 apply outcome；应用失败（越界/引用失效）不再写 `agentSources`/`aiStatus=ok`，避免界面谎报「Agent 已生效」。失效 flows 同时回退启发式脉络。
+- **变更语义按来源隔离**（`app.ts` / `ImpactView.vue` / `api.ts`）：`GET /api/impact/changeset` 新增 `source`（缺省 key，非法 400），仅 Agent 视图读时合并 changes 供给；KEY 影响页不再出现 @agent 徽标或跨划分「未落点」噪音。
+- **导出实时视图**（`export.ts`）：`loadInsight` 传 `ignoreSnapshot`，不把回滚快照配当前图谱导出。
+- **Agent 装配缓存有界**（`aiCache.ts` / `insight.ts`）：缓存信封加入 `aiEnabled` 与脉络配额维度，写入前单槽回收旧 `agentInsight:*`，避免配置变更后旧值复用与 ai-cache.json 无限膨胀。
+- **增量统计不串线**（`app.ts`）：`source=agent` 不再下发 KEY 管线的 `aiChunkStats`。
+- **体验修正**：历史区失败后不再永久短路（切管线会重试）；切回 KEY 自动补一次按需 AI；团队同步提示在 KEY 视图改为「先切到 Agent 视图」。
+- **测试**：server 新增 3 项（KEY 影响页不合并变更语义、结构层 missing 不登记、双来源导出写 `meta.pipeline`），并把既有 changes 供给路由用例显式切到 `source=agent`；全仓 1446 项（core 427 / server 674 / web 345），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-05 · KEY / Agent 双管线前端收尾（P4–P5）· web+docs
 
 - **来源开关**：`store.switchSource(next)` 同值早退、更新 `appState.source` 后按新来源重拉洞察（历史区由自身 watch 重载）；`loadActiveDocs` / `refreshInsight` 统一带 `source` 取数，Agent 视图才拉 `agent-supply`，KEY 视图清空供给残留；`ensureInsightAI` / `regenerateInsightAI` / `repartitionInsight` 仅在 KEY 模式可达，Agent 视图零 KEY AI 请求；`mergeAgentSupplyIfNeeded` 仅在 Agent 视图触发。

@@ -30,6 +30,7 @@ import {
   buildChangesRulesSection
 } from '../src/agentSupplyChanges.js'
 import { validateChangesGuarantee } from '../src/semanticGuarantee.js'
+import { exportStaticSite } from '../src/export.js'
 
 /**
  * G5：变更侧 Agent 语义供给测试。
@@ -975,12 +976,44 @@ describe('GET /api/impact/changeset（G5 读时合并）', () => {
       [`commit:${COMMIT_HASH}`]: { narrative: { what: '做了什么', why: '为什么', risks: [] } }
     }, '2026-10-19T00:00:00.000Z', flowsBasis(buildGraph(fixtureFiles()))))
     const app = await makeApp(service)
-    const res = await app.inject({ method: 'GET', url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}` })
+    const res = await app.inject({ method: 'GET', url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}&source=agent` })
     expect(res.statusCode).toBe(200)
     const body = res.json() as ImpactChangeset
     expect(body.agentSemantics).toBeDefined()
     expect(body.agentSemantics!.agent).toBe('qoder')
     expect(body.agentSemantics!.narrative?.what).toBe('做了什么')
+    await app.close()
+  })
+
+  it('KEY 视图（默认/source=key）不合并变更侧 Agent 语义，source=agent 才合并', async () => {
+    const dir = freshDir()
+    const service = await makeService(dir, fixtureFiles())
+    seedGit(service, COMMIT_HASH, '2026-10-01T00:00:00.000Z', [FN_A, FN_B])
+    const changesDir = changesSupplyDirOf(join(dir, 'autodoc.json'), 'p1')
+    writeChanges(changesDir, 'changes.qoder.json', changesEnvelope('qoder', {
+      [`commit:${COMMIT_HASH}`]: { narrative: { what: '做了什么', why: '为什么', risks: [] } }
+    }, '2026-10-19T00:00:00.000Z', flowsBasis(buildGraph(fixtureFiles()))))
+    const app = await makeApp(service)
+    const keyRes = await app.inject({
+      method: 'GET',
+      url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}&source=key`
+    })
+    const explicitKey = await app.inject({
+      method: 'GET',
+      url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}&source=key`
+    })
+    const agentRes = await app.inject({
+      method: 'GET',
+      url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}&source=agent`
+    })
+    expect((keyRes.json() as ImpactChangeset).agentSemantics).toBeUndefined()
+    expect((explicitKey.json() as ImpactChangeset).agentSemantics).toBeUndefined()
+    expect((agentRes.json() as ImpactChangeset).agentSemantics?.agent).toBe('qoder')
+    const bad = await app.inject({
+      method: 'GET',
+      url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}&source=bogus`
+    })
+    expect(bad.statusCode).toBe(400)
     await app.close()
   })
 
@@ -1010,7 +1043,7 @@ describe('GET /api/impact/changeset（G5 读时合并）', () => {
     }
     writeChanges(changesDir, 'changes.qoder.json', JSON.stringify(envelope))
     const app = await makeApp(service)
-    const res = await app.inject({ method: 'GET', url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}` })
+    const res = await app.inject({ method: 'GET', url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}&source=agent` })
     expect(res.statusCode).toBe(200)
     const body = res.json() as ImpactChangeset
     expect(body.agentSemantics?.guarantee).toBeDefined()
@@ -1030,10 +1063,10 @@ describe('GET /api/impact/changeset（G5 读时合并）', () => {
       [`commit:${COMMIT_HASH}`]: { narrative: { what: '做了什么', why: '为什么', risks: [] } }
     }, '2026-10-19T00:00:00.000Z', flowsBasis(buildGraph(fixtureFiles()))))
     const app = await makeApp(service)
-    const res1 = await app.inject({ method: 'GET', url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}` })
+    const res1 = await app.inject({ method: 'GET', url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}&source=agent` })
     expect((res1.json() as ImpactChangeset).agentSemantics).toBeDefined()
     rmSync(filePath)
-    const res2 = await app.inject({ method: 'GET', url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}` })
+    const res2 = await app.inject({ method: 'GET', url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}&source=agent` })
     expect((res2.json() as ImpactChangeset).agentSemantics).toBeUndefined()
     await app.close()
   })
@@ -1047,7 +1080,7 @@ describe('GET /api/impact/changeset（G5 读时合并）', () => {
       'workspace:latest': { narrative: { what: '工作区变更', why: '测试', risks: [] } }
     }, '2026-10-19T13:00:00.000Z', null))
     const app = await makeApp(service)
-    const res = await app.inject({ method: 'GET', url: '/api/impact/changeset?scope=workspace' })
+    const res = await app.inject({ method: 'GET', url: '/api/impact/changeset?scope=workspace&source=agent' })
     expect(res.statusCode).toBe(200)
     const body = res.json() as ImpactChangeset
     expect(body.agentSemantics).toBeDefined()
@@ -1078,7 +1111,7 @@ describe('GET /api/impact/changeset（G5 读时合并）', () => {
     }
     writeChanges(changesDir, 'changes.qoder.json', JSON.stringify(envelope))
     const app = await makeApp(service)
-    const res = await app.inject({ method: 'GET', url: '/api/impact/changeset?scope=workspace' })
+    const res = await app.inject({ method: 'GET', url: '/api/impact/changeset?scope=workspace&source=agent' })
     expect(res.statusCode).toBe(200)
     const body = res.json() as ImpactChangeset
     expect(body.agentSemantics?.guarantee?.status).toBe('declared')
@@ -1092,7 +1125,7 @@ describe('GET /api/impact/changeset（G5 读时合并）', () => {
     const service = await makeService(dir, fixtureFiles())
     seedGit(service, COMMIT_HASH, '2026-10-01T00:00:00.000Z', [FN_A])
     const app = await makeApp(service, true)
-    const res = await app.inject({ method: 'GET', url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}` })
+    const res = await app.inject({ method: 'GET', url: `/api/impact/changeset?scope=commit:${COMMIT_HASH}&source=agent` })
     expect(res.statusCode).toBe(200)
     await app.close()
   })
@@ -1129,5 +1162,23 @@ describe('GET /api/agent-supply（G5 统一后）', () => {
       if (e.file.startsWith('changes.')) expect(e.pass).toBe('changes')
     }
     await app.close()
+  })
+})
+
+describe('exportStaticSite（单来源导出）', () => {
+  it('meta 与 insight 写入所选管线，不读取另一条管线', async () => {
+    const dir = freshDir()
+    const service = await makeService(dir, fixtureFiles())
+    const webDist = join(dir, 'webdist')
+    mkdirSync(webDist, { recursive: true })
+    writeFileSync(join(webDist, 'index.html'), '<!doctype html><html></html>')
+
+    const keyData = exportStaticSite(service, join(dir, 'site-key'), webDist, 'key')
+    expect(keyData.meta.pipeline).toBe('key')
+    expect(keyData.insight?.pipeline).toBe('key')
+
+    const agentData = exportStaticSite(service, join(dir, 'site-agent'), webDist, 'agent')
+    expect(agentData.meta.pipeline).toBe('agent')
+    expect(agentData.insight?.pipeline).toBe('agent')
   })
 })

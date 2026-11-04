@@ -115,6 +115,20 @@ export class AiCache {
     this.flush()
   }
 
+  /** 按全局键前缀清除（不带指纹的派生缓存，如 agentInsight:*），返回清除条数 */
+  clearGlobalByPrefix(prefix: string): number {
+    this.absorb()
+    let removed = 0
+    for (const k of Object.keys(this.data)) {
+      if (k.startsWith(prefix)) {
+        delete this.data[k]
+        removed++
+      }
+    }
+    if (removed > 0) this.flush()
+    return removed
+  }
+
   /**
    * 按 key 前缀清除某指纹下的子缓存，返回清除条数。
    * 用于 force 重生成时让派生态子缓存（如 flows:roots / flows:node:*）一并失效：

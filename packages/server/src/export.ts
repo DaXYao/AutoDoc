@@ -33,7 +33,8 @@ export function exportStaticSite(
   cpSync(webDist, outDir, { recursive: true })
 
   // 单来源洞察：只读缓存/供给装配，不发起任何网络请求（KEY 的 LLM 生成不经 export）
-  const insight = loadInsight(service, '', { source }).insight
+  // 导出的是「实时视图」而非某个回滚快照：回滚快照可能与当前图谱错位
+  const insight = loadInsight(service, '', { source, ignoreSnapshot: true }).insight
   const data: ExportData = {
     meta: toMeta(service, true, source),
     files: service.files.map((file) => toFileDocView(service, file)),

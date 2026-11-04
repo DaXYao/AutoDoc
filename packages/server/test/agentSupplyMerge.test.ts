@@ -1205,6 +1205,31 @@ describe('supplyCache（增量套用、force 清除、basis 失效）', () => {
     service.storage.close()
   })
 
+  it('结构层应用 missing 时不得登记 partition 来源/状态（skip 路径回传真实 outcome）', async () => {
+    const dir = freshDir()
+    const cache = new AiCache(dir)
+    writeSupplyCache(
+      cache,
+      FINGERPRINT,
+      BASIS,
+      passDataOf([['partition', 'root', { modules: [{ name: '无效划分', members: ['ghost::fn@x'] }] }]]),
+      ['qoder']
+    )
+    const service = await makeService(freshDir())
+    const { insight, graph } = loadAgentBaseline(service)
+    const touched = applyAgentSemantics(insight, graph, new AiCache(dir), {
+      skipPartition: true,
+      partitionApplied: false,
+      skipFlows: true,
+      flowsApplied: false
+    })
+    expect(touched).toBe(false)
+    expect(insight.agentSources?.['partition:root']).toBeUndefined()
+    expect(insight.aiSource?.partition).toBeUndefined()
+    expect(insight.aiGenerated).toBe(false)
+    service.storage.close()
+  })
+
   it('externals 缓存套用：按符号合并、保留未供符号，状态记 ok/agent', async () => {
     const dir = freshDir()
     const graph = externalsGraph()

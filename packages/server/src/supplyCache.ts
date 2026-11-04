@@ -617,7 +617,13 @@ export function applyAgentSemantics(
   insight: ProjectInsight,
   graph: ProjectGraph,
   cache: AiCache,
-  opts: { skipPartition?: boolean; skipFlows?: boolean } = {}
+  opts: {
+    skipPartition?: boolean
+    skipFlows?: boolean
+    /** 调用方已应用结构层时的真实结果；false = 应用返回 missing，不得登记为已生效 */
+    partitionApplied?: boolean
+    flowsApplied?: boolean
+  } = {}
 ): boolean {
   let changed = false
   const supplied = new Map<AgentSupplyPass, number>()
@@ -630,11 +636,12 @@ export function applyAgentSemantics(
   // 1) 结构层：partition 只按图指纹读取（它就是 basis 的来源），且必须先于其它 pass 应用
   const partition = readPartitionSupply(cache, graph.fingerprint)
   if (partition) {
-    let applied = true
+    // skipPartition 时调用方已应用过：必须传回真实 outcome，missing 不得登记为已生效
+    let applied = opts.partitionApplied ?? true
     if (!opts.skipPartition) {
       const outcome = applyAgentPartitionToInsight(insight, graph, partition.value)
-      if (outcome === 'missing') applied = false
-      else if (outcome === 'changed') changed = true
+      applied = outcome !== 'missing'
+      if (outcome === 'changed') changed = true
     }
     if (applied) {
       supplied.set('partition', 1)
@@ -657,7 +664,8 @@ export function applyAgentSemantics(
   const basis = flowsBasis(graph)
   const flows = readFlowsSupply(cache, graph.fingerprint, basis)
   if (flows) {
-    let outcome: ApplyOutcome = 'same'
+    // skipFlows 时以调用方回传的应用结果为准；未应用(missing)不得登记 flows:root
+    let outcome: ApplyOutcome = opts.flowsApplied === false ? 'missing' : 'same'
     if (!opts.skipFlows) {
       outcome = applyAgentFlowsToInsight(insight, graph, flows.value, flows.writtenAt)
       if (outcome === 'changed') changed = true
