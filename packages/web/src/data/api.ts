@@ -6,6 +6,8 @@ import type {
   AgentTaskInfo,
   AgentTaskMergeResult,
   AgentTaskValidation,
+  AiPassKey,
+  AiPassVersionListResponse,
   Annotation,
   AnnotationKind,
   AskResponse,
@@ -210,6 +212,61 @@ export async function requestInsightPartition(feedback: string): Promise<Insight
   if (res.status === 409) throw await errorFromResponse(res, 'AI 划分失败')
   if (!res.ok) return null
   return (await res.json()) as InsightResponse
+}
+
+/* ------------------------- AI pass 单步重跑与独立版本（P4） ------------------------- */
+
+/**
+ * 只重跑指定 AI pass（其余段复用当前兼容版本/缓存）；单 pass 重跑不归档整份里程碑快照。
+ * 409 同 requestInsightAI（触发激活自愈）；400（未知 pass 等）抛错保留后端原文；
+ * 其余非 2xx 返回 null（沿用「可能输出超长」的降级口径）。
+ */
+export async function regenInsightPasses(
+  passes: AiPassKey[],
+  feedback = ''
+): Promise<InsightResponse | null> {
+  if (mode !== 'api') return null
+  const res = await fetch('/api/insight/ai', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ passes, feedback })
+  })
+  if (res.status === 409 || res.status === 400) {
+    throw await errorFromResponse(res, 'AI 段重新生成失败')
+  }
+  if (!res.ok) return null
+  return (await res.json()) as InsightResponse
+}
+
+/** 某 pass 的独立版本列表（含当前图兼容状态/激活/里程碑引用）；静态模式无版本数据返回 null */
+export async function fetchPassVersions(
+  pass: AiPassKey
+): Promise<AiPassVersionListResponse | null> {
+  if (mode !== 'api') return null
+  const res = await fetch(`/api/insight/ai/versions?pass=${encodeURIComponent(pass)}`)
+  if (!res.ok) throw await errorFromResponse(res, '加载版本列表失败')
+  return (await res.json()) as AiPassVersionListResponse
+}
+
+/** 单 pass 回滚 = 切换该 pass 的激活版本（同时退出整份里程碑回滚态）；400 保留后端兼容性原因 */
+export async function rollbackPassVersion(
+  id: string
+): Promise<{ pass: AiPassKey; versionId: string }> {
+  if (mode !== 'api') throw new Error('pass 版本操作仅本地服务可用')
+  const res = await fetch(`/api/insight/ai/versions/${encodeURIComponent(id)}/rollback`, {
+    method: 'POST'
+  })
+  if (!res.ok) throw await errorFromResponse(res, '回滚版本失败')
+  return (await res.json()) as { pass: AiPassKey; versionId: string }
+}
+
+/** 删除某 pass 的非激活、未被里程碑引用的版本；激活/被引用时后端 400 并附原因 */
+export async function deletePassVersion(id: string): Promise<void> {
+  if (mode !== 'api') throw new Error('pass 版本操作仅本地服务可用')
+  const res = await fetch(`/api/insight/ai/versions/${encodeURIComponent(id)}`, {
+    method: 'DELETE'
+  })
+  if (!res.ok && res.status !== 204) throw await errorFromResponse(res, '删除版本失败')
 }
 
 /* ------------------------- 变更影响分析（C1 后端 / C2 前端） ------------------------- */

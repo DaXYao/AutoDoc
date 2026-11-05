@@ -1,6 +1,8 @@
 import { computed, reactive } from 'vue'
 import type {
   AgentSupplyResponse,
+  AiPassKey,
+  AiPassRunOverview,
   FileDocView,
   FileSummary,
   FunctionIndexEntry,
@@ -39,6 +41,7 @@ import {
   mergeAgentSupply,
   migrateTeamData,
   refreshDocs,
+  regenInsightPasses,
   removeProject as apiRemoveProject,
   requestInsightAI,
   requestInsightPartition,
@@ -477,6 +480,21 @@ export async function repartitionInsight(feedback: string): Promise<void> {
   if (appState.source !== 'key') return
   const enriched = await requestInsightPartition(feedback)
   if (enriched) appState.insight = enriched
+}
+
+/**
+ * 只重跑指定 AI pass（仅 KEY 管线、仅本地服务）：其余段复用当前兼容版本/缓存。
+ * 返回后端 passRun 概览供视图提示「复用 N / 重跑 M」；非 KEY 或静态模式不发请求（返回 null）。
+ * 空响应（服务端 5xx 等降级）抛错，交由视图 toast，避免静默无反馈。
+ */
+export async function regenPasses(passes: AiPassKey[]): Promise<AiPassRunOverview | null> {
+  if (appState.source !== 'key') return null
+  if (getMode() === 'static') return null
+  if (passes.length === 0) return null
+  const enriched = await regenInsightPasses(passes)
+  if (!enriched) throw new Error('AI 段重新生成失败：服务未返回结果')
+  appState.insight = enriched
+  return enriched.passRun ?? { reused: [], rerun: [], skipped: [] }
 }
 
 /**

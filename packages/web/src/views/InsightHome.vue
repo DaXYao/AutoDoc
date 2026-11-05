@@ -1,19 +1,34 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import type { FlowNode } from '@autodoc/shared-types'
-import { getMode, isNoActiveProjectError } from '../data/api'
+import type {
+  AiPassKey,
+  AiPassRunOverview,
+  AiPassVersionListResponse,
+  AiPassVersionListItem,
+  FlowNode
+} from '@autodoc/shared-types'
+import {
+  deletePassVersion,
+  fetchPassVersions,
+  getMode,
+  isNoActiveProjectError,
+  rollbackPassVersion
+} from '../data/api'
 import {
   appReady,
   appState,
   ensureInsightAI,
   findFunctionEntry,
   mergeAgentSupplyIfNeeded,
+  refreshInsight,
+  regenPasses,
   regenerateInsightAI,
   repartitionInsight
 } from '../store/app'
-import { AI_PASS_LABELS, AI_PASS_ORDER, AI_STATUS_META } from '../utils/format'
+import { AI_PASS_LABELS, AI_PASS_ORDER, AI_STATUS_META, formatDate } from '../utils/format'
+import { failedAiPassesOf, passVersionActions, type PassVersionActionState } from '../utils/insightPasses'
 import { PASS_SOURCE_META, isAgentStaticBaseline, resolvePassSourceState, summarizeAgentSupply } from '../utils/agentSupply'
 import { adAgentTagSkin } from '../theme'
 import { formatIncrementalSummary } from '../utils/incremental'
@@ -265,6 +280,160 @@ function goModule(id: string): void {
  */
 const isStatic = computed(() => appReady.value && getMode() === 'static')
 
+/* ------------------------- P4：单 pass 重跑 + 独立版本管理（仅 KEY + 本地服务） ------------------------- */
+
+/** 只有 KEY 管线、本地服务、已配置 AI 时才提供 pass 级动作；Agent/静态保持纯展示 */
+const canManagePasses = computed(
+  () => !isStatic.value && !agentMode.value && Boolean(insight.value?.aiEnabled)
+)
+
+/** 失败/部分成功的段（固定顺序）；空则不渲染「重试失败项」 */
+const failedPasses = computed(() => failedAiPassesOf(insight.value?.aiStatus))
+
+/** 同一时刻只允许一个 pass 重跑（避免并发写缓存/版本）；批量重试共用同一互斥 */
+const regenPass = ref<AiPassKey | null>(null)
+const batchBusy = ref(false)
+
+/** 各 pass 版本列表缓存（popover 打开时按需拉取；动作后按需刷新/作废） */
+const passVersions = reactive<Partial<Record<AiPassKey, AiPassVersionListResponse>>>({})
+const versionsLoading = reactive<Partial<Record<AiPassKey, boolean>>>({})
+const versionsError = reactive<Partial<Record<AiPassKey, string>>>({})
+const openVersionPass = ref<AiPassKey | null>(null)
+/** 回滚/删除在途：按 pass 独立（同 pass 内按钮互斥） */
+const versionBusy = ref<{ pass: AiPassKey; versionId: string } | null>(null)
+
+/** 版本条目操作可用性映射（纯函数结果缓存，模板按版本 id 取） */
+const versionActionMap = computed<Record<string, PassVersionActionState>>(() => {
+  const map: Record<string, PassVersionActionState> = {}
+  for (const key of AI_PASS_ORDER) {
+    for (const version of passVersions[key]?.versions ?? []) {
+      map[version.id] = passVersionActions(version)
+    }
+  }
+  return map
+})
+
+function versionList(pass: AiPassKey): AiPassVersionListItem[] {
+  return passVersions[pass]?.versions ?? []
+}
+
+function versionActionBusy(pass: AiPassKey): boolean {
+  return versionBusy.value?.pass === pass
+}
+
+/** passRun → 「重跑 N / 复用 M / 跳过 K」；空数组项省略 */
+function describePassRun(run: AiPassRunOverview | null): string {
+  if (!run) return ''
+  const parts = [`重跑 ${run.rerun.length}`]
+  if (run.reused.length) parts.push(`复用 ${run.reused.length}`)
+  if (run.skipped.length) parts.push(`跳过 ${run.skipped.length}`)
+  return parts.join(' / ')
+}
+
+async function loadVersions(pass: AiPassKey): Promise<void> {
+  versionsLoading[pass] = true
+  versionsError[pass] = ''
+  try {
+    const data = await fetchPassVersions(pass)
+    if (data) passVersions[pass] = data
+  } catch (error) {
+    if (!isNoActiveProjectError(error)) {
+      versionsError[pass] = error instanceof Error ? error.message : String(error)
+    }
+  } finally {
+    versionsLoading[pass] = false
+  }
+}
+
+function onVersionShow(pass: AiPassKey, show: boolean): void {
+  if (show) {
+    openVersionPass.value = pass
+    void loadVersions(pass)
+  } else if (openVersionPass.value === pass) {
+    openVersionPass.value = null
+  }
+}
+
+/** 重跑/回滚/删除后刷新版本列表：打开中的立即重拉，关闭的作废缓存等下次打开再取 */
+async function afterPassVersionsChanged(passes: AiPassKey[]): Promise<void> {
+  for (const pass of passes) {
+    if (openVersionPass.value === pass) await loadVersions(pass)
+    else delete passVersions[pass]
+  }
+}
+
+async function regenOne(pass: AiPassKey): Promise<void> {
+  if (!canManagePasses.value || regenPass.value || batchBusy.value) return
+  regenPass.value = pass
+  try {
+    const run = await regenPasses([pass])
+    if (!run) return
+    // store 已写回 insight；单 pass 重跑不归档整份快照，仅版本列表需要刷新
+    message.success(`已重新生成「${AI_PASS_LABELS[pass]}」 · ${describePassRun(run)}`)
+    await afterPassVersionsChanged([pass])
+  } catch (error) {
+    if (!isNoActiveProjectError(error)) {
+      message.error(error instanceof Error ? error.message : String(error))
+    }
+  } finally {
+    regenPass.value = null
+  }
+}
+
+async function retryFailedPasses(): Promise<void> {
+  if (!canManagePasses.value || regenPass.value || batchBusy.value) return
+  const passes = failedPasses.value
+  if (passes.length === 0) return
+  batchBusy.value = true
+  try {
+    const run = await regenPasses(passes)
+    if (!run) return
+    message.success(`已重试 ${passes.length} 个失败项 · ${describePassRun(run)}`)
+    await afterPassVersionsChanged(passes)
+  } catch (error) {
+    if (!isNoActiveProjectError(error)) {
+      message.error(error instanceof Error ? error.message : String(error))
+    }
+  } finally {
+    batchBusy.value = false
+  }
+}
+
+async function rollbackVersion(pass: AiPassKey, version: AiPassVersionListItem): Promise<void> {
+  if (versionActionBusy(pass)) return
+  versionBusy.value = { pass, versionId: version.id }
+  try {
+    await rollbackPassVersion(version.id)
+    message.success(`已回滚「${AI_PASS_LABELS[pass]}」到 ${formatDate(version.savedAt)} 版本`)
+    // 回滚会退出整份里程碑指针并改变生效装配，历史横幅与洞察都要重拉
+    await refreshInsight()
+    void historyRef.value?.reload()
+    await loadVersions(pass)
+  } catch (error) {
+    if (!isNoActiveProjectError(error)) {
+      message.error(error instanceof Error ? error.message : String(error))
+    }
+  } finally {
+    versionBusy.value = null
+  }
+}
+
+async function removeVersion(pass: AiPassKey, version: AiPassVersionListItem): Promise<void> {
+  if (versionActionBusy(pass)) return
+  versionBusy.value = { pass, versionId: version.id }
+  try {
+    await deletePassVersion(version.id)
+    message.success('已删除该版本')
+    await loadVersions(pass)
+  } catch (error) {
+    if (!isNoActiveProjectError(error)) {
+      message.error(error instanceof Error ? error.message : String(error))
+    }
+  } finally {
+    versionBusy.value = null
+  }
+}
+
 /** 状态条摘要；null = 供给未就绪（无活动项目/拉取失败）→ 状态条隐藏，不制造错误噪音 */
 const supplySummary = computed(() => summarizeAgentSupply(appState.agentSupply))
 
@@ -458,21 +627,177 @@ watch(
       <section v-if="aiPasses.length" class="mb-4">
         <div class="flex flex-wrap items-center gap-2">
           <span class="text-xs text-[color:var(--ad-ink-3)] mr-1">AI 段状态：</span>
-          <n-tag
-            v-for="p in aiPasses"
-            :key="p.key"
-            size="small"
-            :bordered="p.sourceState === 'agent'"
-            :type="p.status ? AI_STATUS_META[p.status].type : 'default'"
-            :color="p.sourceState === 'agent' ? adAgentTagSkin : undefined"
-            :class="p.status && p.status !== 'ok' ? 'font-semibold' : ''"
-            :title="p.title"
+          <div v-for="p in aiPasses" :key="p.key" class="inline-flex items-center gap-0.5">
+            <n-tag
+              size="small"
+              :bordered="p.sourceState === 'agent'"
+              :type="p.status ? AI_STATUS_META[p.status].type : 'default'"
+              :color="p.sourceState === 'agent' ? adAgentTagSkin : undefined"
+              :class="p.status && p.status !== 'ok' ? 'font-semibold' : ''"
+              :title="p.title"
+            >
+              <span v-if="p.status === 'partial'" class="mr-0.5" aria-hidden="true">◐</span>
+              {{ p.label }}
+              <span class="opacity-70">·</span>
+              {{ p.sourceLabel }}{{ p.statusSuffix }}
+            </n-tag>
+
+            <!-- P4：单 pass 重跑 + 版本管理（仅 KEY + 本地服务；Agent/静态保持纯展示） -->
+            <template v-if="canManagePasses">
+              <button
+                type="button"
+                class="ad-pass-action"
+                :disabled="regenPass !== null || batchBusy"
+                :title="`重新生成「${p.label}」`"
+                :aria-label="`重新生成「${p.label}」`"
+                @click="regenOne(p.key)"
+              >
+                <svg
+                  class="h-3.5 w-3.5"
+                  :class="regenPass === p.key ? 'animate-spin' : ''"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                  <path d="M21 3v6h-6" />
+                </svg>
+              </button>
+              <n-popover
+                trigger="click"
+                placement="bottom"
+                :show-arrow="true"
+                @update:show="(show: boolean) => onVersionShow(p.key, show)"
+              >
+                <template #trigger>
+                  <button
+                    type="button"
+                    class="ad-pass-action"
+                    :title="`查看「${p.label}」版本`"
+                    :aria-label="`查看「${p.label}」版本`"
+                  >
+                    <svg
+                      class="h-3.5 w-3.5"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <circle cx="12" cy="12" r="9" />
+                      <path d="M12 7v5l3 2" />
+                    </svg>
+                  </button>
+                </template>
+
+                <!-- 版本列表：savedAt / 兼容状态 / 激活 / 里程碑引用 + 回滚·删除 -->
+                <div class="w-80">
+                  <div class="mb-2 flex items-center justify-between gap-2">
+                    <span class="text-xs font-semibold text-[color:var(--ad-ink-2)]">
+                      「{{ p.label }}」版本
+                    </span>
+                    <n-button
+                      size="tiny"
+                      quaternary
+                      :loading="versionsLoading[p.key]"
+                      title="刷新版本列表"
+                      @click="loadVersions(p.key)"
+                    >
+                      刷新
+                    </n-button>
+                  </div>
+                  <p v-if="versionsError[p.key]" class="text-xs text-[color:var(--ad-danger-ink)]">
+                    {{ versionsError[p.key] }}
+                  </p>
+                  <p
+                    v-else-if="versionsLoading[p.key] && !passVersions[p.key]"
+                    class="text-xs text-[color:var(--ad-ink-3)]"
+                  >
+                    加载中…
+                  </p>
+                  <p v-else-if="versionList(p.key).length === 0" class="text-xs text-[color:var(--ad-ink-3)]">
+                    暂无独立版本（重跑该段后生成）。
+                  </p>
+                  <ul v-else class="space-y-2">
+                    <li
+                      v-for="v in versionList(p.key)"
+                      :key="v.id"
+                      class="rounded border border-[color:var(--ad-line)] px-2 py-1.5"
+                    >
+                      <div class="flex flex-wrap items-center gap-1.5">
+                        <span class="text-xs font-medium text-[color:var(--ad-ink)]">
+                          {{ formatDate(v.savedAt) }}
+                        </span>
+                        <n-tag v-if="v.active" size="tiny" type="success" :bordered="false">激活</n-tag>
+                        <n-tag
+                          v-if="!v.compatible"
+                          size="tiny"
+                          type="warning"
+                          :bordered="true"
+                          :title="v.compatibleReason || '与当前图谱不兼容'"
+                        >
+                          不兼容
+                        </n-tag>
+                        <n-tag
+                          v-if="v.milestoneIds.length > 0"
+                          size="tiny"
+                          :bordered="true"
+                          :title="`里程碑快照：${v.milestoneIds.join('、')}`"
+                        >
+                          里程碑 ×{{ v.milestoneIds.length }}
+                        </n-tag>
+                      </div>
+                      <p
+                        v-if="!v.compatible && v.compatibleReason"
+                        class="mt-1 text-[11px] leading-snug text-[color:var(--ad-danger-ink)]"
+                      >
+                        {{ v.compatibleReason }}
+                      </p>
+                      <div class="mt-1.5 flex items-center gap-1.5">
+                        <n-button
+                          size="tiny"
+                          secondary
+                          :disabled="!versionActionMap[v.id]?.canRollback || versionActionBusy(p.key)"
+                          :loading="versionBusy?.versionId === v.id"
+                          :title="versionActionMap[v.id]?.rollbackReason || '回滚到该版本'"
+                          @click="rollbackVersion(p.key, v)"
+                        >
+                          回滚
+                        </n-button>
+                        <n-button
+                          size="tiny"
+                          quaternary
+                          type="error"
+                          :disabled="!versionActionMap[v.id]?.canDelete || versionActionBusy(p.key)"
+                          :title="versionActionMap[v.id]?.deleteReason || '删除该版本'"
+                          @click="removeVersion(p.key, v)"
+                        >
+                          删除
+                        </n-button>
+                      </div>
+                    </li>
+                  </ul>
+                </div>
+              </n-popover>
+            </template>
+          </div>
+          <n-button
+            v-if="canManagePasses && failedPasses.length > 0"
+            size="tiny"
+            secondary
+            :loading="batchBusy"
+            :disabled="regenPass !== null"
+            :title="`重新生成所有失败/部分成功的段（${failedPasses.length}）`"
+            @click="retryFailedPasses"
           >
-            <span v-if="p.status === 'partial'" class="mr-0.5" aria-hidden="true">◐</span>
-            {{ p.label }}
-            <span class="opacity-70">·</span>
-            {{ p.sourceLabel }}{{ p.statusSuffix }}
-          </n-tag>
+            重试失败项（{{ failedPasses.length }}）
+          </n-button>
         </div>
         <p v-if="incrementalSummary" class="mt-1.5 text-xs text-[color:var(--ad-ink-3)]">
           {{ incrementalSummary }}

@@ -5,6 +5,7 @@ import {
   clearInsightRollback,
   continueTeamMerge,
   createAgentTaskPackage,
+  deletePassVersion,
   exportAgentSupplyRules,
   fetchAgentTask,
   fetchAgentSupply,
@@ -12,6 +13,7 @@ import {
   fetchInsight,
   fetchInsightHistory,
   fetchMeta,
+  fetchPassVersions,
   fetchTeamStatus,
   getMode,
   initDataSource,
@@ -19,10 +21,12 @@ import {
   isNoActiveProjectError,
   mergeAgentSupply,
   mergeAgentTaskPackage,
+  regenInsightPasses,
   requestInsightAI,
   requestInsightPartition,
   resolveTeamConflict,
   rollbackInsightSnapshot,
+  rollbackPassVersion,
   setNoActiveProjectHandler,
   syncTeamRepo,
   validateAgentTaskPackage
@@ -534,6 +538,119 @@ describe('双管线来源：洞察/历史/回滚请求携带 source', () => {
     const urls = stubRoutes({})
     await expect(fetchInsight('', 'agent')).resolves.toBeNull()
     await expect(fetchInsight('', 'key')).resolves.toBeNull()
+    expect(urls).toEqual([])
+  })
+})
+
+describe('P4：单 pass 重跑与独立版本接口', () => {
+  it('regenInsightPasses 只带 passes（不含 force），响应透传 passRun', async () => {
+    await enterHubMode()
+    const bodies: unknown[] = []
+    const urls = stubRoutes({
+      '/api/insight/ai': (init) => {
+        bodies.push(JSON.parse(String(init?.body ?? '{}')))
+        return json({ pipeline: 'key', passRun: { reused: ['partition'], rerun: ['flows'], skipped: [] } })
+      }
+    })
+
+    const resp = await regenInsightPasses(['flows'], '补齐脉络')
+
+    expect(urls).toEqual(['/api/insight/ai'])
+    expect(bodies).toEqual([{ passes: ['flows'], feedback: '补齐脉络' }])
+    expect(resp?.passRun).toEqual({ reused: ['partition'], rerun: ['flows'], skipped: [] })
+  })
+
+  it('regenInsightPasses：400 保留后端原文；500 降级为 null（不误报为激活丢失）', async () => {
+    await enterHubMode()
+    const hooked = countingHandler()
+    stubRoutes({ '/api/insight/ai': () => json({ error: '未知 pass：nope' }, 400) })
+    const bad = await regenInsightPasses(['flows']).catch((e: unknown) => e)
+    expect(bad).toBeInstanceOf(ApiError)
+    expect((bad as ApiError).status).toBe(400)
+    expect((bad as Error).message).toBe('未知 pass：nope')
+    expect(hooked()).toBe(0)
+
+    stubRoutes({ '/api/insight/ai': () => json({ error: 'boom' }, 500) })
+    await expect(regenInsightPasses(['flows'])).resolves.toBeNull()
+  })
+
+  it('版本列表：pass 进 query，条目字段原样透传；400 原文保留', async () => {
+    await enterHubMode()
+    const list = {
+      pass: 'flows',
+      activeId: 'v2',
+      versions: [
+        { id: 'v2', pass: 'flows', savedAt: '2026-11-06T10:00:00.000Z', compat: { graphFingerprint: 'g' }, hasGuarantee: true, compatible: true, active: true, milestoneIds: [] },
+        { id: 'v1', pass: 'flows', savedAt: '2026-11-05T10:00:00.000Z', compat: { graphFingerprint: 'old' }, hasGuarantee: false, compatible: false, compatibleReason: '图谱指纹不同', active: false, milestoneIds: ['m1'] }
+      ]
+    }
+    const urls = stubRoutes({ '/api/insight/ai/versions?pass=flows': () => json(list) })
+
+    const data = await fetchPassVersions('flows')
+
+    expect(urls).toEqual(['/api/insight/ai/versions?pass=flows'])
+    expect(data).toEqual(list)
+    expect(data?.versions[1].compatibleReason).toBe('图谱指纹不同')
+
+    stubRoutes({ '/api/insight/ai/versions?pass=flows': () => json({ error: 'pass 必须为：partition、flows' }, 400) })
+    await expect(fetchPassVersions('flows')).rejects.toThrow('pass 必须为：partition、flows')
+  })
+
+  it('回滚：POST /versions/:id/rollback，400 保留兼容性原因', async () => {
+    await enterHubMode()
+    const urls = stubRoutes({
+      '/api/insight/ai/versions/v1/rollback': () => json({ pass: 'flows', versionId: 'v1' })
+    })
+
+    const result = await rollbackPassVersion('v1')
+
+    expect(urls).toEqual(['/api/insight/ai/versions/v1/rollback'])
+    expect(result).toEqual({ pass: 'flows', versionId: 'v1' })
+
+    stubRoutes({
+      '/api/insight/ai/versions/v2/rollback': () => json({ error: '版本与当前图谱不兼容：图谱指纹不同' }, 400)
+    })
+    await expect(rollbackPassVersion('v2')).rejects.toThrow('版本与当前图谱不兼容：图谱指纹不同')
+  })
+
+  it('删除：DELETE /versions/:id，204 视为成功；400 保留引用原因', async () => {
+    await enterHubMode()
+    const urls: string[] = []
+    const methods: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        urls.push(String(input))
+        methods.push(init?.method ?? 'GET')
+        return new Response(null, { status: 204 })
+      })
+    )
+
+    await deletePassVersion('v1')
+
+    expect(urls).toEqual(['/api/insight/ai/versions/v1'])
+    expect(methods).toEqual(['DELETE'])
+
+    stubRoutes({
+      '/api/insight/ai/versions/v1': () => json({ error: '该版本被里程碑快照引用，不可删除：m1' }, 400)
+    })
+    await expect(deletePassVersion('v1')).rejects.toThrow('该版本被里程碑快照引用，不可删除：m1')
+  })
+
+  it('静态导出站：列表返回 null，写操作抛「仅本地服务可用」且不发请求', async () => {
+    stubRoutes({
+      '/api/projects': () => json({ error: 'not found' }, 404),
+      '/api/meta': () => json({ error: 'not found' }, 404),
+      'autodoc-data.json': () => json(EXPORT_DATA)
+    })
+    await initDataSource()
+    expect(getMode()).toBe('static')
+
+    const urls = stubRoutes({})
+    await expect(fetchPassVersions('flows')).resolves.toBeNull()
+    await expect(regenInsightPasses(['flows'])).resolves.toBeNull()
+    await expect(rollbackPassVersion('v1')).rejects.toThrow('pass 版本操作仅本地服务可用')
+    await expect(deletePassVersion('v1')).rejects.toThrow('pass 版本操作仅本地服务可用')
     expect(urls).toEqual([])
   })
 })

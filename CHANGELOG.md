@@ -2,6 +2,18 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-06 · 前端单 pass 重跑 + 版本管理 UI（多阶段 P4）· web+docs
+
+- **数据层（`data/api.ts`）**：新增 `regenInsightPasses(passes, feedback='')`（`POST /api/insight/ai` body `{passes, feedback}`，返回含 `passRun` 的洞察；409/400 抛 `ApiError` 保留后端原文，其余非 2xx 返回 null）、`fetchPassVersions(pass)`（静态模式返回 null）、`rollbackPassVersion(id)` / `deletePassVersion(id)`（静态模式抛「pass 版本操作仅本地服务可用」，400 兼容/引用原因原样上抛）。
+- **store（`store/app.ts`）**：新增 `regenPasses(passes)`：仅 KEY 且本地服务，Agent/静态直接返回 null 不发请求；成功写回 `appState.insight` 并返回 `passRun`（空响应抛错交视图 toast）。
+- **纯函数（`utils/insightPasses.ts`）**：`failedAiPassesOf(aiStatus)` 按 `AI_PASS_ORDER` 汇总 failed/partial；`passVersionActions(version)` 给出回滚/删除可用性与禁用原因（激活优先、不兼容沿用后端原因、里程碑引用列 id）。
+- **InsightHome**：每个 AI 段 chip 改为 `div.inline-flex`（tag + 重跑/版本两个 24px 图标按钮，内联 SVG + title/aria-label）；版本按钮走 `n-popover`（click）展示 savedAt、激活/不兼容（含原因）/里程碑引用，行内回滚、删除按规则禁用并 title 说明；重跑/回滚/删除后按需刷新该 pass 版本列表，回滚后 `refreshInsight` + 历史区 reload；同一时刻仅一个 pass 重跑（批量共用互斥），版本动作 busy 按 pass 独立；状态行尾部「重试失败项（N）」仅在存在 failed/partial 时出现。全部动作仅在 `!agentMode && !isStatic && insight.aiEnabled` 时渲染，Agent/静态保持原样。
+- **样式**：`style.css` 新增 `.ad-pass-action`（24px 触控目标、焦点环、disabled 态），沿用 `--ad-*` 令牌。
+- **测试**：新增 `test/insightPasses.test.ts`（9 项：失败项顺序/空/全 ok、版本操作禁用与原因）；`test/api.test.ts` 增 6 项（regen 请求体与 passRun、400 原文/500 降级、版本列表 URL 与 400、回滚 URL 与兼容 400、删除 204 与引用 400、静态模式口径不发请求）。web 360 全绿。
+- **校验**：`pnpm --filter @autodoc/web test`、`pnpm lint`、`pnpm build` 全绿。
+- **边界**：未改 server / 团队同步 / shared-types；未引入依赖；无组件测试框架。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-06 · pass 版本路由、里程碑版本引用与回滚/删除规则（多阶段 P3）· server+shared-types+docs
 
 - **路由（`app.ts`）**：`POST /api/insight/ai` 新增 `passes?: string[]`（按 `AI_PASS_ORDER` 校验非法 400、去重；响应附带 `passRun`）。新增 `GET /api/insight/ai/versions?pass=`（当前图兼容状态/原因、激活标记、KEY 里程碑引用）、`POST /api/insight/ai/versions/:id/rollback`（兼容校验 400、切激活、清整份指针、partition/coreJudgment 作废下游缓存）、`DELETE /api/insight/ai/versions/:id`（激活或被里程碑引用 400，独立版本 204）。

@@ -305,6 +305,33 @@ body {
   border-color: var(--ad-accent);
 }
 
+/* P4：AI 段状态行的图标小按钮（重跑 / 版本）；24px 触控目标，语义靠 title + aria-label */
+.ad-pass-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ad-ink-3);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.ad-pass-action:hover:not(:disabled) {
+  background: var(--ad-accent-soft);
+  color: var(--ad-accent-ink);
+}
+.ad-pass-action:focus-visible {
+  outline: 2px solid var(--ad-accent);
+  outline-offset: 1px;
+}
+.ad-pass-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* 批注 Markdown 渲染样式（与 Naive UI 主题协调的最小排版） */
 .annotation-body {
   line-height: 1.7;
