@@ -92,7 +92,12 @@ export function indexTable(graph: ProjectGraph): string[] {
 
 /* ------------------------- 兼容键与挑选 ------------------------- */
 
-const COMPAT_FIELDS: (keyof PassCompatKey)[] = ['graphFingerprint', 'partitionBasis', 'coreTableHash']
+const COMPAT_FIELDS: (keyof PassCompatKey)[] = [
+  'graphFingerprint',
+  'partitionBasis',
+  'coreTableHash',
+  'contentRevision'
+]
 
 /**
  * 按 pass 计算兼容键。
@@ -100,7 +105,11 @@ const COMPAT_FIELDS: (keyof PassCompatKey)[] = ['graphFingerprint', 'partitionBa
  * - narratives 额外要求划分身份 flowsBasis（划分变 → 链路 id/归属变，叙事不可复用）；
  * - flows 额外要求划分身份 + 核心表 flowTreeBasis（候选函数按模块核心表裁剪，与 flows:tree 缓存的 basis 同口径）。
  */
-export function compatForPass(pass: AiPassKey, graph: ProjectGraph): PassCompatKey {
+export function compatForPass(
+  pass: AiPassKey,
+  graph: ProjectGraph,
+  contentRevision?: string
+): PassCompatKey {
   const compat: PassCompatKey = { graphFingerprint: graph.fingerprint }
   if (pass === 'narratives') {
     compat.partitionBasis = flowsBasis(graph)
@@ -108,6 +117,7 @@ export function compatForPass(pass: AiPassKey, graph: ProjectGraph): PassCompatK
     compat.partitionBasis = flowsBasis(graph)
     compat.coreTableHash = flowTreeBasis(graph)
   }
+  if (contentRevision !== undefined) compat.contentRevision = contentRevision
   return compat
 }
 
@@ -122,6 +132,8 @@ export function isVersionCompatible(
   for (const field of COMPAT_FIELDS) {
     const want = compat[field]
     if (want === undefined) continue
+    // 旧版本没有 contentRevision：按存量兼容处理，下一次重跑会写入带摘要的新版本
+    if (field === 'contentRevision' && version.compat.contentRevision === undefined) continue
     if (version.compat[field] !== want) return false
   }
   return true
@@ -167,6 +179,13 @@ export function compatMismatchReason(
   if (compat.coreTableHash !== undefined && version.compat.coreTableHash !== compat.coreTableHash) {
     return '核心函数表已变化（核心表哈希不一致），该版本依赖旧核心判定'
   }
+  if (
+    compat.contentRevision !== undefined &&
+    version.compat.contentRevision !== undefined &&
+    version.compat.contentRevision !== compat.contentRevision
+  ) {
+    return '输入内容已变化（函数体/注释或提示词版本不一致），该版本已过期'
+  }
   return null
 }
 
@@ -178,7 +197,8 @@ export function compatMismatchReason(
 export function collectPassVersionIds(
   storage: StorageAdapter,
   graph: ProjectGraph,
-  status?: Partial<Record<AiPassKey, AiPassStatus>>
+  status?: Partial<Record<AiPassKey, AiPassStatus>>,
+  compatOf?: (pass: AiPassKey) => PassCompatKey
 ): Partial<Record<AiPassKey, string>> {
   const ids: Partial<Record<AiPassKey, string>> = {}
   for (const pass of AI_PASS_ORDER) {
@@ -188,7 +208,7 @@ export function collectPassVersionIds(
       const st = status[pass]
       if (st !== 'ok' && st !== 'partial') continue
     }
-    const version = pickPassVersion(storage, pass, compatForPass(pass, graph))
+    const version = pickPassVersion(storage, pass, compatOf?.(pass) ?? compatForPass(pass, graph))
     if (version) ids[pass] = version.id
   }
   return ids
@@ -224,7 +244,8 @@ export interface MilestoneVersionCheck {
 export function checkMilestoneVersions(
   storage: StorageAdapter,
   graph: ProjectGraph,
-  ids: Partial<Record<AiPassKey, string>>
+  ids: Partial<Record<AiPassKey, string>>,
+  compatOf?: (pass: AiPassKey) => PassCompatKey
 ): MilestoneVersionCheck {
   const result: MilestoneVersionCheck = { missing: [], incompatible: [] }
   for (const pass of AI_PASS_ORDER) {
@@ -235,7 +256,7 @@ export function checkMilestoneVersions(
       result.missing.push({ pass, id })
       continue
     }
-    const reason = compatMismatchReason(version, compatForPass(pass, graph))
+    const reason = compatMismatchReason(version, compatOf?.(pass) ?? compatForPass(pass, graph))
     if (reason) result.incompatible.push({ pass, id, reason })
   }
   return result

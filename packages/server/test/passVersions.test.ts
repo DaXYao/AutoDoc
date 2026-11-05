@@ -336,7 +336,25 @@ describe('P2：装配路径版本优先', () => {
     expect(countOf(MARK_CATEGORIES)).toBe(0)
     expect(versionCount(service, 'categories')).toBe(catsBefore)
     expect(second.passRun?.reused).toContain('categories')
+    expect(second.passRun?.rerun).not.toContain('categories')
     expect(second.insight.functions[fnId].aiCategory).toBe('business')
+    service.storage.close()
+  })
+
+  it('chunk 输入内容变化时版本失效：仅改注释也会让 blocks 在常规刷新重跑', async () => {
+    mockRouter()
+    const service = await makeService(freshDir(), [fileOf('src/a.ts', [mkFn('fnA')])])
+    await refreshInsightAI(service, { force: true })
+    const before = versionCount(service, 'blocks')
+
+    // 只改函数体内注释：图谱节点/边不变（graphFingerprint 不变），但 blocks 的 chunk 输入变了
+    service.files[0].functions[0].codeBlocks[0].commentText = '// 改过的注释'
+    prompts = []
+    const second = await refreshInsightAI(service, {})
+
+    expect(countOf(MARK_BLOCKS)).toBeGreaterThan(0)
+    expect(second.passRun?.rerun).toContain('blocks')
+    expect(versionCount(service, 'blocks')).toBe(before + 1)
     service.storage.close()
   })
 })

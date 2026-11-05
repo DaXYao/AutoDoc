@@ -14,7 +14,7 @@
 - [ ] 「单 pass 重跑不归档里程碑」的判定不能把 `forcePartition` 算进局部：forcePartition 仍属全量归档路径；归纳条件写成「点名 passes 且不足九个且非 force 且非 forcePartition」才不归档（P3 归档门控）。
 - [ ] 路由响应新增字段后，旧用例里 `expect(res.json()).toEqual({...})` 会精确失败：扩响应时同步更新既有断言（如快照删除响应 + `removedVersions`），别误判为新回归（P3）。
 - [ ] 改 `packages/shared-types` 后同样要先 `pnpm --filter @autodoc/shared-types build` 再 typecheck/test server：server 解析 `dist/`，否则新类型报「no exported member」（P3）。
-- [ ] pass 版本与 chunk 缓存共存时先定清「刷新路径」与「装配路径」各认谁：per函数 pass 刷新仍以内容寻址 chunk 增量为准，版本只在装配/点名重跑时优先；降级产物（failedBatches>0、heuristic 兜底树）禁止写版本（P2 见 2026-11-06 条）。
+- [ ] pass 版本与 chunk 缓存共存时：刷新与装配统一版本优先，但 chunk 型 pass（categories/keySteps/blocks）的兼容键必须含 `contentRevision`（chunk 内容哈希 + prompt 版本），否则纯函数体/注释改动会被旧版本永久掩盖；无版本才走 chunk 增量，降级产物禁止写版本（见 2026-11-06 条）。
 - [ ] 改 `packages/core` 后跑 `@autodoc/server` 测试/实跑前必须先 `pnpm --filter @autodoc/core build`：server 解析 `@autodoc/core` 到 `dist/`，vitest 读的是旧编译产物，会拿旧的存储行为断言新代码（P1 pass 版本存储时误判「team init 400」为自身回归）。
 - [ ] 静态导出站清理 URL `source` 要「删除该键」而不是「改写为 `meta.pipeline`」：后者让分享链接带上看似可切换的来源参数，误导静态站仍可切管线（双管线前端实跑发现）。
 - [ ] Agent 供给只在 Agent 视图拉取（KEY 视图不请求、不残留）：依赖供给的旧测试/实跑脚本必须显式把 `appState.source` 切到 `agent`，否则 `agentSupply` 恒 null（双管线前端迁移发现）。
@@ -86,7 +86,7 @@
 ### 2026-11-06 · pass 版本优先与 chunk 增量共用刷新路径时的三个坑（P2）
 - **现象**：把九个 KEY pass 改成「版本优先」后，10 个既有 I2/flow 用例变红：chunk 增量统计恒 0、PROMPT_VERSION bump 不触发重跑、篡改 `flows:tree` 后 loadInsight 仍出树。
 - **根因**：① 刷新路径若先读 pass 版本，per函数 pass 的 chunk 增量（I2 的核心价值）被整体短路；② 版本把「部分批降级」的产物也固化，失败 chunk 再也不会重试；③ 用例用另一个 `AiCache` 实例断言清缓存结果，内存副本不重读磁盘，看到的是旧值。
-- **正确做法**：per函数 pass（categories/keySteps/blocks）在刷新路径保持「chunk 增量优先、版本仅在 chunk 全无命中且明确点名重跑其他 pass 时兜底」，装配路径（buildKeyInsight）才严格版本优先；降级（failedBatches>0 / flows 走 heuristic）一律不写版本；断言缓存清理前新建一个 `AiCache` 实例重读磁盘；只考旧缓存守卫的用例先清空 pass 版本（模拟存量安装）。
+- **正确做法**：刷新与装配统一「版本优先」，但 chunk 型 pass（categories/keySteps/blocks）的兼容键必须包含 `contentRevision`（chunk 内容哈希 + prompt 版本的有序摘要）；否则图谱指纹不变时，纯函数体/注释改动会被版本永久掩盖，与 chunk 增量的既有承诺冲突。无版本时才走 chunk 增量；降级（failedBatches>0 / flows 走 heuristic）一律不写版本；断言缓存清理前新建一个 `AiCache` 实例重读磁盘；只考旧缓存守卫的用例先清空 pass 版本（模拟存量安装）。
 
 ### 2026-11-05 · 静态站把 URL source「改写」成 meta.pipeline 而非清理
 - **现象**：Agent 导出站带 `?source=key` 打开，地址栏被改成 `?source=agent`；页面本身正确，但看起来像导出站仍认 URL 来源。

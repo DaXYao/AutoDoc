@@ -2,6 +2,16 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-06 · 四项修复终审：chunk 输入摘要、脏版本守卫与回滚口径 · server+core+web+docs
+
+- **chunk 型 pass 版本感知内容变化**：新增 `PassCompatKey.contentRevision`（chunk 内容哈希 + prompt 版本的有序摘要），`compatForCurrentPass` 统一供装配、写入、路由与里程碑校验使用。修复「常规刷新版本优先后，纯函数体/注释/prompt 变化被旧版本永久掩盖」的回归；旧版本缺该字段按存量兼容处理。补「仅改注释也让 blocks 重跑」用例，并同步修订 README 与 LESSONS 中与旧口径冲突的描述。
+- **脏版本守卫**：categories/keySteps/blocks 读取版本前校验 value 为普通对象，`null`/数组载荷不再让常规刷新 500（与装配路径防护一致）。
+- **里程碑回滚文案准确**：`switchedPasses` 只含激活指针实际被改写的 pass；原本已指向该版本的计入 `keptPasses`，不再谎报「切换」。
+- **列表上限文案**：`AiPassVersionListResponse` 增 `limit`，前端不再硬编码 100；补入激活版本导致返回 101 条时提示仍准确。
+- **迁移清理死字段**：团队迁移写版本前剔除旧 `guarantee` 键，不把已废弃字段带进团队仓库。
+- **测试**：新增 blocks 输入变化重跑用例；回滚回归补 `rerun` 不含 categories 断言。全仓 1514 项（core 443 / server 709 / web 362），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-06 · per-pass 版本常规刷新、列表上限与回滚透明化 · server+core+shared-types+web+test
 
 - **常规刷新尊重激活版本（`insight.ts`）**：categories/keySteps/blocks 三个 chunk 型 pass 把 `pickPassVersion` 提升为常规路径第一步（原仅点名复用路径读取）；selected=null 的普通刷新不再走 chunk 增量并 `commitPass` 覆盖用户回滚后的激活版本。未就绪且非只复用场景仍按原 chunk 增量生成，非 chunk pass 未改。

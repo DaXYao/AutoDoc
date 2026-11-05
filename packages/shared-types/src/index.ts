@@ -832,6 +832,12 @@ export interface PassCompatKey {
   graphFingerprint: string
   partitionBasis?: string
   coreTableHash?: string
+  /**
+   * chunk 型 pass（categories/keySteps/blocks）的输入摘要：chunk 内容哈希 + prompt 版本。
+   * 图谱指纹只含节点/边，纯函数体/注释改动不会改变它；没有这一维，版本优先会让
+   * 「常规刷新」永远复用旧版本、看不到内容变化（与 chunk 增量的既有承诺冲突）。
+   */
+  contentRevision?: string
 }
 
 /**
@@ -878,6 +884,8 @@ export interface AiPassVersionListResponse {
   total: number
   /** versions 是否被列表上限截断（激活版本不在前 N 条时会前置补入） */
   truncated: boolean
+  /** 单次列表上限（服务端常量，前端提示文案复用，避免硬编码漂移） */
+  limit: number
   /** 新→旧（最多返回列表上限条） */
   versions: AiPassVersionListItem[]
 }
@@ -887,9 +895,9 @@ export interface MilestoneRollbackResult {
   ok: boolean
   /** 里程碑分支回滚后回到实时装配视图，恒为 null */
   activeId: string | null
-  /** 本次被切换到里程碑版本的 pass */
+  /** 本次激活指针实际被改写的 pass（原本已指向该版本的不算） */
   switchedPasses: AiPassKey[]
-  /** 未被里程碑引用、保持当前版本的其余 pass */
+  /** 保持当前版本的其余 pass：未被里程碑引用，或原本就指向该版本 */
   keptPasses: AiPassKey[]
 }
 

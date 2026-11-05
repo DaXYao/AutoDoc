@@ -7,7 +7,7 @@ import { inspectParseCache, resolveShowRecent } from '@autodoc/core'
 import { regenerate, type DocService } from './context.js'
 import { pickFolder } from './pickFolder.js'
 import type { ProjectManager } from './projects.js'
-import { loadInsight, refreshInsightAI } from './insight.js'
+import { compatForCurrentPass, loadInsight, refreshInsightAI } from './insight.js'
 import {
   abortTeamMerge,
   continueTeamMerge,
@@ -51,7 +51,6 @@ import { AiCache } from './aiCache.js'
 import {
   AI_PASS_ORDER,
   checkMilestoneVersions,
-  compatForPass,
   compatMismatchReason,
   invalidatePassDependents,
   milestoneRefsByVersion
@@ -369,7 +368,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       source: 'key',
       guarantees: false
     })
-    const compat = compatForPass(pass, graph)
+    const compat = compatForCurrentPass(pass, graph)
     const rawActiveId = service.storage.getActivePassVersion(pass)
     const refs = milestoneRefsByVersion(service.storage.listInsightSnapshots(), pass)
     const metas = service.storage.listPassVersions(pass)
@@ -400,6 +399,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       activeId,
       total,
       truncated: total > versions.length,
+      limit: PASS_VERSION_LIST_LIMIT,
       versions
     }
     return body
@@ -417,7 +417,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       source: 'key',
       guarantees: false
     })
-    const reason = compatMismatchReason(version, compatForPass(version.pass, graph))
+    const reason = compatMismatchReason(version, compatForCurrentPass(version.pass, graph))
     if (reason) return reply.code(400).send({ error: `版本与当前图谱不兼容：${reason}` })
     service.storage.setActivePassVersion(version.pass, version.id)
     // 单 pass 回滚后回到实时装配视图：整份里程碑指针不再生效
@@ -558,7 +558,12 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         source: 'key',
         guarantees: false
       })
-      const check = checkMilestoneVersions(service.storage, graph, passVersionIds)
+      const check = checkMilestoneVersions(
+        service.storage,
+        graph,
+        passVersionIds,
+        (p) => compatForCurrentPass(p, graph)
+      )
       if (check.missing.length > 0) {
         return reply.code(400).send({
           error: `里程碑引用的版本已缺失：${check.missing.map((m) => `${m.pass}=${m.id}`).join('、')}`
@@ -571,12 +576,22 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
             .join('；')}`
         })
       }
+      const switchedPasses: AiPassKey[] = []
+      const keptPasses: AiPassKey[] = []
       for (const pass of refPasses) {
-        service.storage.setActivePassVersion(pass, passVersionIds[pass] as string)
+        const target = passVersionIds[pass] as string
+        // 只有实际改变了激活指针的 pass 才算「切换」；本来就指向该版本的 pass 计入「保持」
+        if (service.storage.getActivePassVersion(pass) === target) {
+          keptPasses.push(pass)
+          continue
+        }
+        service.storage.setActivePassVersion(pass, target)
+        switchedPasses.push(pass)
       }
+      keptPasses.push(...AI_PASS_ORDER.filter((pass) => !refPasses.includes(pass)))
       service.storage.setActiveInsightSnapshotId(null, source)
       const cache = aiCacheOf(service)
-      for (const pass of refPasses) {
+      for (const pass of switchedPasses) {
         if (pass === 'partition' || pass === 'coreJudgment') {
           invalidatePassDependents(cache, graph, pass)
         }
@@ -585,8 +600,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         ok: true,
         activeId: null,
         passVersionIds,
-        switchedPasses: [...refPasses],
-        keptPasses: AI_PASS_ORDER.filter((pass) => !refPasses.includes(pass))
+        switchedPasses,
+        keptPasses
       }
     }
     service.storage.setActiveInsightSnapshotId(req.params.id, source)

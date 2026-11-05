@@ -787,7 +787,8 @@ watch(
                     v-if="passVersions[p.key]?.truncated"
                     class="mt-2 text-[11px] leading-snug text-[color:var(--ad-ink-3)]"
                   >
-                    共 {{ passVersions[p.key]?.total }} 个版本，仅显示最近 100 个
+                    共 {{ passVersions[p.key]?.total }} 个版本，仅显示最近
+                    {{ passVersions[p.key]?.limit ?? 100 }} 个（含当前激活版本）
                   </p>
                 </div>
               </n-popover>

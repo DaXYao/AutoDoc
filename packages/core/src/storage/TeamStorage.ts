@@ -1163,14 +1163,17 @@ export class TeamStorage implements StorageAdapter {
           passVersions.conflicts.push(id)
           continue
         }
+        // 旧本机 JSON 可能残留已废弃的 guarantee 键：迁移时剔除，避免把死字段带进团队仓库
+        const versionForTeam: Record<string, unknown> = { ...version }
+        delete versionForTeam.guarantee
         const path = this.passVersionPath(pass, id)
         if (!existsSync(path)) {
-          this.writeJsonFile(path, version)
+          this.writeJsonFile(path, versionForTeam)
           passVersions.copied++
           continue
         }
         const existing = this.readTeamJson(path, 'pass 版本', isPassVersionRecord)
-        if (existing && canonicalForCompare(existing) === canonicalForCompare(version)) {
+        if (existing && canonicalForCompare(existing) === canonicalForCompare(versionForTeam)) {
           passVersions.skipped++
         } else {
           passVersions.conflicts.push(id)

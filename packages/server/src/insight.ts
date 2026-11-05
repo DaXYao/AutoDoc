@@ -17,6 +17,7 @@ import type {
   InsightSnapshotTrigger,
   InsightSource,
   InternalStep,
+  PassCompatKey,
   ProjectInsight
 } from '@autodoc/shared-types'
 import { deepseekChat, extractJson, type ChatMessage } from './ai.js'
@@ -382,6 +383,39 @@ function internalStepsPlan(graph: ProjectGraph): ChunkPlan {
     chunks: fileChunks(chunkItemsOf(graph, (fn) => fn.codeBlocks.length > 0), INTERNAL_STEPS_CHUNK_SIZE),
     linesOf: internalStepsLines
   }
+}
+
+/** 版本载荷形状守卫：脏缓存（null/数组/标量）不得进入 Object.keys / 装配 */
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** chunk 型 pass 的输入摘要：chunk 内容哈希（含 prompt 版本）的有序摘要 */
+function chunkContentRevision(pass: AiChunkPass, plan: ChunkPlan): string {
+  const h = createHash('sha256')
+  for (const items of plan.chunks) {
+    h.update(chunkHashOf(items, plan.linesOf(items), PROMPT_VERSIONS[pass]))
+  }
+  return h.digest('hex').slice(0, 16)
+}
+
+function planOfChunkPass(pass: AiChunkPass, graph: ProjectGraph): ChunkPlan {
+  if (pass === 'categories') return categoriesPlan(graph)
+  if (pass === 'keySteps') return keyStepsPlan(graph)
+  return internalStepsPlan(graph)
+}
+
+/**
+ * 当前状态下某 pass 的兼容键（版本选取与写入共用同一口径）。
+ * chunk 型 pass 额外带上输入摘要：图谱指纹只含节点/边，纯函数体/注释改动不会改变它，
+ * 少了这一维，版本优先会让常规刷新永远复用旧结果、看不到内容变化。
+ */
+export function compatForCurrentPass(pass: AiPassKey, graph: ProjectGraph): PassCompatKey {
+  if (pass === 'categories' || pass === 'keySteps' || pass === 'blocks') {
+    const plan = planOfChunkPass(pass, graph)
+    return compatForPass(pass, graph, chunkContentRevision(pass, plan))
+  }
+  return compatForPass(pass, graph)
 }
 
 /** I2：chunk 缓存读取结果：misses 在回读路径 = 未生成/曾失败 chunk 数（作 partial 的降级信号） */
@@ -1416,7 +1450,7 @@ export function buildKeyInsight(
   const passStatus: Partial<Record<AiPassKey, AiPassStatus>> = {}
 
   // 1) 划分：版本优先（compat 只看图指纹），无版本再回读旧缓存（存量用户升级后语义不丢）
-  const pv = pickPassVersion(storage, 'partition', compatForPass('partition', graph))
+  const pv = pickPassVersion(storage, 'partition', compatForCurrentPass('partition', graph))
   // M1：feedback='' 时优先用 partition:latest（与 refresh 的 previous 语义对齐），
   // 使"采纳建议后"的默认页面加载能读到最新划分，避免树因 basis 不符被永久忽略。
   const p = pv
@@ -1431,7 +1465,7 @@ export function buildKeyInsight(
   }
 
   // 2) 核心判定
-  const cjv = pickPassVersion(storage, 'coreJudgment', compatForPass('coreJudgment', graph))
+  const cjv = pickPassVersion(storage, 'coreJudgment', compatForCurrentPass('coreJudgment', graph))
   const cj = cjv ? (cjv.value as CoreJudgment) : cache.get<CoreJudgment>(fp, 'coreJudgment')
   if (cj && applyPassValue(insight, graph, 'coreJudgment', cj)) {
     touched = true
@@ -1440,7 +1474,7 @@ export function buildKeyInsight(
 
   // I2：per函数 pass 在无版本时按 chunk 缓存回读（与 refresh 路径共用 plan/chunkHash 数据源）。
   // 三个 plan 必须先于 applyCategories 计算：applyCategories 会就地改写 pending category（候选口径依赖改写前状态）
-  const catsv = pickPassVersion(storage, 'categories', compatForPass('categories', graph))
+  const catsv = pickPassVersion(storage, 'categories', compatForCurrentPass('categories', graph))
   let catsOut: CategoryEnvelope | undefined
   if (catsv) {
     catsOut = catsv.value as CategoryEnvelope
@@ -1453,7 +1487,7 @@ export function buildKeyInsight(
     passStatus.categories = 'ok'
   }
 
-  const rv = pickPassVersion(storage, 'coreRoles', compatForPass('coreRoles', graph))
+  const rv = pickPassVersion(storage, 'coreRoles', compatForCurrentPass('coreRoles', graph))
   const roles = rv ? (rv.value as Record<string, string>) : cache.get<Record<string, string>>(fp, 'coreRoles')
   if (roles && applyPassValue(insight, graph, 'coreRoles', roles)) {
     touched = true
@@ -1461,7 +1495,7 @@ export function buildKeyInsight(
   }
 
   // 叙事：compat 含划分身份（必须在 partition 应用之后计算）
-  const nv = pickPassVersion(storage, 'narratives', compatForPass('narratives', graph))
+  const nv = pickPassVersion(storage, 'narratives', compatForCurrentPass('narratives', graph))
   const narr = nv
     ? (nv.value as NarrativeEnvelope)
     : cache.get<NarrativeEnvelope>(fp, NARRATIVES_CACHE_KEY)
@@ -1470,7 +1504,7 @@ export function buildKeyInsight(
     passStatus.narratives = 'ok'
   }
 
-  const ksv = pickPassVersion(storage, 'keySteps', compatForPass('keySteps', graph))
+  const ksv = pickPassVersion(storage, 'keySteps', compatForCurrentPass('keySteps', graph))
   let ksOut: Record<string, number[]> | undefined
   if (ksv) {
     ksOut = ksv.value as Record<string, number[]>
@@ -1483,7 +1517,7 @@ export function buildKeyInsight(
     passStatus.keySteps = 'ok'
   }
 
-  const bkv = pickPassVersion(storage, 'blocks', compatForPass('blocks', graph))
+  const bkv = pickPassVersion(storage, 'blocks', compatForCurrentPass('blocks', graph))
   let blocksOut: Record<string, InternalStep[]> | undefined
   let blocksMisses = 0
   let blocksHit = false
@@ -1507,7 +1541,7 @@ export function buildKeyInsight(
     passStatus.blocks = 'ok'
   }
 
-  const exv = pickPassVersion(storage, 'externals', compatForPass('externals', graph))
+  const exv = pickPassVersion(storage, 'externals', compatForCurrentPass('externals', graph))
   const ex = exv
     ? (exv.value as Record<string, Record<string, ExternalSymbolInfo>>)
     : cache.get<Record<string, Record<string, ExternalSymbolInfo>>>(fp, 'externals')
@@ -1517,7 +1551,7 @@ export function buildKeyInsight(
   }
 
   // 脉络树整树快照回读（免网络）：仅 AI 生成的树计入 aiGenerated
-  const fv = pickPassVersion(storage, 'flows', compatForPass('flows', graph))
+  const fv = pickPassVersion(storage, 'flows', compatForCurrentPass('flows', graph))
   const flowsTree = fv ? (fv.value as FlowTreeCache) : cache.get<FlowTreeCache>(fp, 'flows:tree')
   /**
    * 以整树快照为准的 flows 状态：与 pass6 命中分支统一走 flowsStatusOf(tree,{quiet:true})，
@@ -1725,7 +1759,7 @@ export async function refreshInsightAI(
    */
   const commitPass = (pass: AiPassKey, value: unknown, chunkStats?: AiChunkStats): void => {
     try {
-      const result = writePassVersion(storage, pass, value, compatForPass(pass, graph), chunkStats)
+      const result = writePassVersion(storage, pass, value, compatForCurrentPass(pass, graph), chunkStats)
       if (!result.added) return
       const removed = invalidatePassDependents(cache, graph, pass)
       if (removed > 0) {
@@ -1753,7 +1787,7 @@ export async function refreshInsightAI(
   let p: PartitionEnvelope | undefined
   let partitionGenerated = false
   if (!partitionRerun) {
-    const pv = pickPassVersion(storage, 'partition', compatForPass('partition', graph))
+    const pv = pickPassVersion(storage, 'partition', compatForCurrentPass('partition', graph))
     if (pv) {
       p = pv.value as PartitionEnvelope
       status.partition = 'ok'
@@ -1799,7 +1833,7 @@ export async function refreshInsightAI(
   let cjGenerated = false
   let cjDegraded = false
   if (!coreJudgmentRerun) {
-    const cjv = pickPassVersion(storage, 'coreJudgment', compatForPass('coreJudgment', graph))
+    const cjv = pickPassVersion(storage, 'coreJudgment', compatForCurrentPass('coreJudgment', graph))
     if (cjv) {
       cj = cjv.value as CoreJudgment
       cjReady = true
@@ -1851,8 +1885,8 @@ export async function refreshInsightAI(
   if (!categoriesRerun) {
     // 常规刷新与点名重跑都先取版本：版本是用户可见的「当前选择」（可能已回滚），
     // chunk 只是其生成过程缓存；反过来会让回滚后的旧版本被最新 chunk 静默覆盖。
-    const cv = pickPassVersion(storage, 'categories', compatForPass('categories', graph))
-    if (cv) {
+    const cv = pickPassVersion(storage, 'categories', compatForCurrentPass('categories', graph))
+    if (cv && isRecordValue(cv.value)) {
       cats = cv.value as CategoryEnvelope
       catsReady = true
       markReused('categories')
@@ -1903,7 +1937,7 @@ export async function refreshInsightAI(
   let rolesReady = false
   let rolesGenerated = false
   if (!coreRolesRerun) {
-    const rv = pickPassVersion(storage, 'coreRoles', compatForPass('coreRoles', graph))
+    const rv = pickPassVersion(storage, 'coreRoles', compatForCurrentPass('coreRoles', graph))
     if (rv) {
       roles = rv.value as Record<string, string>
       rolesReady = true
@@ -1945,7 +1979,7 @@ export async function refreshInsightAI(
   let narrReady = false
   let narrGenerated = false
   if (!narrativesRerun) {
-    const nv = pickPassVersion(storage, 'narratives', compatForPass('narratives', graph))
+    const nv = pickPassVersion(storage, 'narratives', compatForCurrentPass('narratives', graph))
     if (nv) {
       narr = nv.value as NarrativeEnvelope
       narrReady = true
@@ -1991,8 +2025,8 @@ export async function refreshInsightAI(
   let keyStepsDegraded = false
   if (!keyStepsRerun) {
     // 版本优先：回滚后的选择必须压过生成过程中的 chunk 缓存（常规刷新同样适用）。
-    const kv = pickPassVersion(storage, 'keySteps', compatForPass('keySteps', graph))
-    if (kv) {
+    const kv = pickPassVersion(storage, 'keySteps', compatForCurrentPass('keySteps', graph))
+    if (kv && isRecordValue(kv.value)) {
       keySteps = kv.value as Record<string, number[]>
       keyStepsReady = true
       markReused('keySteps')
@@ -2048,7 +2082,7 @@ export async function refreshInsightAI(
   let externalsGenerated = false
   let externalsDegraded = false
   if (!externalsRerun) {
-    const ev = pickPassVersion(storage, 'externals', compatForPass('externals', graph))
+    const ev = pickPassVersion(storage, 'externals', compatForCurrentPass('externals', graph))
     if (ev) {
       externals = ev.value as Record<string, Record<string, ExternalSymbolInfo>>
       externalsReady = true
@@ -2104,8 +2138,8 @@ export async function refreshInsightAI(
   let blocksLegacyMisses = 0
   if (!blocksRerun) {
     // 版本优先：回滚后的选择必须压过生成过程中的 chunk 缓存（常规刷新同样适用）。
-    const bv = pickPassVersion(storage, 'blocks', compatForPass('blocks', graph))
-    if (bv) {
+    const bv = pickPassVersion(storage, 'blocks', compatForCurrentPass('blocks', graph))
+    if (bv && isRecordValue(bv.value)) {
       internalSteps = bv.value as Record<string, InternalStep[]>
       blocksReady = true
       markReused('blocks')
@@ -2173,7 +2207,7 @@ export async function refreshInsightAI(
   {
     let flowsTree: FlowTreeCache | undefined
     if (!invalidateFlows) {
-      const fv = pickPassVersion(storage, 'flows', compatForPass('flows', graph))
+      const fv = pickPassVersion(storage, 'flows', compatForCurrentPass('flows', graph))
       if (fv) {
         flowsTree = fv.value as FlowTreeCache
         passRun.reused.push('flows')
@@ -2311,7 +2345,7 @@ export async function refreshInsightAI(
       insight,
       graph,
       opts.forcePartition ? 'partition' : 'refresh',
-      collectPassVersionIds(storage, graph, status)
+      collectPassVersionIds(storage, graph, status, (p) => compatForCurrentPass(p, graph))
     )
   }
   return { insight, graph, aiChunkStats, passRun }
