@@ -367,22 +367,24 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       guarantees: false
     })
     const compat = compatForPass(pass, graph)
-    const activeId = service.storage.getActivePassVersion(pass)
+    const rawActiveId = service.storage.getActivePassVersion(pass)
     const refs = milestoneRefsByVersion(service.storage.listInsightSnapshots(), pass)
-    const body: AiPassVersionListResponse = {
-      pass,
-      activeId,
-      versions: service.storage.listPassVersions(pass).map((meta) => {
-        const reason = compatMismatchReason(meta, compat)
-        return {
-          ...meta,
-          compatible: reason === null,
-          ...(reason ? { compatibleReason: reason } : {}),
-          active: meta.id === activeId,
-          milestoneIds: refs.get(meta.id) ?? []
-        }
-      })
-    }
+    const versions = service.storage.listPassVersions(pass).map((meta) => {
+      const reason = compatMismatchReason(meta, compat)
+      return {
+        ...meta,
+        compatible: reason === null,
+        ...(reason ? { compatibleReason: reason } : {}),
+        active: false,
+        milestoneIds: refs.get(meta.id) ?? []
+      }
+    })
+    // 「激活」必须同时兼容：不兼容的激活指针实际未生效（装配会回退到其它版本），
+    // 若仍标成激活，UI 会显示「已是当前激活版本」而无法解释为何内容没变。
+    const activeEntry = versions.find((v) => v.id === rawActiveId && v.compatible)
+    const activeId = activeEntry ? rawActiveId : null
+    if (activeEntry) activeEntry.active = true
+    const body: AiPassVersionListResponse = { pass, activeId, versions }
     return body
   })
 

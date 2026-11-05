@@ -1699,6 +1699,12 @@ export async function refreshInsightAI(
     forcedAll || (pass === 'partition' && opts.forcePartition === true) || (selected?.has(pass) ?? false)
   /** 明确点名了 passes 时，未选中的 pass 禁止发请求（缓存/版本全无则本轮跳过） */
   const reuseOnly = (pass: AiPassKey): boolean => selected !== null && !shouldRerun(pass)
+  /** 单 pass 局部重跑：不归档里程碑，也不触发整份语义担保复核（避免为未点名 pass 花额外 LLM） */
+  const partialPassRun =
+    selected !== null &&
+    selected.size < AI_PASS_ORDER.length &&
+    !forcedAll &&
+    opts.forcePartition !== true
   const passRun: PassRunOverview = { reused: [], rerun: [], skipped: [] }
   let touched = false
   const apply = (pass: AiPassKey, value: unknown): boolean => {
@@ -1718,11 +1724,18 @@ export async function refreshInsightAI(
    * 与现有版本深相等则复用旧版本、不作废任何东西（空转重跑不产生新版本）。
    */
   const commitPass = (pass: AiPassKey, value: unknown, chunkStats?: AiChunkStats): void => {
-    const result = writePassVersion(storage, pass, value, compatForPass(pass, graph), chunkStats)
-    if (!result.added) return
-    const removed = invalidatePassDependents(cache, graph, pass)
-    if (removed > 0) {
-      console.warn(`[autodoc] ${pass} 新版本：已作废依赖缓存 ${removed} 条`)
+    try {
+      const result = writePassVersion(storage, pass, value, compatForPass(pass, graph), chunkStats)
+      if (!result.added) return
+      const removed = invalidatePassDependents(cache, graph, pass)
+      if (removed > 0) {
+        console.warn(`[autodoc] ${pass} 新版本：已作废依赖缓存 ${removed} 条`)
+      }
+    } catch (e) {
+      // 版本落库失败（团队仓库/磁盘/锁）只降级为「本次不新增版本」，不得中断整轮刷新
+      console.warn(
+        `[autodoc] ${pass} 版本写入失败（已忽略，不影响本轮结果）：${e instanceof Error ? e.message : String(e)}`
+      )
     }
   }
   // I2：per函数 pass（categories/keySteps/blocks）的 chunk 增量上下文与统计。
@@ -1746,7 +1759,9 @@ export async function refreshInsightAI(
       status.partition = 'ok'
       passRun.reused.push('partition')
     } else {
-      p = cache.get<PartitionEnvelope>(fp, fbKey)
+      // 无版本时兼容存量缓存：feedback 专用键缺失要回退 partition:latest，
+      // 否则「上次用非空 feedback 采纳过划分」的用户单 pass 重跑会退回目录划分。
+      p = cache.get<PartitionEnvelope>(fp, fbKey) ?? cache.get<PartitionEnvelope>(fp, 'partition:latest')
       if (p) status.partition = 'ok'
     }
   }
@@ -1835,15 +1850,17 @@ export async function refreshInsightAI(
   let catsDegraded = false
   if (!categoriesRerun) {
     if (reuseOnly('categories')) {
-      // 明确点名重跑其他 pass：本 pass 只读、零请求（chunk 优先，其次版本）
-      const read = readChunkedPass<CategoryEnvelope>(cache, 'categories', categoriesPlan(graph))
-      if (read.hits > 0) {
-        cats = read.out
+      // 明确点名重跑其他 pass：本 pass 只读、零请求。
+      // 必须先取版本：版本是用户可见的「当前选择」（可能已回滚），chunk 只是其生成过程缓存；
+      // 反过来会让回滚后的旧版本被最新 chunk 静默覆盖。
+      const cv = pickPassVersion(storage, 'categories', compatForPass('categories', graph))
+      if (cv) {
+        cats = cv.value as CategoryEnvelope
         catsReady = true
       } else {
-        const cv = pickPassVersion(storage, 'categories', compatForPass('categories', graph))
-        if (cv) {
-          cats = cv.value as CategoryEnvelope
+        const read = readChunkedPass<CategoryEnvelope>(cache, 'categories', categoriesPlan(graph))
+        if (read.hits > 0) {
+          cats = read.out
           catsReady = true
         }
       }
@@ -1975,14 +1992,15 @@ export async function refreshInsightAI(
   let keyStepsDegraded = false
   if (!keyStepsRerun) {
     if (reuseOnly('keySteps')) {
-      const read = readChunkedPass<Record<string, number[]>>(cache, 'keySteps', keyStepsPlan(graph))
-      if (read.hits > 0) {
-        keySteps = read.out
+      // 版本优先：回滚后的选择必须压过生成过程中的 chunk 缓存
+      const kv = pickPassVersion(storage, 'keySteps', compatForPass('keySteps', graph))
+      if (kv) {
+        keySteps = kv.value as Record<string, number[]>
         keyStepsReady = true
       } else {
-        const kv = pickPassVersion(storage, 'keySteps', compatForPass('keySteps', graph))
-        if (kv) {
-          keySteps = kv.value as Record<string, number[]>
+        const read = readChunkedPass<Record<string, number[]>>(cache, 'keySteps', keyStepsPlan(graph))
+        if (read.hits > 0) {
+          keySteps = read.out
           keyStepsReady = true
         }
       }
@@ -2030,6 +2048,7 @@ export async function refreshInsightAI(
   let externals: Record<string, Record<string, ExternalSymbolInfo>> = {}
   let externalsReady = false
   let externalsGenerated = false
+  let externalsDegraded = false
   if (!externalsRerun) {
     const ev = pickPassVersion(storage, 'externals', compatForPass('externals', graph))
     if (ev) {
@@ -2058,6 +2077,7 @@ export async function refreshInsightAI(
       status.externals =
         Object.keys(externals).length > 0 ? 'ok' : hadExternalCandidates ? 'failed' : 'skipped'
       if (res.failedBatches > 0) {
+        externalsDegraded = true
         console.warn(`[autodoc] AI 外部库补全 ${res.failedBatches}/${res.batches} 批降级（其余批已合并）`)
       }
     } catch (e) {
@@ -2070,7 +2090,9 @@ export async function refreshInsightAI(
     passRun.skipped.push('externals')
   }
   apply('externals', externals)
-  if (externalsGenerated && Object.keys(externals).length > 0) commitPass('externals', externals)
+  if (externalsGenerated && !externalsDegraded && Object.keys(externals).length > 0) {
+    commitPass('externals', externals)
+  }
 
   // 5d) 内部步骤归一（blocks，AI-first，无静态兜底；I2：文件级 chunk 增量）：把有注释块函数的
   // codeBlocks 归并为有序「内部步骤」大纲；失败/为空时 internalSteps 保持 undefined，前端回退原文展示。
@@ -2084,19 +2106,20 @@ export async function refreshInsightAI(
   let blocksLegacyMisses = 0
   if (!blocksRerun) {
     if (reuseOnly('blocks')) {
-      const read = readChunkedPass<Record<string, InternalStep[]>>(
-        cache,
-        'blocks',
-        internalStepsPlan(graph)
-      )
-      if (read.hits > 0) {
-        internalSteps = read.out
-        blocksLegacyMisses = read.misses
+      // 版本优先：回滚后的选择必须压过生成过程中的 chunk 缓存
+      const bv = pickPassVersion(storage, 'blocks', compatForPass('blocks', graph))
+      if (bv) {
+        internalSteps = bv.value as Record<string, InternalStep[]>
         blocksReady = true
       } else {
-        const bv = pickPassVersion(storage, 'blocks', compatForPass('blocks', graph))
-        if (bv) {
-          internalSteps = bv.value as Record<string, InternalStep[]>
+        const read = readChunkedPass<Record<string, InternalStep[]>>(
+          cache,
+          'blocks',
+          internalStepsPlan(graph)
+        )
+        if (read.hits > 0) {
+          internalSteps = read.out
+          blocksLegacyMisses = read.misses
           blocksReady = true
         }
       }
@@ -2250,21 +2273,24 @@ export async function refreshInsightAI(
   // SG2：KEY 语义全部套用后，为已接入语义担保的语言对象生成语义担保。
   // 硬事实走静态校验；意图类走 KEY 第二遍 LLM（命中 guarantee:* 缓存则不重复请求）。
   // 双管线分离后本管线不含任何 Agent 断言，不再为 Agent 对象做第二遍复核。
-  try {
-    const sg2 = await attachKeyGuarantees(insight, graph, cache, {
-      force: opts.force === true,
-      prune: true
-    })
-    if (sg2.objects > 0) {
-      console.log(
-        `[autodoc] SG2 语义担保：对象 ${sg2.objects}，verified ${sg2.verified}/unverified ${sg2.unverified}，` +
-          `LLM 复核 ${sg2.llmReviews}、缓存命中 ${sg2.cacheHits}`
+  // 单 pass 局部重跑跳过整份复核：否则会为未点名的 pass 也补发 LLM 请求，违背「只重跑点名项」。
+  if (!partialPassRun) {
+    try {
+      const sg2 = await attachKeyGuarantees(insight, graph, cache, {
+        force: opts.force === true,
+        prune: true
+      })
+      if (sg2.objects > 0) {
+        console.log(
+          `[autodoc] SG2 语义担保：对象 ${sg2.objects}，verified ${sg2.verified}/unverified ${sg2.unverified}，` +
+            `LLM 复核 ${sg2.llmReviews}、缓存命中 ${sg2.cacheHits}`
+        )
+      }
+    } catch (e) {
+      console.warn(
+        `[autodoc] SG2 语义担保失败（已忽略，不影响洞察生成）：${e instanceof Error ? e.message : String(e)}`
       )
     }
-  } catch (e) {
-    console.warn(
-      `[autodoc] SG2 语义担保失败（已忽略，不影响洞察生成）：${e instanceof Error ? e.message : String(e)}`
-    )
   }
   // I2：chunk 增量统计入日志与返回值；I3：同时记入 service，供 /api/insight 家族响应附带下发
   console.log(
@@ -2281,11 +2307,6 @@ export async function refreshInsightAI(
   // saveInsightSnapshot 内部 try/catch，失败不影响主流程。
   // P3：单 pass 局部重跑不归档整份里程碑（各 pass 版本已独立留存）；全量 force / forcePartition
   // 与常规刷新保持归档。里程碑记录组成它的各 pass 版本 id，供整份回滚批量切换。
-  const partialPassRun =
-    selected !== null &&
-    selected.size < AI_PASS_ORDER.length &&
-    !forcedAll &&
-    opts.forcePartition !== true
   const archiveMilestone = opts.archiveMilestone ?? !partialPassRun
   if (archiveMilestone) {
     saveInsightSnapshot(
@@ -2293,7 +2314,7 @@ export async function refreshInsightAI(
       insight,
       graph,
       opts.forcePartition ? 'partition' : 'refresh',
-      collectPassVersionIds(storage, graph)
+      collectPassVersionIds(storage, graph, status)
     )
   }
   return { insight, graph, aiChunkStats, passRun }

@@ -1008,8 +1008,9 @@ export class TeamStorage implements StorageAdapter {
     const metas: AiPassVersionMeta[] = []
     for (const file of this.listJsonFiles(dir)) {
       const version = this.readTeamJson(join(dir, file), 'pass 版本', isPassVersionRecord)
-      // 与快照列表同口径：只给元信息，不携带 value 载荷
-      if (!version || version.pass !== pass) continue
+      // 与快照列表同口径：只给元信息，不携带 value 载荷。
+      // 文件内 id 必须与文件名一致：手工改写产生的「幽灵条目」会让 get/delete 返回 null。
+      if (!version || version.pass !== pass || version.id !== file.replace(/\.json$/, '')) continue
       metas.push({
         id: version.id,
         pass: version.pass,

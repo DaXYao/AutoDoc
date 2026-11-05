@@ -15,7 +15,13 @@ vi.mock('../src/ai.js', async (importActual) => {
 import { deepseekChat } from '../src/ai.js'
 import { AiCache } from '../src/aiCache.js'
 import { loadInsight, refreshInsightAI } from '../src/insight.js'
-import { compatForPass, isVersionCompatible, pickPassVersion, AI_PASS_ORDER } from '../src/passVersions.js'
+import {
+  compatForPass,
+  isVersionCompatible,
+  pickPassVersion,
+  writePassVersion,
+  AI_PASS_ORDER
+} from '../src/passVersions.js'
 
 /* ------------------------- prompt 识别词 ------------------------- */
 
@@ -24,6 +30,10 @@ const MARK_CORE = '请选出「核心函数」'
 const MARK_CATEGORIES = '请为每个函数判定最合适的类别'
 const MARK_KEY_STEPS = '挑出承载业务主干'
 const MARK_BLOCKS = '归一为有序「内部步骤」'
+const MARK_ROLES = '该函数在整个系统中的角色'
+const MARK_NARRATIVES = '的实现链路'
+const MARK_EXTERNALS = '外部库/内置模块符号'
+const MARK_FLOWS = '业务主线根'
 
 /* ------------------------- fixture ------------------------- */
 
@@ -226,6 +236,15 @@ describe('P2：兼容键与版本挑选', () => {
     storage.close()
   })
 
+  it('writePassVersion 生成的 id 只含文件名安全字符（团队仓库可直接落盘）', () => {
+    const storage = seedStorage()
+    const result = writePassVersion(storage, 'categories', { a: 1 }, { graphFingerprint: 'fp1' })
+    expect(result.added).toBe(true)
+    expect(result.id).toMatch(/^[A-Za-z0-9._-]+$/)
+    expect(result.id).not.toContain(':')
+    storage.close()
+  })
+
   it('缺失必需字段即不兼容（partitionBasis / coreTableHash 逐字段比较）', () => {
     const lacking = { compat: { graphFingerprint: 'fp1' } }
     expect(isVersionCompatible(lacking, { graphFingerprint: 'fp1' })).toBe(true)
@@ -310,7 +329,16 @@ describe('P2：单 pass 强制重跑', () => {
     const second = await refreshInsightAI(service, { passes: ['categories'] })
 
     expect(countOf(MARK_CATEGORIES)).toBeGreaterThan(0)
-    for (const mark of [MARK_PARTITION, MARK_CORE, MARK_KEY_STEPS, MARK_BLOCKS]) {
+    for (const mark of [
+      MARK_PARTITION,
+      MARK_CORE,
+      MARK_KEY_STEPS,
+      MARK_BLOCKS,
+      MARK_ROLES,
+      MARK_NARRATIVES,
+      MARK_EXTERNALS,
+      MARK_FLOWS
+    ]) {
       expect(countOf(mark)).toBe(0)
     }
     // 未点名的 pass 全部复用（partition/coreJudgment/keySteps/blocks）

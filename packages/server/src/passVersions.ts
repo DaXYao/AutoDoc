@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import { isDeepStrictEqual } from 'node:util'
 import type {
   AiChunkStats,
   AiPassKey,
@@ -178,10 +177,17 @@ export function compatMismatchReason(
  */
 export function collectPassVersionIds(
   storage: StorageAdapter,
-  graph: ProjectGraph
+  graph: ProjectGraph,
+  status?: Partial<Record<AiPassKey, AiPassStatus>>
 ): Partial<Record<AiPassKey, string>> {
   const ids: Partial<Record<AiPassKey, string>> = {}
   for (const pass of AI_PASS_ORDER) {
+    // 只记录本次真正生效的 pass：失败/跳过的 pass 本轮没有套用任何版本，
+    // 若仍写旧版本引用，里程碑回滚后的内容会与快照不一致。
+    if (status !== undefined) {
+      const st = status[pass]
+      if (st !== 'ok' && st !== 'partial') continue
+    }
     const version = pickPassVersion(storage, pass, compatForPass(pass, graph))
     if (version) ids[pass] = version.id
   }
@@ -494,10 +500,12 @@ export function writePassVersion(
   const baselineId = activeId ?? metas[0]?.id
   if (baselineId) {
     const baseline = storage.getPassVersion(baselineId)
+    // JSON 归一后比较：对象键值里的显式 undefined 在落盘/回读后会消失，
+    // 直接用 deepStrictEqual 会把「内容没变」误判成变化、反复堆版本。
     if (
       baseline &&
-      isDeepStrictEqual(baseline.value, value) &&
-      isDeepStrictEqual(baseline.compat, compat)
+      JSON.stringify(baseline.value) === JSON.stringify(value) &&
+      JSON.stringify(baseline.compat) === JSON.stringify(compat)
     ) {
       return { id: baseline.id, added: false }
     }
@@ -507,10 +515,13 @@ export function writePassVersion(
     const bumped = Date.parse(metas[0].savedAt) + 1
     if (!Number.isNaN(bumped)) savedAt = new Date(bumped).toISOString()
   }
-  const base = `${pass}:${savedAt}:${hash8(JSON.stringify(value))}`
+  // 版本 id 会直接用作团队仓库文件名：必须只含 [A-Za-z0-9._-]。
+  // ISO 时间里的 `:`/`.` 会破坏 Windows 文件名与 TeamStorage 的白名单，统一替换为 `-`。
+  const stamp = savedAt.replace(/[:.]/g, '-')
+  const base = `${pass}-${stamp}-${hash8(JSON.stringify(value))}`
   const existingIds = new Set(metas.map((m) => m.id))
   let id = base
-  for (let i = 2; existingIds.has(id); i++) id = `${base}:${i}`
+  for (let i = 2; existingIds.has(id); i++) id = `${base}-${i}`
   const version: AiPassVersion = { id, pass, savedAt, compat, value }
   if (chunkStats) version.chunkStats = chunkStats
   storage.addPassVersion(version)

@@ -2,6 +2,18 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-06 · per-pass 版本终审修复：团队 id、版本优先与生效口径 · server+core+test
+
+- **阻塞修复（团队 500/迁移全冲突）**：版本 id 从含 `:` 的 `pass:时间:hash` 改为文件名安全的 `pass-时间-hash`（ISO 时间中的 `:`/`.` 替换为 `-`），TeamStorage 可直接落盘；补「真实 writePassVersion id 仅含安全字符」测试。
+- **版本优先一致性**：单 pass 复用路径中 categories/keySteps/blocks 改为**先取版本再读 chunk**；否则回滚旧版本后会被最新 chunk 静默覆盖。
+- **降级不落版本**：externals 有 `failedBatches` 时与其它 pass 一致，不写版本；`commitPass` 整体 try/catch，存储写失败只降级不打断整轮刷新。
+- **存量兜底**：复用 partition 时 feedback 专用键缺失回退 `partition:latest`，避免老用户单 pass 重跑退回目录划分。
+- **里程碑只记生效项**：`collectPassVersionIds` 接收本轮 status，仅记录 ok/partial 的 pass；失败/跳过不再被写成旧版本引用。
+- **单 pass 零额外复核**：局部重跑跳过 `attachKeyGuarantees`，避免为未点名 pass 补发 LLM 复核请求。
+- **团队与激活口径**：TeamStorage 列表校验文件内 id 必须等于文件名；版本列表的 `active` 仅在同版本兼容时为真，避免「激活但已失效」误导。
+- **测试**：新增 id 安全断言；单 pass 零调用断言补齐 coreRoles/narratives/externals/flows 四个特征串。全仓 1508 项（core 443 / server 705 / web 360），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-06 · per-pass 版本接入团队同步/迁移与全量验证（多阶段 P5）· server+core+shared-types+web+docs
 
 - **团队 Git（`teamGit.ts`）**：`TEAM_TOP_LEVEL` / `TEAM_MANAGED_DIRS` / `commitKnownPaths.knownPaths` 加入 `passVersions`；dirty 统计与 init「可接管目录」白名单随之覆盖；`teamConflictKindOf('passVersions/...')` 新增 `passVersion` 类型；冲突摘要为 `pass · savedAt · value.summary · graph=<fp>`（value 形状仍由各 pass 解释，存储层不校验）。
