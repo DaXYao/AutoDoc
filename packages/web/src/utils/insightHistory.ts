@@ -4,7 +4,8 @@ import type {
   InsightSnapshotMeta,
   InsightSnapshotStats,
   InsightSnapshotTrigger,
-  InsightSource
+  InsightSource,
+  MilestoneRollbackResult
 } from '@autodoc/shared-types'
 import { AI_PASS_LABELS, AI_STATUS_META, CATEGORY_LABELS, CATEGORY_ORDER } from './format'
 
@@ -147,4 +148,16 @@ export function summarizeDiff(diff: InsightDiff): string[] {
   }
 
   return lines
+}
+
+/**
+ * 里程碑回滚成功文案：明确告知哪些 pass 切换了版本、哪些保持当前版本，
+ * 避免用户误以为「整份洞察都已回到里程碑」。
+ */
+export function describeMilestoneRollback(result: MilestoneRollbackResult): string {
+  const switched = result.switchedPasses.map((pass) => AI_PASS_LABELS[pass]).join('、')
+  const base = switched ? `已回滚里程碑：切换 ${switched}` : '已回滚里程碑'
+  return result.keptPasses.length > 0
+    ? `${base}；${result.keptPasses.length} 个 pass 保持当前版本`
+    : base
 }

@@ -63,8 +63,7 @@ function mkPassVersion(
   id: string,
   pass: AiPassKey,
   savedAt: string,
-  compat?: Partial<PassCompatKey>,
-  extra?: { guarantee?: boolean }
+  compat?: Partial<PassCompatKey>
 ): AiPassVersion {
   const version: AiPassVersion = {
     id,
@@ -72,9 +71,6 @@ function mkPassVersion(
     savedAt,
     compat: { graphFingerprint: `fp-${id}`, ...compat },
     value: { marker: id }
-  }
-  if (extra?.guarantee) {
-    version.guarantee = { pass: 'categories', objectId: 'o1', status: 'declared', source: 'agent', claims: [] }
   }
   return version
 }
@@ -466,7 +462,7 @@ function runAdapterSuite(create: (dir: string) => StorageAdapter): void {
   it('AI pass 版本：add→list（仅 meta、新→旧、按 pass 隔离）→get（含 value）往返', () => {
     storage.addPassVersion(mkPassVersion('v1', 'categories', '2026-01-01T00:00:00.000Z'))
     storage.addPassVersion(
-      mkPassVersion('v3', 'categories', '2026-01-03T00:00:00.000Z', { partitionBasis: 'pb' }, { guarantee: true })
+      mkPassVersion('v3', 'categories', '2026-01-03T00:00:00.000Z', { partitionBasis: 'pb' })
     )
     storage.addPassVersion(mkPassVersion('v2', 'categories', '2026-01-02T00:00:00.000Z'))
     storage.addPassVersion(
@@ -479,15 +475,12 @@ function runAdapterSuite(create: (dir: string) => StorageAdapter): void {
 
     const meta = storage.listPassVersions('categories')[0]
     expect(meta.compat).toEqual({ graphFingerprint: 'fp-v3', partitionBasis: 'pb' })
-    expect(meta.hasGuarantee).toBe(true)
     // 列表只给元信息，不下发 value 载荷
     expect((meta as Partial<AiPassVersion>).value).toBeUndefined()
 
     const full = storage.getPassVersion('v2')
     expect(full?.pass).toBe('categories')
     expect(full?.value).toEqual({ marker: 'v2' })
-    expect(full?.guarantee).toBeUndefined()
-    expect(storage.getPassVersion('v3')?.guarantee?.status).toBe('declared')
     expect(storage.getPassVersion('f1')?.compat.coreTableHash).toBe('ch')
     expect(storage.getPassVersion('nope')).toBeNull()
   })

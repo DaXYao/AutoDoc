@@ -783,6 +783,12 @@ watch(
                       </div>
                     </li>
                   </ul>
+                  <p
+                    v-if="passVersions[p.key]?.truncated"
+                    class="mt-2 text-[11px] leading-snug text-[color:var(--ad-ink-3)]"
+                  >
+                    共 {{ passVersions[p.key]?.total }} 个版本，仅显示最近 100 个
+                  </p>
                 </div>
               </n-popover>
             </template>

@@ -1015,8 +1015,7 @@ export class TeamStorage implements StorageAdapter {
         id: version.id,
         pass: version.pass,
         savedAt: version.savedAt,
-        compat: version.compat,
-        hasGuarantee: version.guarantee !== undefined
+        compat: version.compat
       })
     }
     metas.sort((a, b) => b.savedAt.localeCompare(a.savedAt))

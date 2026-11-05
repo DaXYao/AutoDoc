@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { CallEdge, CodeBlock, FileDoc, FunctionDoc, ProjectInsight } from '@autodoc/shared-types'
+import type { AiPassKey, CallEdge, CodeBlock, FileDoc, FunctionDoc, ProjectInsight } from '@autodoc/shared-types'
 import { createStorage, loadConfig } from '@autodoc/core'
 import type { DocService } from '../src/context.js'
 import type { ChatReply } from '../src/ai.js'
@@ -171,6 +171,16 @@ function cacheOf(service: DocService): AiCache {
   return new AiCache(dirname(service.storage.dataPath))
 }
 
+/**
+ * 删除指定 pass 的全部版本（模拟「无版本」存量）。
+ * 常规刷新已改为版本优先，只有无版本时才走 chunk 增量；本文件验证 chunk 机制时需先清版本。
+ */
+function dropPassVersions(service: DocService, ...passes: AiPassKey[]): void {
+  for (const pass of passes) {
+    for (const meta of service.storage.listPassVersions(pass)) service.storage.deletePassVersion(meta.id)
+  }
+}
+
 beforeEach(() => {
   prompts = []
   vi.mocked(deepseekChat).mockReset()
@@ -256,6 +266,8 @@ describe('I2：改某文件函数体 → 仅含该文件的 chunk 重跑', () =>
       ])
     ]
     prompts = []
+    // 清掉三 pass 的版本，迫使本轮走 chunk 增量（否则版本优先会直接复用、不产生 chunk 统计）
+    dropPassVersions(service, 'categories', 'keySteps', 'blocks')
     const second = await refreshInsightAI(service, {})
     expect(second.aiChunkStats!.blocks).toEqual({ reused: 1, rerun: 1 })
     // 仅重发 1 个 blocks 请求，且 prompt 只含 b 文件函数
@@ -334,6 +346,8 @@ describe('I2：陈旧 chunk 键清理', () => {
         mkFn('fnA1', { category: 'implementation', codeBlocks: [mkBlock('fnA1', '// 新注释')] })
       ])
     ]
+    // 清掉 blocks 版本：只有无版本时常规刷新才走 chunk 增量（才能触发 prune）
+    dropPassVersions(service, 'blocks')
     await refreshInsightAI(service, {})
     const live2 = cacheOf(service).getGlobal<string[]>('chunkLive:blocks')!
     expect(live2).toHaveLength(1)
@@ -355,8 +369,9 @@ describe('I2：force 重新生成', () => {
     const forced = await refreshInsightAI(service, { force: true })
     expect(countOf(MARK_BLOCKS)).toBe(1)
     expect(forced.aiChunkStats!.blocks).toEqual({ reused: 0, rerun: 1 })
-    // 重跑后缓存仍命中：再一次普通刷新零请求
+    // 重跑后缓存仍命中：清掉 blocks 版本（否则常规刷新版本优先）再普通刷新，仍零请求
     prompts = []
+    dropPassVersions(service, 'blocks')
     const after = await refreshInsightAI(service, {})
     expect(countOf(MARK_BLOCKS)).toBe(0)
     expect(after.aiChunkStats!.blocks).toEqual({ reused: 1, rerun: 0 })
@@ -387,6 +402,8 @@ describe('I2：PROMPT_VERSION 拌入 chunkHash', () => {
     PROMPT_VERSIONS.blocks = original + 1
     try {
       prompts = []
+      // 清掉 keySteps/blocks 版本，迫使本轮走 chunk 增量（版本优先会直接复用、不产生 chunk 统计）
+      dropPassVersions(service, 'keySteps', 'blocks')
       const bumped = await refreshInsightAI(service, {})
       expect(countOf(MARK_BLOCKS)).toBe(1)
       expect(bumped.aiChunkStats!.blocks).toEqual({ reused: 0, rerun: 1 })

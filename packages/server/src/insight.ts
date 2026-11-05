@@ -1849,22 +1849,21 @@ export async function refreshInsightAI(
   let catsGenerated = false
   let catsDegraded = false
   if (!categoriesRerun) {
-    if (reuseOnly('categories')) {
-      // 明确点名重跑其他 pass：本 pass 只读、零请求。
-      // 必须先取版本：版本是用户可见的「当前选择」（可能已回滚），chunk 只是其生成过程缓存；
-      // 反过来会让回滚后的旧版本被最新 chunk 静默覆盖。
-      const cv = pickPassVersion(storage, 'categories', compatForPass('categories', graph))
-      if (cv) {
-        cats = cv.value as CategoryEnvelope
+    // 常规刷新与点名重跑都先取版本：版本是用户可见的「当前选择」（可能已回滚），
+    // chunk 只是其生成过程缓存；反过来会让回滚后的旧版本被最新 chunk 静默覆盖。
+    const cv = pickPassVersion(storage, 'categories', compatForPass('categories', graph))
+    if (cv) {
+      cats = cv.value as CategoryEnvelope
+      catsReady = true
+      markReused('categories')
+    } else if (reuseOnly('categories')) {
+      // 明确点名重跑其他 pass：本 pass 只读、零请求，无版本时退回 chunk 兜底。
+      const read = readChunkedPass<CategoryEnvelope>(cache, 'categories', categoriesPlan(graph))
+      if (read.hits > 0) {
+        cats = read.out
         catsReady = true
-      } else {
-        const read = readChunkedPass<CategoryEnvelope>(cache, 'categories', categoriesPlan(graph))
-        if (read.hits > 0) {
-          cats = read.out
-          catsReady = true
-        }
+        markReused('categories')
       }
-      if (catsReady) markReused('categories')
     }
     if (catsReady) {
       status.categories = Object.keys(cats).length > 0 ? 'ok' : hadPending ? 'failed' : 'skipped'
@@ -1991,20 +1990,19 @@ export async function refreshInsightAI(
   let keyStepsGenerated = false
   let keyStepsDegraded = false
   if (!keyStepsRerun) {
-    if (reuseOnly('keySteps')) {
-      // 版本优先：回滚后的选择必须压过生成过程中的 chunk 缓存
-      const kv = pickPassVersion(storage, 'keySteps', compatForPass('keySteps', graph))
-      if (kv) {
-        keySteps = kv.value as Record<string, number[]>
+    // 版本优先：回滚后的选择必须压过生成过程中的 chunk 缓存（常规刷新同样适用）。
+    const kv = pickPassVersion(storage, 'keySteps', compatForPass('keySteps', graph))
+    if (kv) {
+      keySteps = kv.value as Record<string, number[]>
+      keyStepsReady = true
+      markReused('keySteps')
+    } else if (reuseOnly('keySteps')) {
+      const read = readChunkedPass<Record<string, number[]>>(cache, 'keySteps', keyStepsPlan(graph))
+      if (read.hits > 0) {
+        keySteps = read.out
         keyStepsReady = true
-      } else {
-        const read = readChunkedPass<Record<string, number[]>>(cache, 'keySteps', keyStepsPlan(graph))
-        if (read.hits > 0) {
-          keySteps = read.out
-          keyStepsReady = true
-        }
+        markReused('keySteps')
       }
-      if (keyStepsReady) markReused('keySteps')
     }
     if (keyStepsReady) {
       status.keySteps =
@@ -2105,25 +2103,24 @@ export async function refreshInsightAI(
   let blocksDegraded = false
   let blocksLegacyMisses = 0
   if (!blocksRerun) {
-    if (reuseOnly('blocks')) {
-      // 版本优先：回滚后的选择必须压过生成过程中的 chunk 缓存
-      const bv = pickPassVersion(storage, 'blocks', compatForPass('blocks', graph))
-      if (bv) {
-        internalSteps = bv.value as Record<string, InternalStep[]>
+    // 版本优先：回滚后的选择必须压过生成过程中的 chunk 缓存（常规刷新同样适用）。
+    const bv = pickPassVersion(storage, 'blocks', compatForPass('blocks', graph))
+    if (bv) {
+      internalSteps = bv.value as Record<string, InternalStep[]>
+      blocksReady = true
+      markReused('blocks')
+    } else if (reuseOnly('blocks')) {
+      const read = readChunkedPass<Record<string, InternalStep[]>>(
+        cache,
+        'blocks',
+        internalStepsPlan(graph)
+      )
+      if (read.hits > 0) {
+        internalSteps = read.out
+        blocksLegacyMisses = read.misses
         blocksReady = true
-      } else {
-        const read = readChunkedPass<Record<string, InternalStep[]>>(
-          cache,
-          'blocks',
-          internalStepsPlan(graph)
-        )
-        if (read.hits > 0) {
-          internalSteps = read.out
-          blocksLegacyMisses = read.misses
-          blocksReady = true
-        }
+        markReused('blocks')
       }
-      if (blocksReady) markReused('blocks')
     }
     if (blocksReady) {
       status.blocks = blocksStatusOf(internalSteps, blocksLegacyMisses, hadBlockCandidates)

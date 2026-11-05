@@ -7,6 +7,7 @@ import type {
   AiPassKey,
   AiPassVersionListResponse,
   InsightSnapshot,
+  MilestoneRollbackResult,
   ProjectInsight
 } from '@autodoc/shared-types'
 import { createStorage, loadConfig } from '@autodoc/core'
@@ -14,6 +15,7 @@ import { buildApp } from '../src/app.js'
 import type { DocService } from '../src/context.js'
 import type { ProjectManager } from '../src/projects.js'
 import { loadInsight } from '../src/insight.js'
+import { AI_PASS_ORDER } from '../src/passVersions.js'
 
 /**
  * P3：pass 独立版本路由矩阵（列表兼容/激活/里程碑引用、单 pass 回滚、删除规则、里程碑批量回滚）。
@@ -164,6 +166,45 @@ describe('GET /api/insight/ai/versions', () => {
     await app.close()
     service.storage.close()
   })
+
+  it('版本数超上限：只下发最近 100 条，total 为全量，truncated=true', async () => {
+    const service = await makeService(freshDir())
+    const fp = currentFingerprint(service)
+    for (let i = 1; i <= 101; i++) addVersion(service, 'categories', `v${i}`, fp, {})
+    const app = await makeApp(service)
+
+    const res = await app.inject({ method: 'GET', url: '/api/insight/ai/versions?pass=categories' })
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as AiPassVersionListResponse
+    expect(body.versions).toHaveLength(100)
+    expect(body.total).toBe(101)
+    expect(body.truncated).toBe(true)
+    // savedAt 新→旧：最旧的一条（第 101 条）被截掉
+    expect(body.versions[0].id).toBe('v101')
+    expect(body.versions.some((v) => v.id === 'v1')).toBe(false)
+    await app.close()
+    service.storage.close()
+  })
+
+  it('激活版本落在上限之外 → 前置补入列表', async () => {
+    const service = await makeService(freshDir())
+    const fp = currentFingerprint(service)
+    for (let i = 1; i <= 101; i++) addVersion(service, 'categories', `v${i}`, fp, {})
+    service.storage.setActivePassVersion('categories', 'v1')
+    const app = await makeApp(service)
+
+    const res = await app.inject({ method: 'GET', url: '/api/insight/ai/versions?pass=categories' })
+    const body = res.json() as AiPassVersionListResponse
+    expect(body.versions[0].id).toBe('v1')
+    expect(body.versions[0].active).toBe(true)
+    expect(body.activeId).toBe('v1')
+    // 补入后实际返回 101 条：truncated 按实际返回数判定
+    expect(body.versions).toHaveLength(101)
+    expect(body.total).toBe(101)
+    expect(body.truncated).toBe(false)
+    await app.close()
+    service.storage.close()
+  })
 })
 
 describe('POST /api/insight/ai/versions/:id/rollback', () => {
@@ -279,6 +320,13 @@ describe('POST /api/insight/history/:id/rollback（里程碑批量切版本）',
     expect(service.storage.getActivePassVersion('partition')).toBe('p1')
     expect(service.storage.getActivePassVersion('categories')).toBe('c1')
     expect(service.storage.getActiveInsightSnapshotId('key')).toBeNull()
+    // 回滚透明化：明确切换了哪些 pass、其余 pass 保持当前版本
+    const body = res.json() as MilestoneRollbackResult
+    expect(body.switchedPasses).toEqual(['partition', 'categories'])
+    expect(body.keptPasses).toEqual(
+      AI_PASS_ORDER.filter((pass) => pass !== 'partition' && pass !== 'categories')
+    )
+    expect(body.activeId).toBeNull()
     await app.close()
     service.storage.close()
   })

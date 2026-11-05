@@ -717,7 +717,6 @@ describe('TeamStorage：AI pass 独立版本', () => {
 
     const meta = team.listPassVersions('categories')[0]
     expect(meta.compat).toEqual({ graphFingerprint: 'fp-v3', partitionBasis: 'pb' })
-    expect(meta.hasGuarantee).toBe(false)
     expect((meta as Partial<AiPassVersion>).value).toBeUndefined()
 
     const full = team.getPassVersion('f1')

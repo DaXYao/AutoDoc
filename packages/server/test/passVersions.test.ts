@@ -306,6 +306,39 @@ describe('P2：装配路径版本优先', () => {
     expect(loaded.insight.functions.fnA.internalSteps).toHaveLength(1)
     service.storage.close()
   })
+
+  it('常规刷新（selected=null）尊重激活的旧 categories 版本：零分类请求、版本数不变、装配为旧内容', async () => {
+    mockRouter()
+    const service = await makeService(freshDir(), [fileOf('src/a.ts', [mkFn('fnA')])])
+    await refreshInsightAI(service, { force: true })
+    const latestMeta = service.storage.listPassVersions('categories')[0]
+    const latest = service.storage.getPassVersion(latestMeta.id)
+    if (!latest) throw new Error('force 刷新后应存在 categories 版本')
+    const fnId = Object.keys(latest.value as Record<string, unknown>)[0]
+    expect(fnId).toBeTruthy()
+    // 手工补一条更早、内容不同的版本，并把激活指针指回它（模拟用户回滚）
+    service.storage.addPassVersion({
+      ...latest,
+      id: 'older-categories',
+      savedAt: '2020-01-01T00:00:00.000Z',
+      value: {
+        ...(latest.value as Record<string, unknown>),
+        [fnId]: { category: 'business', reason: '回滚旧版本' }
+      }
+    })
+    service.storage.setActivePassVersion('categories', 'older-categories')
+    const catsBefore = versionCount(service, 'categories')
+
+    prompts = []
+    const second = await refreshInsightAI(service, {})
+
+    // 常规刷新也必须先取激活版本，不得走 chunk 增量重新生成
+    expect(countOf(MARK_CATEGORIES)).toBe(0)
+    expect(versionCount(service, 'categories')).toBe(catsBefore)
+    expect(second.passRun?.reused).toContain('categories')
+    expect(second.insight.functions[fnId].aiCategory).toBe('business')
+    service.storage.close()
+  })
 })
 
 /* ------------------------- 3. 单 pass 强制重跑 ------------------------- */

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { InsightDiff, InsightSnapshotStats } from '@autodoc/shared-types'
+import type { InsightDiff, InsightSnapshotStats, MilestoneRollbackResult } from '@autodoc/shared-types'
 import {
+  describeMilestoneRollback,
   formatSnapshotStats,
   snapshotDisplayLabel,
   snapshotDisplayNote,
@@ -186,5 +187,29 @@ describe('summarizeDiff', () => {
       '核心数：1 → 2',
       'AI 段：模块划分 失败 → 成功'
     ])
+  })
+})
+
+describe('describeMilestoneRollback（里程碑回滚透明化文案）', () => {
+  function result(overrides: Partial<MilestoneRollbackResult> = {}): MilestoneRollbackResult {
+    return {
+      ok: true,
+      activeId: null,
+      switchedPasses: ['partition', 'categories'],
+      keptPasses: ['flows'],
+      ...overrides
+    }
+  }
+
+  it('切换的 pass 用中文标签，保留的 pass 数量追加保持句', () => {
+    expect(describeMilestoneRollback(result())).toBe(
+      '已回滚里程碑：切换 模块划分、三分类；1 个 pass 保持当前版本'
+    )
+  })
+
+  it('keptPasses 为空时不追加保持句', () => {
+    expect(describeMilestoneRollback(result({ keptPasses: [] }))).toBe(
+      '已回滚里程碑：切换 模块划分、三分类'
+    )
   })
 })

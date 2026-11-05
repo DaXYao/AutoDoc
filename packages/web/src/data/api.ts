@@ -24,6 +24,7 @@ import type {
   InsightSnapshot,
   InsightSnapshotMeta,
   InsightSource,
+  MilestoneRollbackResult,
   NewProjectInput,
   ProjectInfo,
   ProjectsResponse,
@@ -351,13 +352,21 @@ export async function compareInsightSnapshots(aId: string, bId: string): Promise
 export async function rollbackInsightSnapshot(
   id: string,
   source: InsightSource = 'key'
-): Promise<void> {
+): Promise<MilestoneRollbackResult> {
   if (mode !== 'api') throw new Error('历史版本写操作仅服务模式可用')
   const res = await fetch(
     `/api/insight/history/${encodeURIComponent(id)}/rollback${source === 'agent' ? '?source=agent' : ''}`,
     { method: 'POST' }
   )
   if (!res.ok) throw await errorFromResponse(res, '回滚失败')
+  // 里程碑分支带 switchedPasses/keptPasses；普通快照/legacy 缺省为空，保持既有提示文案
+  const data = (await res.json()) as Partial<MilestoneRollbackResult>
+  return {
+    ok: data.ok !== false,
+    activeId: data.activeId ?? null,
+    switchedPasses: data.switchedPasses ?? [],
+    keptPasses: data.keptPasses ?? []
+  }
 }
 
 /** 清除该管线的回滚指针，回到实时视图（写操作，只读模式 403 抛错） */

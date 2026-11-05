@@ -843,10 +843,8 @@ export interface AiPassVersion {
   pass: AiPassKey
   savedAt: string
   compat: PassCompatKey
-  /** pass 产出载荷；存储层不解释结构，由装配阶段按 pass 各自解析 */
+  /** 该 pass 产出载荷；存储层不解释结构，由装配阶段按 pass 各自解析 */
   value: unknown
-  /** 该 pass 产出时附带的语义担保（有则留存，随版本独立回放） */
-  guarantee?: SemanticGuarantee
   /** 该 pass 的 chunk 增量统计（仅有文件级 chunk 的 pass 会带） */
   chunkStats?: AiChunkStats
 }
@@ -857,7 +855,6 @@ export interface AiPassVersionMeta {
   pass: AiPassKey
   savedAt: string
   compat: PassCompatKey
-  hasGuarantee: boolean
 }
 
 /** P3：版本列表条目 = 元信息 + 当前图下的兼容/激活/里程碑引用状态 */
@@ -877,8 +874,23 @@ export interface AiPassVersionListResponse {
   pass: AiPassKey
   /** 该 pass 当前激活版本 id；null=未指定（取最新兼容版本） */
   activeId: string | null
-  /** 新→旧 */
+  /** 全量版本数（不受列表上限截断影响） */
+  total: number
+  /** versions 是否被列表上限截断（激活版本不在前 N 条时会前置补入） */
+  truncated: boolean
+  /** 新→旧（最多返回列表上限条） */
   versions: AiPassVersionListItem[]
+}
+
+/** POST /api/insight/history/:id/rollback 里程碑分支响应：各 pass 版本切换结果 */
+export interface MilestoneRollbackResult {
+  ok: boolean
+  /** 里程碑分支回滚后回到实时装配视图，恒为 null */
+  activeId: string | null
+  /** 本次被切换到里程碑版本的 pass */
+  switchedPasses: AiPassKey[]
+  /** 未被里程碑引用、保持当前版本的其余 pass */
+  keptPasses: AiPassKey[]
 }
 
 /**

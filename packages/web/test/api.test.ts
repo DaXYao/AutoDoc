@@ -579,9 +579,11 @@ describe('P4：单 pass 重跑与独立版本接口', () => {
     const list = {
       pass: 'flows',
       activeId: 'v2',
+      total: 2,
+      truncated: false,
       versions: [
-        { id: 'v2', pass: 'flows', savedAt: '2026-11-06T10:00:00.000Z', compat: { graphFingerprint: 'g' }, hasGuarantee: true, compatible: true, active: true, milestoneIds: [] },
-        { id: 'v1', pass: 'flows', savedAt: '2026-11-05T10:00:00.000Z', compat: { graphFingerprint: 'old' }, hasGuarantee: false, compatible: false, compatibleReason: '图谱指纹不同', active: false, milestoneIds: ['m1'] }
+        { id: 'v2', pass: 'flows', savedAt: '2026-11-06T10:00:00.000Z', compat: { graphFingerprint: 'g' }, compatible: true, active: true, milestoneIds: [] },
+        { id: 'v1', pass: 'flows', savedAt: '2026-11-05T10:00:00.000Z', compat: { graphFingerprint: 'old' }, compatible: false, compatibleReason: '图谱指纹不同', active: false, milestoneIds: ['m1'] }
       ]
     }
     const urls = stubRoutes({ '/api/insight/ai/versions?pass=flows': () => json(list) })

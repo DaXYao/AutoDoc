@@ -78,6 +78,9 @@ function snapshotPipelineOf(meta: { pipeline?: InsightSource }): InsightSource |
   return meta.pipeline === 'key' || meta.pipeline === 'agent' ? meta.pipeline : 'legacy'
 }
 
+/** P3：版本列表最多下发的条数（超出时 total 仍为全量，激活版本不在前 N 条会前置补入） */
+const PASS_VERSION_LIST_LIMIT = 100
+
 /** P3：查询/请求体里的 AI pass 名：必须在装配顺序内（非法 400，不静默回退） */
 function parseAiPass(raw: unknown): AiPassKey | null {
   return AI_PASS_ORDER.find((p) => p === raw) ?? null
@@ -369,7 +372,15 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     const compat = compatForPass(pass, graph)
     const rawActiveId = service.storage.getActivePassVersion(pass)
     const refs = milestoneRefsByVersion(service.storage.listInsightSnapshots(), pass)
-    const versions = service.storage.listPassVersions(pass).map((meta) => {
+    const metas = service.storage.listPassVersions(pass)
+    const total = metas.length
+    const limited = metas.slice(0, PASS_VERSION_LIST_LIMIT)
+    // 激活版本可能落在上限之外：前置补入，保证 UI 始终能看到「当前选择」
+    if (rawActiveId && !limited.some((m) => m.id === rawActiveId)) {
+      const activeMeta = metas.find((m) => m.id === rawActiveId)
+      if (activeMeta) limited.unshift(activeMeta)
+    }
+    const versions = limited.map((meta) => {
       const reason = compatMismatchReason(meta, compat)
       return {
         ...meta,
@@ -384,7 +395,13 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     const activeEntry = versions.find((v) => v.id === rawActiveId && v.compatible)
     const activeId = activeEntry ? rawActiveId : null
     if (activeEntry) activeEntry.active = true
-    const body: AiPassVersionListResponse = { pass, activeId, versions }
+    const body: AiPassVersionListResponse = {
+      pass,
+      activeId,
+      total,
+      truncated: total > versions.length,
+      versions
+    }
     return body
   })
 
@@ -564,7 +581,13 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
           invalidatePassDependents(cache, graph, pass)
         }
       }
-      return { ok: true, activeId: null, passVersionIds }
+      return {
+        ok: true,
+        activeId: null,
+        passVersionIds,
+        switchedPasses: [...refPasses],
+        keptPasses: AI_PASS_ORDER.filter((pass) => !refPasses.includes(pass))
+      }
     }
     service.storage.setActiveInsightSnapshotId(req.params.id, source)
     return { ok: true, activeId: req.params.id }

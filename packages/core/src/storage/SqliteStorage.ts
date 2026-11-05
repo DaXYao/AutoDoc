@@ -455,7 +455,7 @@ export class SqliteStorage implements StorageAdapter {
   listPassVersions(pass: AiPassKey): AiPassVersionMeta[] {
     const rows = this.conn()
       .prepare(
-        'SELECT id, saved_at, compat_json, guarantee_json FROM ai_pass_versions WHERE pass = ? ORDER BY saved_at DESC'
+        'SELECT id, saved_at, compat_json FROM ai_pass_versions WHERE pass = ? ORDER BY saved_at DESC'
       )
       .all(pass) as Record<string, unknown>[]
     const metas: AiPassVersionMeta[] = []
@@ -467,8 +467,7 @@ export class SqliteStorage implements StorageAdapter {
         id: String(row.id),
         pass,
         savedAt: typeof row.saved_at === 'string' ? row.saved_at : '',
-        compat,
-        hasGuarantee: typeof row.guarantee_json === 'string' && row.guarantee_json.length > 0
+        compat
       })
     }
     return metas
@@ -499,8 +498,6 @@ export class SqliteStorage implements StorageAdapter {
       value
     }
     // 可选字段损坏时按缺省处理（不因附属信息损坏丢掉整个版本）
-    const guarantee = this.parseOptionalJson(row.guarantee_json)
-    if (guarantee !== undefined) version.guarantee = guarantee as AiPassVersion['guarantee']
     const chunkStats = this.parseOptionalJson(row.chunk_stats_json)
     if (chunkStats !== undefined) version.chunkStats = chunkStats as AiPassVersion['chunkStats']
     return version
@@ -510,7 +507,7 @@ export class SqliteStorage implements StorageAdapter {
     this.backupOnce()
     this.conn()
       .prepare(
-        'INSERT INTO ai_pass_versions (id, pass, saved_at, compat_json, value_json, guarantee_json, chunk_stats_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO ai_pass_versions (id, pass, saved_at, compat_json, value_json, chunk_stats_json) VALUES (?, ?, ?, ?, ?, ?)'
       )
       .run(
         version.id,
@@ -518,7 +515,6 @@ export class SqliteStorage implements StorageAdapter {
         version.savedAt,
         JSON.stringify(version.compat),
         JSON.stringify(version.value),
-        version.guarantee === undefined ? null : JSON.stringify(version.guarantee),
         version.chunkStats === undefined ? null : JSON.stringify(version.chunkStats)
       )
   }

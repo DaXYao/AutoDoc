@@ -15,6 +15,7 @@ import { appState, refreshInsight } from '../store/app'
 import { isExpanded, toggle } from '../store/expand'
 import { formatDate } from '../utils/format'
 import {
+  describeMilestoneRollback,
   formatSnapshotStats,
   isLegacySnapshot,
   snapshotDisplayLabel,
@@ -158,11 +159,16 @@ async function handleRollback(snapshot: InsightSnapshotMeta): Promise<void> {
   }
   rollingBackId.value = snapshot.id
   try {
-    await rollbackInsightSnapshot(snapshot.id, source.value)
+    const result = await rollbackInsightSnapshot(snapshot.id, source.value)
     await refreshInsight()
     await reload()
     const name = snapshotDisplayLabel(snapshot) || formatDate(snapshot.savedAt)
-    message.success(`已回滚到「${name}」`)
+    // 里程碑分支：只切换被引用的 pass，其余 pass 保持当前版本，需明示避免误解
+    message.success(
+      result.switchedPasses.length > 0
+        ? describeMilestoneRollback(result)
+        : `已回滚到「${name}」`
+    )
   } catch (error) {
     message.error(error instanceof Error ? error.message : '回滚失败')
   } finally {

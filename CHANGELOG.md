@@ -2,6 +2,15 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-06 · per-pass 版本常规刷新、列表上限与回滚透明化 · server+core+shared-types+web+test
+
+- **常规刷新尊重激活版本（`insight.ts`）**：categories/keySteps/blocks 三个 chunk 型 pass 把 `pickPassVersion` 提升为常规路径第一步（原仅点名复用路径读取）；selected=null 的普通刷新不再走 chunk 增量并 `commitPass` 覆盖用户回滚后的激活版本。未就绪且非只复用场景仍按原 chunk 增量生成，非 chunk pass 未改。
+- **版本列表上限（`app.ts` + shared-types + InsightHome）**：`PASS_VERSION_LIST_LIMIT=100`；响应新增 `total`（全量数）与 `truncated`；激活版本若落在前 100 条之外则前置补入，`truncated` 按补入后的实际返回数判定；版本 popover 尾部灰字提示「共 N 个版本，仅显示最近 100 个」。
+- **删除死字段**：移除 `AiPassVersion.guarantee` 与 `AiPassVersionMeta.hasGuarantee`；SqliteStorage 的 SELECT/INSERT 不再读写 `guarantee_json`（建表旧列保留、不做迁移），JsonStorage/TeamStorage 不再计算 `hasGuarantee`，旧 JSON/团队文件中的 `guarantee` 键忽略即可。
+- **里程碑回滚透明化**：`POST /api/insight/history/:id/rollback` 里程碑分支返回 `switchedPasses`（被引用的 pass）与 `keptPasses`（其余 pass）；shared-types 新增 `MilestoneRollbackResult`，`rollbackInsightSnapshot` 返回该类型，新增纯函数 `describeMilestoneRollback`；历史区成功 toast 明示切换的 pass 与保持当前版本的 pass 数，legacy/普通快照文案保持不变。
+- **测试**：新增常规刷新回滚回归（零分类请求、版本数不变、装配为旧版本内容）、101 条版本上限与激活补入、里程碑 switched/kept 集合、`describeMilestoneRollback` 文案（含 kept=0 不追加保持句）；aiChunkIncremental 中依赖「常规刷新走 chunk」的 4 项改为先删除版本再验证 chunk 机制。全仓 1513 项（core 443 / server 708 / web 362），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-06 · per-pass 版本终审修复：团队 id、版本优先与生效口径 · server+core+test
 
 - **阻塞修复（团队 500/迁移全冲突）**：版本 id 从含 `:` 的 `pass:时间:hash` 改为文件名安全的 `pass-时间-hash`（ISO 时间中的 `:`/`.` 替换为 `-`），TeamStorage 可直接落盘；补「真实 writePassVersion id 仅含安全字符」测试。
