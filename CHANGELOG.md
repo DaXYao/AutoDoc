@@ -2,6 +2,18 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-06 · per-pass 版本接入团队同步/迁移与全量验证（多阶段 P5）· server+core+shared-types+web+docs
+
+- **团队 Git（`teamGit.ts`）**：`TEAM_TOP_LEVEL` / `TEAM_MANAGED_DIRS` / `commitKnownPaths.knownPaths` 加入 `passVersions`；dirty 统计与 init「可接管目录」白名单随之覆盖；`teamConflictKindOf('passVersions/...')` 新增 `passVersion` 类型；冲突摘要为 `pass · savedAt · value.summary · graph=<fp>`（value 形状仍由各 pass 解释，存储层不校验）。
+- **TeamStorage**：init 的符号链接/realpath containment 已覆盖 `passVersions` 目录且不要求预先存在（按需创建）；`migrateFromLocal` 逐 `AI_PASS_KEYS` 枚举本机版本，缺失复制、内容相同跳过、不同/损坏/非法 ID 记冲突，绝不覆盖团队文件或删除本机版本；迁移摘要新增 `passVersions`。
+- **teamSync**：迁移预览/结果计数纳入 `passVersions`（按 `AI_PASS_ORDER` 汇总）；团队供给预览逻辑不变。
+- **共享类型 + 前端**：`TeamConflictKind` 增 `'passVersion'`，`TeamMigrationCounts`/`TeamMigrationRunResult` 增 `passVersions`；`TEAM_CONFLICT_KIND_LABELS` 与迁移摘要/总数/TeamPanel 预览同步更新（「AI Pass 版本」）。
+- **测试**：teamGit 新增 passVersions 同步提交/拉取可见、冲突 kind 与选远端、init 可接管含版本目录、路径穿越拒绝；hardening 新增 passVersions 目录 junction 写回拒绝；teamRoutes 新增含 `passVersions` 的旧仓库 init 不 400、TeamStorage 对版本目录 junction 拒绝初始化、迁移计数/复制/冲突/二次迁移断言；web team.utils 计数与摘要更新。全仓 core 443 / server 704 / web 360 共 1507 全绿。
+- **实跑（隔离 fixture，未碰用户数据、未调 DeepSeek）**：JSON 存储临时项目直接写入 3 条合法版本（2 条兼容 + 1 条旧图指纹）与 1 条带 `passVersionIds` 的里程碑；`GET /api/insight/ai/versions` 返回兼容原因/激活/里程碑引用；旧图版本回滚 400、兼容版本回滚 200；删除激活 400、被里程碑引用 400、独立版本 204；无 KEY 时单 pass 重跑 200 且 `aiEnabled=false`、不新增版本，非法 pass 400；`export --source key|agent` 均成功导出。未做像素级浏览器验证（环境无浏览器自动化工具），仅 HTTP + 导出产物检查。
+- **校验**：`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
+- **边界**：未改 Agent 管线语义、changes 侧与既有双管线开关；未引入依赖；未改 AGENTS.md。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-06 · 前端单 pass 重跑 + 版本管理 UI（多阶段 P4）· web+docs
 
 - **数据层（`data/api.ts`）**：新增 `regenInsightPasses(passes, feedback='')`（`POST /api/insight/ai` body `{passes, feedback}`，返回含 `passRun` 的洞察；409/400 抛 `ApiError` 保留后端原文，其余非 2xx 返回 null）、`fetchPassVersions(pass)`（静态模式返回 null）、`rollbackPassVersion(id)` / `deletePassVersion(id)`（静态模式抛「pass 版本操作仅本地服务可用」，400 兼容/引用原因原样上抛）。

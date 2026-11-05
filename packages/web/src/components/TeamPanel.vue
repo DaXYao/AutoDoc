@@ -441,12 +441,13 @@ async function handleMigrate(): Promise<void> {
           <n-spin v-if="migrationLoading" size="small" class="mt-2" />
           <template v-else-if="showMigration && migrationPreview">
             <p class="mt-1 text-xs text-[color:var(--ad-ink-2)]">
-              本机有 {{ localTotal }} 项批注 / 快照 / 供给，团队仓库目前 {{ teamTotal }} 项。
+              本机有 {{ localTotal }} 项批注 / 快照 / Pass 版本 / 供给，团队仓库目前 {{ teamTotal }} 项。
               首次启用可复制到团队仓库：只复制缺失内容，不覆盖、不删除本机数据。
             </p>
             <div class="mt-2 grid gap-1 text-xs text-[color:var(--ad-ink-2)] sm:grid-cols-2">
               <span>批注：本机 {{ migrationPreview.local.annotations }} / 团队 {{ migrationPreview.team.annotations }}</span>
               <span>洞察快照：本机 {{ migrationPreview.local.snapshots }} / 团队 {{ migrationPreview.team.snapshots }}</span>
+              <span>Pass 版本：本机 {{ migrationPreview.local.passVersions }} / 团队 {{ migrationPreview.team.passVersions }}</span>
               <span>洞察供给：本机 {{ migrationPreview.local.insightSupply }} / 团队 {{ migrationPreview.team.insightSupply }}</span>
               <span>变更供给：本机 {{ migrationPreview.local.changesSupply }} / 团队 {{ migrationPreview.team.changesSupply }}</span>
             </div>

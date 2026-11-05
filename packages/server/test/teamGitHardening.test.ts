@@ -134,6 +134,23 @@ describe('P0-2 冲突写回 containment', () => {
     expect(readdirSync(outside)).toEqual([])
   })
 
+  it('passVersions 目录是 junction/符号链接：写入同样拒绝且仓库外无文件', () => {
+    const base = freshDir('link-passversions-')
+    const repo = join(base, 'repo')
+    initGit(repo, 'Alice')
+    const outside = join(base, 'outside-versions')
+    mkdirSync(outside, { recursive: true })
+    mkdirSync(join(repo, 'passVersions'), { recursive: true })
+    rmSync(join(repo, 'passVersions'), { recursive: true, force: true })
+    makeDirLink(outside, join(repo, 'passVersions'))
+
+    const client = new TeamGitClient(repo)
+    const result = client.writeResolvedFile('passVersions/partition/v1.json', '{"evil":true}')
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('path')
+    expect(readdirSync(outside)).toEqual([])
+  })
+
   it('冲突目标本身是 junction/符号链接：拒绝覆盖；正常文件通过', () => {
     const base = freshDir('link-file-')
     const repo = join(base, 'repo')

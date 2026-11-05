@@ -28,14 +28,20 @@ import type {
  * - 团队仓库必须自身是 Git 工作树顶层：绝不向上发现父仓库，bare 仓库拒绝；
  * - 网络/凭据/无 remote/无 user 一律返回显式错误，不静默降级、不假成功；
  * - 同步只用 fetch + merge（不用 rebase / force），提交不用 --no-verify；
- * - 提交只 add 已知团队路径（manifest、annotations/、insightHistory/、supply/），绝不 `git add -A`；
+ * - 提交只 add 已知团队路径（manifest、annotations/、insightHistory/、supply/、passVersions/），绝不 `git add -A`；
  * - 冲突路径必须位于上述目录或 manifest 内，拒绝 `../`、绝对路径、盘符、ADS、尾随点/空格与设备名。
  */
 
 /** 允许提交/操作的团队仓库顶层路径（目录或 manifest） */
-const TEAM_TOP_LEVEL = new Set([TEAM_MANIFEST_FILE, 'annotations', 'insightHistory', 'supply'])
+const TEAM_TOP_LEVEL = new Set([
+  TEAM_MANIFEST_FILE,
+  'annotations',
+  'insightHistory',
+  'supply',
+  'passVersions'
+])
 /** 团队托管目录（dirty 统计与路径校验共用） */
-const TEAM_MANAGED_DIRS = ['annotations', 'insightHistory', 'supply'] as const
+const TEAM_MANAGED_DIRS = ['annotations', 'insightHistory', 'supply', 'passVersions'] as const
 
 /** Windows 保留设备名（大小写不敏感；带扩展名同样被系统当作设备） */
 const WINDOWS_RESERVED_DEVICE_NAMES = new Set<string>([
@@ -173,7 +179,7 @@ export function normalizeTeamRepoPath(input: unknown): string | null {
   return segments.join('/')
 }
 
-/** 路径是否属于团队托管范围（manifest / annotations / insightHistory / supply） */
+/** 路径是否属于团队托管范围（manifest / annotations / insightHistory / supply / passVersions） */
 export function isTeamRepoPath(file: string): boolean {
   const normalized = file.replace(/\\/g, '/')
   if (normalized === TEAM_MANIFEST_FILE) return true
@@ -186,6 +192,7 @@ export function teamConflictKindOf(file: string): TeamConflictKind {
   if (file.startsWith('annotations/')) return 'annotation'
   if (file.startsWith('insightHistory/')) return 'snapshot'
   if (file.startsWith('supply/')) return 'supply'
+  if (file.startsWith('passVersions/')) return 'passVersion'
   return 'other'
 }
 
@@ -224,6 +231,28 @@ function summarizeContent(file: string, content: string | null): string | undefi
           ? Object.keys(record.values as Record<string, unknown>).length
           : 0
       return `${agent} / ${pass} · ${values} 条`
+    }
+    if (file.startsWith('passVersions/')) {
+      const pass = typeof record.pass === 'string' ? record.pass : '?'
+      const savedAt = typeof record.savedAt === 'string' ? record.savedAt : ''
+      const compatRecord =
+        typeof record.compat === 'object' && record.compat !== null && !Array.isArray(record.compat)
+          ? (record.compat as Record<string, unknown>)
+          : null
+      const compat =
+        compatRecord && typeof compatRecord.graphFingerprint === 'string'
+          ? `graph=${compatRecord.graphFingerprint}`
+          : ''
+      // 载荷形状按 pass 各自解释，摘要只取通用的 value.summary（存在时）
+      const valueRecord =
+        typeof record.value === 'object' && record.value !== null && !Array.isArray(record.value)
+          ? (record.value as Record<string, unknown>)
+          : null
+      const summary =
+        valueRecord && typeof valueRecord.summary === 'string'
+          ? ` · ${valueRecord.summary.slice(0, 120)}`
+          : ''
+      return `${pass} · ${savedAt}${summary}${compat ? ` · ${compat}` : ''}`
     }
     if (file === TEAM_MANIFEST_FILE) {
       return `projectKey=${typeof record.projectKey === 'string' ? record.projectKey : '?'}`
@@ -643,7 +672,7 @@ export class TeamGitClient {
   }
 
   /**
-   * `git init -b main`。仅当目录为空或只含 manifest/annotations/insightHistory/supply 时允许。
+   * `git init -b main`。仅当目录为空或只含 manifest/annotations/insightHistory/supply/passVersions 时允许。
    * 不 commit；按配置添加 origin（已有不同 URL 报错，不覆盖）。
    */
   initRepo(): TeamGitActionResult {
@@ -773,8 +802,8 @@ export class TeamGitClient {
   /* ------------------------- 提交 ------------------------- */
 
   private knownPaths(): string[] {
-    return [TEAM_MANIFEST_FILE, 'annotations', 'insightHistory', 'supply'].filter((rel) =>
-      existsSync(join(this.repoPath, rel))
+    return [TEAM_MANIFEST_FILE, 'annotations', 'insightHistory', 'supply', 'passVersions'].filter(
+      (rel) => existsSync(join(this.repoPath, rel))
     )
   }
 

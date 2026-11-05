@@ -248,6 +248,7 @@ pnpm build   # 构建全部包
 - **稳定 ID 与指纹**：函数 ID 为 `相对路径::类名::方法名@参数签名哈希`，批注与变更历史通过该 ID 关联，不按文件名关联。函数体指纹为空白归一化后的 SHA-256 截断值，用于修改/重命名识别；重命名会迁移批注与历史，而不是删除重建。
 - **最近三次变更**：每个函数展示最近三次 added / modified / deleted / renamed 记录，更早记录归档保留、不删除。工作区变更由指纹快照记录；Git 可用时额外回填提交历史，两者并存。
 - **语义来源与版本**：KEY API 与 Agent 供给可字段级合并；来源按对象、pass、快照三级标注——对象级用各自枚举（如模块 `ai/dir/agent`、核心判定 `ai/static/agent`、脉络树 `ai/agent/heuristic`），pass 与快照用 `api/agent/mixed`。洞察侧每次合并归档为历史版本，支持对比、命名、备注与回滚，删除仅由用户显式触发；变更侧语义在读请求时合并，不进入快照。
+- **AI pass 独立版本与单步重跑**：KEY 管线每个语义 pass 各自留存版本（SQLite/JSON 本机存储；团队模式落 `<teamRoot>/passVersions/<pass>/<id>.json`），装配时优先取兼容版本、其次旧缓存、最后才请求模型。兼容键按 pass 区分：函数级 pass 只看图谱指纹，`narratives` 还看划分基线，`flows` 另看核心表；不兼容版本不可回滚。单 pass 重跑通过 `POST /api/insight/ai` 的 `passes` 指定，未选中的 pass 只复用不发请求，`partition` / `coreJudgment` 新版本会作废依赖的 flows/narratives 缓存（历史版本归档保留）。里程碑快照记录 `passVersionIds`，可按里程碑批量回滚；激活版本或被里程碑引用的版本不可删除。团队仓库把 `passVersions/` 纳入托管路径：同步只提交已知路径，冲突类型为 `passVersion`（只支持保留本地/远端），迁移时只复制缺失版本、同名不同内容记冲突不覆盖；`passVersions/` 为空或缺失的旧团队仓库仍可正常初始化与同步。
 - **默认展开与数据安全**：默认展开策略由 `ui.defaultExpand` 配置，用户展开状态持久化到 localStorage。SQLite 在进程内首次写入前用 `VACUUM INTO` 生成一致性备份，JSON 适配器也保留备份；批注、变更历史与快照不会被自动覆盖或清理。
 
 ## 许可证

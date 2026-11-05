@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEFAULT_EXPAND, JsonStorage, TeamStorage, type NormalizedConfig } from '@autodoc/core'
+import type { AiPassKey, AiPassVersion } from '@autodoc/shared-types'
 import type { DocService } from '../src/context.js'
 import { TeamGitClient } from '../src/teamGit.js'
 
@@ -157,6 +158,39 @@ export function writeSnapshot(teamRoot: string, id: string, summary: string): vo
     }),
     'utf-8'
   )
+}
+
+/** 构造形状合法的 pass 版本；value 只放可区分的摘要，存储层不解释载荷 */
+export function passVersionRecord(
+  pass: AiPassKey,
+  id: string,
+  summary = id,
+  savedAt = '2026-01-01T00:00:00.000Z'
+): AiPassVersion {
+  return {
+    id,
+    pass,
+    savedAt,
+    compat: { graphFingerprint: 'fp-graph' },
+    value: { summary }
+  }
+}
+
+export function writePassVersion(
+  teamRoot: string,
+  pass: AiPassKey,
+  id: string,
+  summary = id,
+  savedAt = '2026-01-01T00:00:00.000Z'
+): AiPassVersion {
+  const record = passVersionRecord(pass, id, summary, savedAt)
+  mkdirSync(join(teamRoot, 'passVersions', pass), { recursive: true })
+  writeFileSync(
+    join(teamRoot, 'passVersions', pass, `${id}.json`),
+    JSON.stringify(record, null, 2),
+    'utf-8'
+  )
+  return record
 }
 
 export function writeSupply(

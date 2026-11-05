@@ -67,6 +67,7 @@ export const TEAM_CONFLICT_KIND_LABELS: Record<TeamConflictKind, string> = {
   annotation: '批注',
   snapshot: '洞察快照',
   supply: 'Agent 供给',
+  passVersion: 'AI Pass 版本',
   manifest: '仓库清单',
   other: '其它文件'
 }
@@ -205,7 +206,13 @@ export function summarizeTeamSync(result: TeamSyncResult): TeamSyncSummary {
 /* ------------------------- 迁移 ------------------------- */
 
 export function teamMigrationCountsTotal(counts: TeamMigrationCounts): number {
-  return counts.annotations + counts.snapshots + counts.insightSupply + counts.changesSupply
+  return (
+    counts.annotations +
+    counts.snapshots +
+    counts.passVersions +
+    counts.insightSupply +
+    counts.changesSupply
+  )
 }
 
 export function teamMigrationLocalTotal(preview: TeamMigrationPreview): number {
@@ -234,6 +241,7 @@ export function summarizeTeamMigration(result: TeamMigrationRunResult): TeamMigr
   const rows: [string, TeamMigrationCategoryResult][] = [
     ['批注', result.annotations],
     ['快照', result.snapshots],
+    ['Pass 版本', result.passVersions],
     ['供给', result.supply]
   ]
   const lines = rows.map(([label, item]) => {
@@ -243,6 +251,7 @@ export function summarizeTeamMigration(result: TeamMigrationRunResult): TeamMigr
   const conflicts = [
     ...result.annotations.conflicts,
     ...result.snapshots.conflicts,
+    ...result.passVersions.conflicts,
     ...result.supply.conflicts
   ]
   if (conflicts.length > 0) lines.push(`同名不同内容未覆盖：${conflicts.join('、')}`)

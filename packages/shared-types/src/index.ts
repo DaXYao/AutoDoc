@@ -306,7 +306,13 @@ export interface TeamGitUser {
 }
 
 /** 冲突文件类型（决定可选处理方式：只有批注允许「都保留」） */
-export type TeamConflictKind = 'annotation' | 'snapshot' | 'supply' | 'manifest' | 'other'
+export type TeamConflictKind =
+  | 'annotation'
+  | 'snapshot'
+  | 'supply'
+  | 'passVersion'
+  | 'manifest'
+  | 'other'
 
 /** 冲突处理选择：保留本地 / 保留远端；批注额外支持 both（生成冲突副本） */
 export type TeamConflictChoice = 'local' | 'remote' | 'both'
@@ -374,6 +380,8 @@ export interface TeamSyncResult {
 export interface TeamMigrationCounts {
   annotations: number
   snapshots: number
+  /** AI pass 独立版本（所有 pass 合计） */
+  passVersions: number
   insightSupply: number
   changesSupply: number
 }
@@ -398,6 +406,8 @@ export interface TeamMigrationCategoryResult {
 export interface TeamMigrationRunResult {
   annotations: TeamMigrationCategoryResult
   snapshots: TeamMigrationCategoryResult
+  /** AI pass 独立版本（冲突项为版本 ID） */
+  passVersions: TeamMigrationCategoryResult
   supply: TeamMigrationCategoryResult
 }
 

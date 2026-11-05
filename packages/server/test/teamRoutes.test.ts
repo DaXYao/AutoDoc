@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -31,6 +32,7 @@ import { TeamGitClient } from '../src/teamGit.js'
 import { syncTeam } from '../src/teamSync.js'
 import { toFileDocView } from '../src/views.js'
 import { exportProject, exportStaticSite } from '../src/export.js'
+import { passVersionRecord, writePassVersion } from './teamGitTestUtils.js'
 
 vi.setConfig({ testTimeout: 30_000 })
 
@@ -358,6 +360,32 @@ describe('团队路由：400 / 只读 / 状态与初始化', () => {
     expect(result.reason).toBe('not-empty')
     expect(existsSync(join(repo, '.git'))).toBe(false)
   })
+
+  it('init：已含 passVersions/ 的旧团队仓库不再 400，版本文件保持原样', async () => {
+    const base = freshDir()
+    const repo = join(base, 'team-data')
+    mkdirSync(repo, { recursive: true })
+    writeFileSync(
+      join(repo, '.autodoc-team.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        projectKey: 'autodoc',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        description: 'x'
+      }),
+      'utf-8'
+    )
+    writePassVersion(repo, 'partition', 'pv1', '既有划分')
+    const { service } = makeTeamServiceAt(repo, join(base, 'work'))
+    const app = await makeApp(service)
+
+    const init = await app.inject({ method: 'POST', url: '/api/team/init' })
+    expect(init.statusCode).toBe(200)
+    const status = init.json() as TeamStatus
+    expect(status.initialized).toBe(true)
+    expect(existsSync(join(repo, 'passVersions', 'partition', 'pv1.json'))).toBe(true)
+    await app.close()
+  })
 })
 
 describe('createDocService 团队接入', () => {
@@ -419,6 +447,40 @@ describe('createDocService 团队接入', () => {
     )
     await expect(createDocService(project, () => {}, configPath, 'p1')).rejects.toThrow(
       /projectKey 不匹配/
+    )
+  })
+
+  it('passVersions 目录是 junction/符号链接：TeamStorage 初始化拒绝', async () => {
+    const base = freshDir()
+    const project = join(base, 'app')
+    mkdirSync(project, { recursive: true })
+    const team = join(base, 'team-data')
+    mkdirSync(team, { recursive: true })
+    writeFileSync(
+      join(team, '.autodoc-team.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        projectKey: 'autodoc',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        description: 'x'
+      }),
+      'utf-8'
+    )
+    const outside = join(base, 'outside')
+    mkdirSync(outside, { recursive: true })
+    symlinkSync(outside, join(team, 'passVersions'), process.platform === 'win32' ? 'junction' : 'dir')
+    const configPath = join(project, 'autodoc.config.json')
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        include: ['**/*.none'],
+        storage: { type: 'json' },
+        team: { repoPath: '../team-data' }
+      }),
+      'utf-8'
+    )
+    await expect(createDocService(project, () => {}, configPath, 'p1')).rejects.toThrow(
+      /符号链接|junction/
     )
   })
 
@@ -643,6 +705,8 @@ describe('团队同步与迁移路由', () => {
       content: '本机批注'
     })
     local.addInsightSnapshot(mkSnapshot('local-snap'))
+    local.addPassVersion(passVersionRecord('partition', 'local-pv', '本机划分'))
+    local.addPassVersion(passVersionRecord('categories', 'shared-pv', '本机共享'))
     storage.addAnnotation({
       targetType: 'file',
       targetId: 'src/a.ts',
@@ -650,6 +714,8 @@ describe('团队同步与迁移路由', () => {
       content: '团队已有'
     })
     storage.addInsightSnapshot(mkSnapshot('team-snap'))
+    storage.addPassVersion(passVersionRecord('partition', 'team-pv', '团队划分'))
+    storage.addPassVersion(passVersionRecord('categories', 'shared-pv', '团队共享'))
 
     const localInsight = supplyDirOf(local.dataPath, 'p1')
     const localChanges = changesSupplyDirOf(local.dataPath, 'p1')
@@ -674,10 +740,12 @@ describe('团队同步与迁移路由', () => {
     const preview = previewRes.json() as TeamMigrationPreview
     expect(preview.local.annotations).toBe(1)
     expect(preview.local.snapshots).toBe(1)
+    expect(preview.local.passVersions).toBe(2)
     expect(preview.local.insightSupply).toBe(3)
     expect(preview.local.changesSupply).toBe(1)
     expect(preview.team.annotations).toBe(1)
     expect(preview.team.snapshots).toBe(1)
+    expect(preview.team.passVersions).toBe(2)
     expect(preview.supplyConflicts).toEqual(['supply/insight/diff.qoder.json'])
 
     const migrate = await app.inject({ method: 'POST', url: '/api/team/migrate' })
@@ -686,6 +754,10 @@ describe('团队同步与迁移路由', () => {
     expect(result.annotations.copied).toBe(1)
     expect(result.annotations.skipped).toBe(0)
     expect(result.snapshots.copied).toBe(1)
+    // local-pv 复制；shared-pv 同名不同内容不覆盖
+    expect(result.passVersions.copied).toBe(1)
+    expect(result.passVersions.skipped).toBe(0)
+    expect(result.passVersions.conflicts).toEqual(['shared-pv'])
     expect(result.supply.copied).toBe(2) // new.qoder.json + changes.a.json
     expect(result.supply.skipped).toBe(1) // same.qoder.json
     expect(result.supply.conflicts).toEqual(['supply/insight/diff.qoder.json'])
@@ -694,6 +766,13 @@ describe('团队同步与迁移路由', () => {
     expect(readFileSync(join(teamInsight, 'diff.qoder.json'), 'utf-8')).toBe('{"from":"team"}')
     expect(existsSync(join(teamInsight, 'index.json'))).toBe(false)
     expect(existsSync(join(teamInsight, 'AGENT_RULES.md'))).toBe(false)
+    // 版本：复制本机版本、团队原有版本不被覆盖、本机版本保留
+    expect(existsSync(join(repo, 'passVersions', 'partition', 'local-pv.json'))).toBe(true)
+    const shared = JSON.parse(
+      readFileSync(join(repo, 'passVersions', 'categories', 'shared-pv.json'), 'utf-8')
+    ) as { value: { summary: string } }
+    expect(shared.value.summary).toBe('团队共享')
+    expect(local.getPassVersion('local-pv')).not.toBeNull()
     // 本机数据保留
     expect(local.getAnnotation(localAnn.id)).not.toBeNull()
     expect(existsSync(join(localInsight, 'diff.qoder.json'))).toBe(true)
@@ -701,6 +780,8 @@ describe('团队同步与迁移路由', () => {
     const second = (await app.inject({ method: 'POST', url: '/api/team/migrate' })).json() as TeamMigrationRunResult
     expect(second.annotations.copied).toBe(0)
     expect(second.annotations.skipped).toBe(1)
+    expect(second.passVersions.copied).toBe(0)
+    expect(second.passVersions.skipped).toBe(1)
     expect(second.supply.copied).toBe(0)
     await app.close()
   })

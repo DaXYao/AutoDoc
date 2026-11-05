@@ -9,6 +9,7 @@ import {
 import { join } from 'node:path'
 import { isAnnotationRecord } from '@autodoc/core'
 import type {
+  AiPassKey,
   Annotation,
   AnnotationKind,
   TeamConflictChoice,
@@ -23,6 +24,7 @@ import type { DocService, TeamServiceContext } from './context.js'
 import { supplyDirOf } from './agentSupply.js'
 import { changesSupplyDirOf } from './agentSupplyChanges.js'
 import { normalizeTeamRepoPath, TeamGitClient } from './teamGit.js'
+import { AI_PASS_ORDER } from './passVersions.js'
 
 /**
  * 团队同步服务：状态查询、init、手动同步状态机、冲突解析、本机→团队迁移。
@@ -426,6 +428,11 @@ function countSupply(dir: string): number {
   return listSupplyJsonFiles(dir).length
 }
 
+/** 所有 pass 的版本条数合计（pass 白名单来自装配顺序，避免扫描任意目录名） */
+function countPassVersions(storage: { listPassVersions: (pass: AiPassKey) => unknown[] }): number {
+  return AI_PASS_ORDER.reduce((sum, pass) => sum + storage.listPassVersions(pass).length, 0)
+}
+
 /** GET /api/team/migration-preview：本机/团队数量与同名不同内容的供给文件 */
 export function previewTeamMigration(service: DocService): TeamMigrationPreview {
   const team = teamContextOf(service)
@@ -435,12 +442,14 @@ export function previewTeamMigration(service: DocService): TeamMigrationPreview 
   const localCounts: TeamMigrationCounts = {
     annotations: local.listAnnotations().length,
     snapshots: local.listInsightSnapshots().length,
+    passVersions: countPassVersions(local),
     insightSupply: countSupply(dirs.localInsight),
     changesSupply: countSupply(dirs.localChanges)
   }
   const teamCounts: TeamMigrationCounts = {
     annotations: team.storage.listAnnotations().length,
     snapshots: team.storage.listInsightSnapshots().length,
+    passVersions: countPassVersions(team.storage),
     insightSupply: countSupply(dirs.teamInsight),
     changesSupply: countSupply(dirs.teamChanges)
   }
@@ -487,7 +496,7 @@ function copySupplyFiles(
 }
 
 /**
- * POST /api/team/migrate：批注/快照走 TeamStorage.migrateFromLocal（只复制缺失 ID，不覆盖），
+ * POST /api/team/migrate：批注/快照/AI pass 版本走 TeamStorage.migrateFromLocal（只复制缺失 ID，不覆盖），
  * 供给文件按文件名复制（相同跳过、不同记冲突），不删除本机数据、不写索引。
  */
 export function runTeamMigration(service: DocService): TeamMigrationRunResult {
@@ -499,6 +508,7 @@ export function runTeamMigration(service: DocService): TeamMigrationRunResult {
   return {
     annotations: migrated.annotations,
     snapshots: migrated.snapshots,
+    passVersions: migrated.passVersions,
     supply: {
       copied: insight.copied + changes.copied,
       skipped: insight.skipped + changes.skipped,

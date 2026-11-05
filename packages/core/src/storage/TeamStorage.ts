@@ -76,6 +76,8 @@ export interface TeamMigrationResult {
 export interface TeamMigrationSummary {
   annotations: TeamMigrationResult
   snapshots: TeamMigrationResult
+  /** AI pass 独立版本（所有 pass 合计；conflicts 为版本 ID） */
+  passVersions: TeamMigrationResult
 }
 
 const TARGET_TYPES: readonly AnnotationTargetType[] = ['function', 'file', 'module', 'call']
@@ -330,8 +332,9 @@ export class TeamStorage implements StorageAdapter {
     this.assertManagedDirectoriesSafe()
     // 先校验 manifest 再建子目录：projectKey 不匹配/损坏时不在错误仓库里留垃圾
     this.loadOrCreateManifest()
-    // passVersions 不在此预建：服务端 team init 的「可接管目录」白名单尚未包含它（P5 接入同步路径时统一），
-    // 预建会让 `POST /api/team/init` 把空版本目录误判为非 AutoDoc 数据；改为首次写入时按需创建。
+    // passVersions 不在此预建：大多数项目从不产生 pass 版本，预建空目录只会制造无意义的 Git 变更；
+    // 目录按需创建（addPassVersion / migrateFromLocal），init 仍通过 assertManagedDirectoriesSafe
+    // 校验它「若已存在」时的符号链接与 containment。
     for (const dir of [
       this.annotationsDir,
       this.insightHistoryDir,
@@ -1076,7 +1079,7 @@ export class TeamStorage implements StorageAdapter {
   /* ------------------------- 本机 → 团队迁移 ------------------------- */
 
   /**
-   * 把本机批注/快照按 ID 复制到团队仓库：
+   * 把本机批注/快照/AI pass 版本按 ID 复制到团队仓库：
    * - 团队文件不存在 → 复制；
    * - 已存在且内容完全相同 → skipped；
    * - 已存在但内容不同 / 团队文件损坏 / ID 非法 → 不覆盖，计入 conflicts（列出 ID）。
@@ -1089,6 +1092,7 @@ export class TeamStorage implements StorageAdapter {
     this.ensureInit()
     const annotations: TeamMigrationResult = { copied: 0, skipped: 0, conflicts: [] }
     const snapshots: TeamMigrationResult = { copied: 0, skipped: 0, conflicts: [] }
+    const passVersions: TeamMigrationResult = { copied: 0, skipped: 0, conflicts: [] }
 
     for (const annotation of this.local.listAnnotations()) {
       if (!isSafeTeamFileId(annotation.id)) {
@@ -1142,6 +1146,38 @@ export class TeamStorage implements StorageAdapter {
       }
     }
 
-    return { annotations, snapshots }
+    // AI pass 版本：pass 名参与路径，必须逐个白名单 pass 枚举本机版本；
+    // 激活指针属本机状态，不迁移。相同内容跳过、不同记冲突，绝不覆盖团队已有版本。
+    for (const pass of AI_PASS_KEYS) {
+      for (const meta of this.local.listPassVersions(pass)) {
+        const id = meta.id
+        if (!isSafeTeamFileId(id)) {
+          console.warn(`[autodoc] 迁移跳过 ID 非法的 Agent pass 版本：${id}`)
+          passVersions.conflicts.push(id)
+          continue
+        }
+        const version = this.local.getPassVersion(id)
+        // 载荷缺失/损坏，或 pass 与枚举不符（异常数据）：交用户处理，不伪造
+        if (!version || version.pass !== pass) {
+          console.warn(`[autodoc] 迁移跳过载荷不可用的 Agent pass 版本：${id}`)
+          passVersions.conflicts.push(id)
+          continue
+        }
+        const path = this.passVersionPath(pass, id)
+        if (!existsSync(path)) {
+          this.writeJsonFile(path, version)
+          passVersions.copied++
+          continue
+        }
+        const existing = this.readTeamJson(path, 'pass 版本', isPassVersionRecord)
+        if (existing && canonicalForCompare(existing) === canonicalForCompare(version)) {
+          passVersions.skipped++
+        } else {
+          passVersions.conflicts.push(id)
+        }
+      }
+    }
+
+    return { annotations, snapshots, passVersions }
   }
 }

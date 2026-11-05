@@ -11,6 +11,7 @@ import {
   initGit,
   makeService,
   writeAnnotation,
+  writePassVersion,
   writeSnapshot,
   writeSupply
 } from './teamGitTestUtils.js'
@@ -57,16 +58,31 @@ describe('TeamGitClient：路径与初始化防护', () => {
       'supply/insight/categories.qoder.json'
     )
     expect(normalizeTeamRepoPath('insightHistory/s1.json')).toBe('insightHistory/s1.json')
+    expect(normalizeTeamRepoPath('passVersions/partition/v1.json')).toBe(
+      'passVersions/partition/v1.json'
+    )
+    // passVersions 同样拒绝穿越/未知 pass 段之外的非法形态
+    for (const bad of [
+      'passVersions/../evil.json',
+      'passVersions/partition/../evil.json',
+      'passVersions//v1.json',
+      'passVersions/CON/v1.json'
+    ]) {
+      expect(normalizeTeamRepoPath(bad)).toBeNull()
+    }
   })
 
-  it('addPaths / showVersion 拒绝路径穿越', () => {
+  it('addPaths / showVersion 拒绝路径穿越（含 passVersions）', () => {
     const dir = freshDir()
     initGit(dir, 'Alice')
     const client = new TeamGitClient(dir)
     expect(client.addPaths(['../evil.json']).ok).toBe(false)
     expect(client.addPaths(['../evil.json']).reason).toBe('path')
+    expect(client.addPaths(['passVersions/../evil.json']).ok).toBe(false)
     expect(client.showVersion('../evil.json', 'local').ok).toBe(false)
+    expect(client.showVersion('passVersions/partition/../../evil.json', 'local').ok).toBe(false)
     expect(client.removePath('../../evil.json').ok).toBe(false)
+    expect(client.removePath('passVersions/../evil.json').ok).toBe(false)
   })
 
   it('initRepo：目录含非 AutoDoc 文件时拒绝接管；空目录 git init -b main', () => {
@@ -82,6 +98,14 @@ describe('TeamGitClient：路径与初始化防护', () => {
     const client = new TeamGitClient(emptyDir)
     expect(client.initRepo().ok).toBe(true)
     expect(client.currentBranch()).toBe('main')
+
+    // 已含 passVersions/ 的目录属于可接管范围（旧团队仓库没有该目录同样正常）
+    const versionDir = freshDir()
+    writePassVersion(versionDir, 'partition', 'v1')
+    const versionClient = new TeamGitClient(versionDir)
+    const adopted = versionClient.initRepo()
+    expect(adopted.ok).toBe(true)
+    expect(existsSync(join(versionDir, 'passVersions', 'partition', 'v1.json'))).toBe(true)
   })
 
   it('initRepo：配置 remote 与已有 origin 不同时拒绝覆盖', () => {
@@ -117,6 +141,44 @@ describe('同步状态机：真实 bare remote + 双 clone', () => {
     expect(existsSync(join((b.team!).root, 'annotations', 'a1.json'))).toBe(true)
     expect(getTeamStatus(a).ahead).toBe(0)
     expect(getTeamStatus(a).behind).toBe(0)
+  })
+
+  it('passVersions：同步提交只走已知路径，push 后另一克隆可见', () => {
+    const { a, b, aRoot, bRoot, remote } = createPair('passvers')
+    writePassVersion(aRoot, 'partition', 'pv1', 'A 划分')
+    const syncA = syncTeam(a)
+    expect(syncA.ok).toBe(true)
+    expect(syncA.committed).toBe(true)
+    expect(syncA.pushed).toBe(true)
+    expect(git(remote, ['show', 'main:passVersions/partition/pv1.json'])).toContain('A 划分')
+    // 团队目录内改动计入 dirty；提交后清零
+    expect(getTeamStatus(a).dirty).toBe(false)
+
+    const syncB = syncTeam(b)
+    expect(syncB.ok).toBe(true)
+    expect(existsSync(join(bRoot, 'passVersions', 'partition', 'pv1.json'))).toBe(true)
+    expect(getTeamStatus(b).dirty).toBe(false)
+  })
+
+  it('passVersions 冲突：kind=passVersion，不能 both，选远端后内容一致', () => {
+    const pair = createPair('passvers-conflict')
+    writePassVersion(pair.aRoot, 'partition', 'pv1', 'A 划分')
+    expect(syncTeam(pair.a).ok).toBe(true)
+    writePassVersion(pair.bRoot, 'partition', 'pv1', 'B 划分')
+    const conflicted = syncTeam(pair.b)
+    expect(conflicted.ok).toBe(false)
+    expect(conflicted.conflicts).toHaveLength(1)
+    expect(conflicted.conflicts![0].kind).toBe('passVersion')
+    expect(conflicted.conflicts![0].canKeepBoth).toBe(false)
+    expect(conflicted.conflicts![0].localSummary).toContain('B 划分')
+    expect(conflicted.conflicts![0].remoteSummary).toContain('A 划分')
+
+    const status = resolveTeamConflict(pair.b, 'passVersions/partition/pv1.json', 'remote')
+    expect(status.conflicts).toHaveLength(0)
+    const content = JSON.parse(
+      readFileSync(join(pair.bRoot, 'passVersions', 'partition', 'pv1.json'), 'utf-8')
+    ) as { value: { summary: string } }
+    expect(content.value.summary).toBe('A 划分')
   })
 
   it('批注冲突 both：原文件保留本地，远端版本生成新 ID 副本并推送', () => {

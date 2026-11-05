@@ -9,6 +9,8 @@
 - 已被 AGENTS.md 沉淀为硬规则的教训，在本文件保留一条链接即可，不重复展开。
 
 ## 避坑清单（快速扫描）
+- [ ] 给团队仓库新增托管顶层目录（如 `passVersions`）要同时改 `TEAM_TOP_LEVEL`、`TEAM_MANAGED_DIRS`、`commitKnownPaths` 的 `knownPaths`、`teamConflictKindOf`；TeamStorage 的「非空且无 manifest 拒绝接管」是另一层规则，别用 client `initRepo` 通过就断言路由可用（P5）。
+- [ ] 迁移计数/冲突类型是共享固定形状：加一类会连带前端 `Record` 文案、`counts()` 预设、总数与行索引断言；改前先 grep 所有构造点（P5）。
 - [ ] 「单 pass 重跑不归档里程碑」的判定不能把 `forcePartition` 算进局部：forcePartition 仍属全量归档路径；归纳条件写成「点名 passes 且不足九个且非 force 且非 forcePartition」才不归档（P3 归档门控）。
 - [ ] 路由响应新增字段后，旧用例里 `expect(res.json()).toEqual({...})` 会精确失败：扩响应时同步更新既有断言（如快照删除响应 + `removedVersions`），别误判为新回归（P3）。
 - [ ] 改 `packages/shared-types` 后同样要先 `pnpm --filter @autodoc/shared-types build` 再 typecheck/test server：server 解析 `dist/`，否则新类型报「no exported member」（P3）。
@@ -74,6 +76,12 @@
 ---
 
 ## 教训条目
+
+### 2026-11-06 · 团队同步接入 passVersions 时的清单分散与摘要口径（P5）
+- **现象**：只把 `passVersions` 加进 `TEAM_TOP_LEVEL` 后，同步提交仍可能漏掉版本目录；迁移计数加字段后 web 用例因 `counts()` 预设缺键、行索引变化而变红；pass 版本冲突两侧摘要看起来完全一样。
+- **根因**：团队路径的「可接管 / 托管 / 提交 / 冲突分类」分散在四个常量与方法里，没有单一真源；`TeamConflictKind` 与 `TeamMigrationCounts` 是被前端 `Record`/计数函数和测试预设共同消费的固定形状；版本 `value` 形状按 pass 各自解释，摘要若只取 `compat` 无法区分两侧。
+- **正确做法**：新增托管目录时四处一起改，并补 dirty/init/commit 用例；迁移按 `AI_PASS_KEYS` 逐 pass 枚举（StorageAdapter 没有跨 pass 列表，不能扫目录名绕过白名单）；版本冲突摘要取通用的 `value.summary`（存在时），不解释具体 pass 载荷；类型扩字段后先 grep `changesSupply:`、`TeamConflictKind` 构造点再改测试。
+- **预防措施**：`TeamStorage.migrateFromLocal` 的 copied/skipped/conflicts 三态要对每个 pass 都成立；第二次迁移必须全 skipped，否则比较归一漏字段。
 
 ### 2026-11-06 · pass 版本优先与 chunk 增量共用刷新路径时的三个坑（P2）
 - **现象**：把九个 KEY pass 改成「版本优先」后，10 个既有 I2/flow 用例变红：chunk 增量统计恒 0、PROMPT_VERSION bump 不触发重跑、篡改 `flows:tree` 后 loadInsight 仍出树。

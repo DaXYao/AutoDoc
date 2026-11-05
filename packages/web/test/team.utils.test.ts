@@ -93,6 +93,7 @@ function counts(patch: Partial<TeamMigrationCounts> = {}): TeamMigrationCounts {
   return {
     annotations: 0,
     snapshots: 0,
+    passVersions: 0,
     insightSupply: 0,
     changesSupply: 0,
     ...patch
@@ -212,6 +213,7 @@ describe('团队冲突展示', () => {
     expect(TEAM_CONFLICT_KIND_LABELS.annotation).toBe('批注')
     expect(TEAM_CONFLICT_KIND_LABELS.snapshot).toBe('洞察快照')
     expect(TEAM_CONFLICT_KIND_LABELS.supply).toBe('Agent 供给')
+    expect(TEAM_CONFLICT_KIND_LABELS.passVersion).toBe('AI Pass 版本')
     expect(TEAM_CONFLICT_KIND_LABELS.manifest).toBe('仓库清单')
     expect(TEAM_CONFLICT_KIND_LABELS.other).toBe('其它文件')
   })
@@ -412,27 +414,36 @@ describe('团队迁移入口与结果摘要', () => {
     expect(shouldOfferTeamMigration(null)).toBe(false)
   })
 
-  it('总数统计覆盖四类数据', () => {
+  it('总数统计覆盖五类数据（含 AI pass 版本）', () => {
     const preview = migrationPreview(
-      counts({ annotations: 1, snapshots: 2, insightSupply: 3, changesSupply: 4 }),
+      counts({
+        annotations: 1,
+        snapshots: 2,
+        passVersions: 3,
+        insightSupply: 4,
+        changesSupply: 5
+      }),
       counts({ annotations: 5 })
     )
-    expect(teamMigrationCountsTotal(preview.local)).toBe(10)
-    expect(teamMigrationLocalTotal(preview)).toBe(10)
+    expect(teamMigrationCountsTotal(preview.local)).toBe(15)
+    expect(teamMigrationLocalTotal(preview)).toBe(15)
     expect(teamMigrationTeamTotal(preview)).toBe(5)
   })
 
-  it('迁移结果按批注/快照/供给分列，冲突文件不覆盖并列出', () => {
+  it('迁移结果按批注/快照/版本/供给分列，冲突文件不覆盖并列出', () => {
     const summary = summarizeTeamMigration({
       annotations: { copied: 1, skipped: 0, conflicts: [] },
       snapshots: { copied: 0, skipped: 2, conflicts: ['snap-old'] },
+      passVersions: { copied: 2, skipped: 1, conflicts: ['pv-old'] },
       supply: { copied: 3, skipped: 1, conflicts: ['supply/insight/a.codex.json'] }
     })
-    expect(summary.copied).toBe(4)
-    expect(summary.skipped).toBe(3)
-    expect(summary.conflicts).toHaveLength(2)
+    expect(summary.copied).toBe(6)
+    expect(summary.skipped).toBe(4)
+    expect(summary.conflicts).toHaveLength(3)
     expect(summary.lines[0]).toContain('批注')
-    expect(summary.lines[2]).toContain('供给')
+    expect(summary.lines[2]).toContain('Pass 版本')
+    expect(summary.lines[3]).toContain('供给')
+    expect(summary.lines.join('\n')).toContain('pv-old')
     expect(summary.lines.join('\n')).toContain('supply/insight/a.codex.json')
   })
 })
