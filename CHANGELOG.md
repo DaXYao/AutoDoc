@@ -2,6 +2,17 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-06 · KEY pass 版本驱动装配与单 pass 重跑（多阶段 P2）· server+docs
+
+- **新模块** `packages/server/src/passVersions.ts`：`compatForPass(pass, graph)`（全部 pass 必填 `graphFingerprint`；narratives 加 `partitionBasis=flowsBasis`；flows 加 `partitionBasis=flowsBasis` + `coreTableHash=flowTreeBasis`，均复用 flow.ts 既有口径）、`isVersionCompatible`（逐字段比较，缺失必需字段即不兼容）、`pickPassVersion`（激活兼容优先，否则最新兼容，都没有=null）、`applyPassValue`（九种信封各自复用原 apply 逻辑，apply 函数从 insight.ts 迁入本模块，保持单向依赖）、`writePassVersion`（与激活/最新版本深比较 value+compat，一致则复用不新增；新增时置激活，savedAt 严格递增）、`invalidatePassDependents`（partition → `flows:tree`/`flows:roots:*`/`flows:node:*`/`narratives:*`；coreJudgment → flows 三类键；旧版本记录不删）。
+- **buildKeyInsight（读路径）**：九个 pass 逐一「版本优先 → 旧缓存兜底 → 静态基线」，narratives/flows 的 compat 在 partition 应用后计算；新增可选 `storage`（loadInsight 注入 `service.storage`），绝不发 LLM 请求；跨指纹复用版本时由 `passStatus` 补 `aiStatus`，flows/blocks 状态仍按当前树/chunk 重算。
+- **refreshInsightAI（生成路径）**：新增 `passes?: AiPassKey[]`（空/缺省=常规全量；`force=true` 仍等价九段全强制，`forcePartition` 仍只强制 partition）。点名时未选中的 pass 只复用版本/旧缓存、零请求，无可用结果则标 skipped；per函数 pass 的刷新仍走 chunk 增量（点名重跑也保留 pass 内增量），装配路径才严格版本优先。成功后按当前 compat 写版本并置激活；categories/keySteps/blocks 的 chunk 缓存继续保留；降级产物（failedBatches>0、flows 非 AI 成功）不写版本。返回值新增 `passRun: {reused, rerun, skipped}` 概览（路由未改）。
+- **测试**：server 674→684（`test/passVersions.test.ts`：激活优先/激活不兼容退化/全不兼容、缺失必需字段判不兼容、装配零 chat 且零新增版本、无版本时旧缓存兜底、`passes:['categories']` 只发 categories 请求且其余版本数不变、产出相同不新增版本、partition 重跑清 flows+narratives 缓存且旧版本仍在但不兼容、coreJudgment 重跑清 flows 不动 narratives）。三个旧缓存守卫用例（flow 两例、internalSteps 一例）先清空 pass 版本以保留旧缓存路径覆盖。
+- **文档**：`docs/LESSONS_LEARNED.md` 增补「版本优先与 chunk 增量共存」的三个坑与避坑清单条目。
+- **校验**：`pnpm test`（core 443 / server 684 / web 345，共 1472）、`pnpm lint`、`pnpm build` 全绿。
+- **边界**：未改前端、路由、团队同步、里程碑引用写入、Agent 管线与 changes 侧；担保仍为整份装配后附带、未写入版本。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-05 · AI pass 独立版本：模型与存储层（多阶段 P1）· shared-types+core+docs
 
 - **动机**：九个 KEY AI pass 需要各自独立重跑、各自保留版本，并能（在兼容键满足时）跨时期搭配；现有整份洞察快照继续作为里程碑共存。

@@ -16,6 +16,7 @@ vi.mock('../src/ai.js', async (importActual) => {
 })
 import { deepseekChat } from '../src/ai.js'
 import { aiInternalSteps, loadInsight, refreshInsightAI } from '../src/insight.js'
+import { AI_PASS_ORDER } from '../src/passVersions.js'
 
 /* ------------------------- fixture ------------------------- */
 
@@ -343,6 +344,13 @@ async function makeService(dir: string, fns: FunctionDoc[]): Promise<DocService>
   }
 }
 
+/** P2：清空 pass 版本，模拟「未产生任何独立版本」的存量安装（只考旧 chunk 缓存路径） */
+function clearPassVersions(service: DocService): void {
+  for (const pass of AI_PASS_ORDER) {
+    for (const meta of service.storage.listPassVersions(pass)) service.storage.deletePassVersion(meta.id)
+  }
+}
+
 /** blocks pass 的 prompt 识别词（其余 pass 一律回 '{}'，各按既有语义降级，不影响 blocks 断言） */
 const BLOCKS_PROMPT_MARK = '归一为有序「内部步骤」'
 
@@ -495,6 +503,9 @@ describe('refreshInsightAI：内部步骤管线集成', () => {
       ],
       fnB: [{ blockIndexes: [1], title: '全部越界', kind: 'step' }]
     })
+
+    // P2：清空版本 → 走旧 chunk 缓存兜底路径（版本路径由 compat 保证，本就是另一条守卫）
+    clearPassVersions(service)
 
     const { insight } = loadInsight(service)
     expect(insight.functions.fnA.internalSteps).toEqual([

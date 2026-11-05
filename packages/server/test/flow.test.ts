@@ -38,6 +38,7 @@ vi.mock('../src/ai.js', async (importActual) => {
 })
 import { deepseekChat, salvageJsonList, type ChatReply } from '../src/ai.js'
 import { flowsStatusOf, loadInsight, refreshInsightAI } from '../src/insight.js'
+import { AI_PASS_ORDER } from '../src/passVersions.js'
 
 /** 伪 chat 回复（deepseekChat 现返回 ChatReply）；truncated=true 模拟 finish_reason=length */
 function reply(content: string, truncated = false): ChatReply {
@@ -700,6 +701,13 @@ async function makeService(tmp: string): Promise<DocService> {
     storage,
     files: fixtureFiles(),
     generatedAt: new Date().toISOString()
+  }
+}
+
+/** P2：清空 pass 版本，模拟「未产生任何独立版本」的存量安装（只考旧缓存路径的守卫） */
+function clearPassVersions(service: DocService): void {
+  for (const pass of AI_PASS_ORDER) {
+    for (const meta of service.storage.listPassVersions(pass)) service.storage.deletePassVersion(meta.id)
   }
 }
 
@@ -1437,6 +1445,8 @@ describe('M-R1：basis 不符忽略旧整树 + A：生成期间旧树可读', ()
 
     // 篡改快照的 basis 为不匹配值（模拟划分变化后旧快照）
     cache.set(fp, 'flows:tree', { ...snap, basis: 'deadbeef' })
+    // P2：清空版本 → 走旧缓存兜底路径（版本路径的 basis 由 compat 保证，本就是另一条守卫）
+    clearPassVersions(service)
 
     // loadInsight 应忽略该快照（basis 不符）
     const loaded = loadInsight(service)
@@ -1822,6 +1832,7 @@ describe('M1：采纳划分建议后 loadInsight(\'\') 树仍可见且同源', (
     // 篡改 basis 为不匹配值（模拟划分变更但树未重生成）
     const snap = cache.get<Record<string, unknown>>(fp, 'flows:tree')!
     cache.set(fp, 'flows:tree', { ...snap, basis: 'stale0000' })
+    clearPassVersions(service)
     const loaded = loadInsight(service, '')
     expect(loaded.insight.flows ?? []).toHaveLength(0)
     expect(loaded.insight.aiStatus?.flows).toBe('skipped')
