@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { AiChunkPass, AiChunkStats, AnnotationKind, AnnotationTargetType, AgentSupplyResponse, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, InsightSource, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse, TeamConflictChoice } from '@autodoc/shared-types'
+import type { AiChunkPass, AiChunkStats, AiPassKey, AiPassVersionListResponse, AnnotationKind, AnnotationTargetType, AgentSupplyResponse, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, InsightSource, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse, TeamConflictChoice } from '@autodoc/shared-types'
 import { inspectParseCache, resolveShowRecent } from '@autodoc/core'
 import { regenerate, type DocService } from './context.js'
 import { pickFolder } from './pickFolder.js'
@@ -47,6 +47,15 @@ import {
 import { collectChangesSupplyLight, resolveChangesAgentSemantics, scopeToSupplyId } from './agentSupplyChanges.js'
 import { getDeepSeekConfig } from './env.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
+import { AiCache } from './aiCache.js'
+import {
+  AI_PASS_ORDER,
+  checkMilestoneVersions,
+  compatForPass,
+  compatMismatchReason,
+  invalidatePassDependents,
+  milestoneRefsByVersion
+} from './passVersions.js'
 
 export interface BuildAppOptions {
   manager: ProjectManager
@@ -67,6 +76,16 @@ function parseInsightSource(raw: unknown): InsightSource | null {
 /** 快照所属管线：缺省 = 开发期合并版（legacy），在两套历史里只读展示 */
 function snapshotPipelineOf(meta: { pipeline?: InsightSource }): InsightSource | 'legacy' {
   return meta.pipeline === 'key' || meta.pipeline === 'agent' ? meta.pipeline : 'legacy'
+}
+
+/** P3：查询/请求体里的 AI pass 名：必须在装配顺序内（非法 400，不静默回退） */
+function parseAiPass(raw: unknown): AiPassKey | null {
+  return AI_PASS_ORDER.find((p) => p === raw) ?? null
+}
+
+/** P3：pass 版本依赖作废用的缓存实例（与 refreshInsightAI / loadInsight 同口径） */
+function aiCacheOf(service: DocService): AiCache {
+  return new AiCache(dirname(service.storage.dataPath))
 }
 
 /**
@@ -301,16 +320,113 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   })
 
   // 按需生成 AI 洞察（force=true 忽略缓存）；无 key/失败降级为静态
+  // P3：body.passes 支持只重跑指定 pass（单 pass 局部重跑不归档整份里程碑快照）。
   app.post('/api/insight/ai', async (req, reply) => {
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
-    const body = (req.body ?? {}) as { force?: unknown; feedback?: unknown }
-    const { insight, aiChunkStats } = await refreshInsightAI(service, {
+    const body = (req.body ?? {}) as { force?: unknown; feedback?: unknown; passes?: unknown }
+    let passes: AiPassKey[] | undefined
+    if (body.passes !== undefined) {
+      if (!Array.isArray(body.passes)) {
+        return reply.code(400).send({ error: 'passes 必须为字符串数组' })
+      }
+      const picked: AiPassKey[] = []
+      for (const raw of body.passes) {
+        const pass = parseAiPass(raw)
+        if (!pass) {
+          return reply.code(400).send({
+            error: `未知 pass：${String(raw)}（可选：${AI_PASS_ORDER.join('、')}）`
+          })
+        }
+        if (!picked.includes(pass)) picked.push(pass)
+      }
+      passes = picked.length > 0 ? picked : undefined
+    }
+    const { insight, aiChunkStats, passRun } = await refreshInsightAI(service, {
       force: body.force === true,
-      feedback: typeof body.feedback === 'string' ? body.feedback : ''
+      feedback: typeof body.feedback === 'string' ? body.feedback : '',
+      passes
     })
-    return toInsightResponse(service, insight, aiChunkStats)
+    return { ...toInsightResponse(service, insight, aiChunkStats), passRun }
+  })
+
+  // P3：pass 独立版本列表（只读）：当前图下的兼容状态 / 是否激活 / 被哪些里程碑引用
+  app.get('/api/insight/ai/versions', async (req, reply) => {
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const { pass: rawPass } = req.query as { pass?: string }
+    const pass = parseAiPass(rawPass)
+    if (!pass) {
+      return reply.code(400).send({ error: `pass 必须为：${AI_PASS_ORDER.join('、')}` })
+    }
+    // 当前图：忽略整份快照指针，只装配静态图 + 版本/缓存（绝不发 AI 请求）
+    const { graph } = loadInsight(service, '', {
+      ignoreSnapshot: true,
+      source: 'key',
+      guarantees: false
+    })
+    const compat = compatForPass(pass, graph)
+    const activeId = service.storage.getActivePassVersion(pass)
+    const refs = milestoneRefsByVersion(service.storage.listInsightSnapshots(), pass)
+    const body: AiPassVersionListResponse = {
+      pass,
+      activeId,
+      versions: service.storage.listPassVersions(pass).map((meta) => {
+        const reason = compatMismatchReason(meta, compat)
+        return {
+          ...meta,
+          compatible: reason === null,
+          ...(reason ? { compatibleReason: reason } : {}),
+          active: meta.id === activeId,
+          milestoneIds: refs.get(meta.id) ?? []
+        }
+      })
+    }
+    return body
+  })
+
+  // P3：单 pass 回滚 = 切换激活版本；不兼容 400 + 原因；同时清整份指针（退出里程碑回滚态）
+  app.post<{ Params: { id: string } }>('/api/insight/ai/versions/:id/rollback', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const version = service.storage.getPassVersion(req.params.id)
+    if (!version) return reply.code(404).send({ error: `version not found: ${req.params.id}` })
+    const { graph } = loadInsight(service, '', {
+      ignoreSnapshot: true,
+      source: 'key',
+      guarantees: false
+    })
+    const reason = compatMismatchReason(version, compatForPass(version.pass, graph))
+    if (reason) return reply.code(400).send({ error: `版本与当前图谱不兼容：${reason}` })
+    service.storage.setActivePassVersion(version.pass, version.id)
+    // 单 pass 回滚后回到实时装配视图：整份里程碑指针不再生效
+    service.storage.setActiveInsightSnapshotId(null, 'key')
+    if (version.pass === 'partition' || version.pass === 'coreJudgment') {
+      invalidatePassDependents(aiCacheOf(service), graph, version.pass)
+    }
+    return { pass: version.pass, versionId: version.id }
+  })
+
+  // P3：删除 pass 版本：当前激活或被任一里程碑引用 → 400 + 原因；独立版本可删（204）
+  app.delete<{ Params: { id: string } }>('/api/insight/ai/versions/:id', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const service = manager.getActive()
+    if (!service) return reply.code(409).send({ error: 'no active project' })
+    const version = service.storage.getPassVersion(req.params.id)
+    if (!version) return reply.code(404).send({ error: `version not found: ${req.params.id}` })
+    if (service.storage.getActivePassVersion(version.pass) === version.id) {
+      return reply.code(400).send({ error: '当前激活版本不可删除，请先回滚到其它版本' })
+    }
+    const refs = milestoneRefsByVersion(service.storage.listInsightSnapshots(), version.pass).get(version.id) ?? []
+    if (refs.length > 0) {
+      return reply.code(400).send({ error: `该版本被里程碑快照引用，不可删除：${refs.join('、')}` })
+    }
+    if (!service.storage.deletePassVersion(version.id)) {
+      return reply.code(404).send({ error: `version not found: ${req.params.id}` })
+    }
+    return reply.code(204).send()
   })
 
   // 按用户建议重新划分模块（仅重生成划分，其余 AI 结果走缓存）
@@ -410,6 +526,44 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         error: `该快照属于 ${pipeline === 'key' ? 'KEY' : 'Agent'} 管线，不能回滚到当前 ${source === 'key' ? 'KEY' : 'Agent'} 视图`
       })
     }
+    // P3：里程碑快照（带 passVersionIds）→ 批量把各 pass 切回该里程碑记录的版本。
+    // 先整体校验（全部存在且兼容）再落指针，避免半切状态；完成后清整份指针回到实时装配视图。
+    const passVersionIds = snap.passVersionIds ?? {}
+    const refPasses = AI_PASS_ORDER.filter((pass) => passVersionIds[pass])
+    if (refPasses.length > 0) {
+      if (source !== 'key') {
+        return reply.code(400).send({ error: 'pass 版本属于 KEY 管线，Agent 管线不支持里程碑版本回滚' })
+      }
+      const { graph } = loadInsight(service, '', {
+        ignoreSnapshot: true,
+        source: 'key',
+        guarantees: false
+      })
+      const check = checkMilestoneVersions(service.storage, graph, passVersionIds)
+      if (check.missing.length > 0) {
+        return reply.code(400).send({
+          error: `里程碑引用的版本已缺失：${check.missing.map((m) => `${m.pass}=${m.id}`).join('、')}`
+        })
+      }
+      if (check.incompatible.length > 0) {
+        return reply.code(400).send({
+          error: `里程碑引用的版本与当前图谱不兼容：${check.incompatible
+            .map((i) => `${i.pass}（${i.reason}）`)
+            .join('；')}`
+        })
+      }
+      for (const pass of refPasses) {
+        service.storage.setActivePassVersion(pass, passVersionIds[pass] as string)
+      }
+      service.storage.setActiveInsightSnapshotId(null, source)
+      const cache = aiCacheOf(service)
+      for (const pass of refPasses) {
+        if (pass === 'partition' || pass === 'coreJudgment') {
+          invalidatePassDependents(cache, graph, pass)
+        }
+      }
+      return { ok: true, activeId: null, passVersionIds }
+    }
     service.storage.setActiveInsightSnapshotId(req.params.id, source)
     return { ok: true, activeId: req.params.id }
   })
@@ -446,9 +600,26 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     const clearedActive =
       service.storage.getActiveInsightSnapshotId('key') === req.params.id ||
       service.storage.getActiveInsightSnapshotId('agent') === req.params.id
+    const snap = service.storage.getInsightSnapshot(req.params.id)
     const removed = service.storage.deleteInsightSnapshot(req.params.id)
     if (!removed) return reply.code(404).send({ error: `snapshot not found: ${req.params.id}` })
-    return { ok: true, clearedActive }
+    // P3：里程碑删除时连带清理「仅被该里程碑引用、非当前激活、且不被其它里程碑引用」的 pass 版本。
+    // 删除后重新扫描剩余快照的引用，其它里程碑仍在用的版本一律保留（用户数据不丢）。
+    const removedVersions: string[] = []
+    const refIds = new Set(
+      Object.values(snap?.passVersionIds ?? {}).filter((id): id is string => typeof id === 'string')
+    )
+    if (refIds.size > 0) {
+      const stillRefs = milestoneRefsByVersion(service.storage.listInsightSnapshots())
+      for (const id of refIds) {
+        if (stillRefs.has(id)) continue
+        const version = service.storage.getPassVersion(id)
+        if (!version) continue
+        if (service.storage.getActivePassVersion(version.pass) === id) continue
+        if (service.storage.deletePassVersion(id)) removedVersions.push(id)
+      }
+    }
+    return { ok: true, clearedActive, removedVersions }
   })
 
   // 清除指定管线的生效快照，回到实时计算视图（写操作，readOnly 403）
@@ -460,6 +631,10 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     const source = parseInsightSource(rawSource)
     if (!source) return reply.code(400).send({ error: `source 必须为 key 或 agent：${rawSource}` })
     service.storage.setActiveInsightSnapshotId(null, source)
+    // P3：KEY 管线「回到实时」同时清空各 pass 激活指针 → 回到「最新兼容版本」的实时装配
+    if (source === 'key') {
+      for (const pass of AI_PASS_ORDER) service.storage.setActivePassVersion(pass, null)
+    }
     return { ok: true, activeId: null }
   })
 

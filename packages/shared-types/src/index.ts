@@ -723,6 +723,18 @@ export interface InsightResponse extends ProjectInsight {
   parseStats?: IncrementalParseStats
   /** 最近一次 refreshInsightAI 的 AI chunk 增量统计（AI 未启用/未跑过时缺省） */
   aiChunkStats?: Record<AiChunkPass, AiChunkStats>
+  /** P3：本次 POST /api/insight/ai 的每 pass 概览（仅当次响应附带，不持久化） */
+  passRun?: AiPassRunOverview
+}
+
+/** P3：一次 KEY 刷新中各 pass 的处理方式概览（重跑/复用/跳过） */
+export interface AiPassRunOverview {
+  /** 复用了激活/最新兼容版本或旧缓存（未发该 pass 的请求） */
+  reused: AiPassKey[]
+  /** 本次产出了新版本（或明确点名重跑且成功） */
+  rerun: AiPassKey[]
+  /** 明确点名 passes 时，未选中且无版本/缓存可复用 → 本轮跳过 */
+  skipped: AiPassKey[]
 }
 
 /* ------------------------- 历史 AI 洞察快照（H1） ------------------------- */
@@ -836,6 +848,27 @@ export interface AiPassVersionMeta {
   savedAt: string
   compat: PassCompatKey
   hasGuarantee: boolean
+}
+
+/** P3：版本列表条目 = 元信息 + 当前图下的兼容/激活/里程碑引用状态 */
+export interface AiPassVersionListItem extends AiPassVersionMeta {
+  /** 按当前图谱计算的兼容性（不兼容版本不可回滚，也不能被里程碑回滚选用） */
+  compatible: boolean
+  /** 不兼容原因（compatible=true 时缺省）；可直接展示给用户 */
+  compatibleReason?: string
+  /** 是否为该 pass 当前激活版本 */
+  active: boolean
+  /** 引用该版本的 KEY 管线里程碑快照 id 列表 */
+  milestoneIds: string[]
+}
+
+/** GET /api/insight/ai/versions 响应 */
+export interface AiPassVersionListResponse {
+  pass: AiPassKey
+  /** 该 pass 当前激活版本 id；null=未指定（取最新兼容版本） */
+  activeId: string | null
+  /** 新→旧 */
+  versions: AiPassVersionListItem[]
 }
 
 /**

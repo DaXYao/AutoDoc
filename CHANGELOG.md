@@ -2,6 +2,18 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-06 · pass 版本路由、里程碑版本引用与回滚/删除规则（多阶段 P3）· server+shared-types+docs
+
+- **路由（`app.ts`）**：`POST /api/insight/ai` 新增 `passes?: string[]`（按 `AI_PASS_ORDER` 校验非法 400、去重；响应附带 `passRun`）。新增 `GET /api/insight/ai/versions?pass=`（当前图兼容状态/原因、激活标记、KEY 里程碑引用）、`POST /api/insight/ai/versions/:id/rollback`（兼容校验 400、切激活、清整份指针、partition/coreJudgment 作废下游缓存）、`DELETE /api/insight/ai/versions/:id`（激活或被里程碑引用 400，独立版本 204）。
+- **里程碑归档**：`refreshInsightAI` 增 `archiveMilestone?`（缺省按「单 pass 局部重跑不归档」推导；全量 force / forcePartition / 常规刷新不变）；归档时经 `collectPassVersionIds` 写入 `passVersionIds`（各 pass 实际生效的激活/最新兼容版本）。
+- **整份快照回滚**：带 `passVersionIds` 的里程碑 → 先整体校验存在且兼容（缺失/不兼容 400 并列 pass 与原因）→ 逐个 `setActivePassVersion` → 清整份指针 → 作废 partition/coreJudgment 下游缓存；legacy/无引用快照保持原逻辑。`DELETE /api/insight/history/active`（KEY）同时清空所有 pass 激活指针。
+- **删除快照连带清理**：删除后重新扫描剩余 KEY 里程碑引用，只删「仅被该里程碑引用、非激活、非其它里程碑引用」的版本，响应增 `removedVersions`。
+- **共享类型**：`AiPassRunOverview`（`InsightResponse.passRun` 可选）、`AiPassVersionListItem` / `AiPassVersionListResponse`；已有字段语义不变。
+- **测试**：新增 `test/passVersionRoutes.test.ts`（12 项：非法 pass 400、列表兼容/激活/引用、单 pass 回滚 400/200、删除 400/204/404、里程碑批量回滚与不兼容 400、删除快照连带清理、回到实时清 pass 指针、readOnly 403）；`passVersions.test.ts` 增 3 项归档门控（force 含 passVersionIds、单 pass 不归档、九 pass 全量归档）。server 699 全绿。
+- **校验**：`pnpm --filter @autodoc/server test`、`pnpm lint`、`pnpm build` 全绿。
+- **边界**：未改前端（P4）、团队同步（P5）、Agent 管线与 changes 侧；版本列表/回滚 source 固定 KEY。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-06 · KEY pass 版本驱动装配与单 pass 重跑（多阶段 P2）· server+docs
 
 - **新模块** `packages/server/src/passVersions.ts`：`compatForPass(pass, graph)`（全部 pass 必填 `graphFingerprint`；narratives 加 `partitionBasis=flowsBasis`；flows 加 `partitionBasis=flowsBasis` + `coreTableHash=flowTreeBasis`，均复用 flow.ts 既有口径）、`isVersionCompatible`（逐字段比较，缺失必需字段即不兼容）、`pickPassVersion`（激活兼容优先，否则最新兼容，都没有=null）、`applyPassValue`（九种信封各自复用原 apply 逻辑，apply 函数从 insight.ts 迁入本模块，保持单向依赖）、`writePassVersion`（与激活/最新版本深比较 value+compat，一致则复用不新增；新增时置激活，savedAt 严格递增）、`invalidatePassDependents`（partition → `flows:tree`/`flows:roots:*`/`flows:node:*`/`narratives:*`；coreJudgment → flows 三类键；旧版本记录不删）。

@@ -4,6 +4,7 @@ import type {
   AiChunkPass,
   AiChunkStats,
   AiPassKey,
+  AiPassRunOverview,
   AiPassStatus,
   ExternalSymbolInfo,
   FlowNode,
@@ -39,7 +40,9 @@ import { collectWorkspacePackageNames } from './workspacePackages.js'
 import { isCategoryCandidate } from './categoryCandidates.js'
 import type { StorageAdapter } from '@autodoc/core'
 import {
+  AI_PASS_ORDER,
   applyPassValue,
+  collectPassVersionIds,
   compatForPass,
   indexTable,
   invalidatePassDependents,
@@ -1245,7 +1248,8 @@ export function saveInsightSnapshot(
   service: DocService,
   insight: ProjectInsight,
   graph: ProjectGraph,
-  trigger: InsightSnapshotTrigger
+  trigger: InsightSnapshotTrigger,
+  passVersionIds?: Partial<Record<AiPassKey, string>>
 ): InsightSnapshot | null {
   try {
     // 归档必须能反映来源：pipeline 决定 source；agent 管线另记生效 agent 标识
@@ -1263,6 +1267,7 @@ export function saveInsightSnapshot(
       source,
       pipeline: insight.pipeline,
       ...(agent ? { agent } : {}),
+      ...(passVersionIds && Object.keys(passVersionIds).length > 0 ? { passVersionIds } : {}),
       insight
     }
     service.storage.addInsightSnapshot(snapshot)
@@ -1285,18 +1290,11 @@ export interface InsightBundle {
   /** I2：per函数 AI pass 的文件级 chunk 增量统计（仅 refreshInsightAI 的 AI 启用路径返回；loadInsight 省略） */
   aiChunkStats?: Record<AiChunkPass, AiChunkStats>
   /** P2：本次刷新的每 pass 概览（重跑/复用/跳过），供路由层展示与 P3 单 pass 重跑反馈使用 */
-  passRun?: PassRunOverview
+  passRun?: AiPassRunOverview
 }
 
-/** P2：一次刷新中各 pass 的处理方式概览 */
-export interface PassRunOverview {
-  /** 复用了激活/最新兼容版本或旧缓存（未发该 pass 的请求） */
-  reused: AiPassKey[]
-  /** 本次产出了新版本（或明确点名重跑且成功） */
-  rerun: AiPassKey[]
-  /** 明确点名 passes 时，未选中且无版本/缓存可复用 → 本轮跳过 */
-  skipped: AiPassKey[]
-}
+/** P2/P3：一次刷新中各 pass 的处理方式概览（类型定义已迁至共享类型，供前端复用） */
+export type PassRunOverview = AiPassRunOverview
 
 export interface RefreshOptions {
   force?: boolean
@@ -1307,6 +1305,11 @@ export interface RefreshOptions {
    * 与 force 的区别：force=true 仍等价「九个 pass 全部强制重跑」的里程碑语义。
    */
   passes?: AiPassKey[]
+  /**
+   * P3：是否归档整份里程碑快照（缺省 true，保持既有「每次 AI 刷新入历史」语义）。
+   * 单 pass 局部重跑时路由传 false：pass 版本已各自留存，不再固化整份里程碑。
+   */
+  archiveMilestone?: boolean
 }
 
 export interface LoadInsightOptions {
@@ -2276,6 +2279,22 @@ export async function refreshInsightAI(
   // H1：AI 启用路径成功末尾保存一整份快照入历史，并清空回滚指针（activeId=null，回到实时视图；
   // !aiEnabled 的提前 return 分支不存）。trigger 区分普通刷新与按建议重新划分。
   // saveInsightSnapshot 内部 try/catch，失败不影响主流程。
-  saveInsightSnapshot(service, insight, graph, opts.forcePartition ? 'partition' : 'refresh')
+  // P3：单 pass 局部重跑不归档整份里程碑（各 pass 版本已独立留存）；全量 force / forcePartition
+  // 与常规刷新保持归档。里程碑记录组成它的各 pass 版本 id，供整份回滚批量切换。
+  const partialPassRun =
+    selected !== null &&
+    selected.size < AI_PASS_ORDER.length &&
+    !forcedAll &&
+    opts.forcePartition !== true
+  const archiveMilestone = opts.archiveMilestone ?? !partialPassRun
+  if (archiveMilestone) {
+    saveInsightSnapshot(
+      service,
+      insight,
+      graph,
+      opts.forcePartition ? 'partition' : 'refresh',
+      collectPassVersionIds(storage, graph)
+    )
+  }
   return { insight, graph, aiChunkStats, passRun }
 }

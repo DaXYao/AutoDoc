@@ -9,6 +9,9 @@
 - 已被 AGENTS.md 沉淀为硬规则的教训，在本文件保留一条链接即可，不重复展开。
 
 ## 避坑清单（快速扫描）
+- [ ] 「单 pass 重跑不归档里程碑」的判定不能把 `forcePartition` 算进局部：forcePartition 仍属全量归档路径；归纳条件写成「点名 passes 且不足九个且非 force 且非 forcePartition」才不归档（P3 归档门控）。
+- [ ] 路由响应新增字段后，旧用例里 `expect(res.json()).toEqual({...})` 会精确失败：扩响应时同步更新既有断言（如快照删除响应 + `removedVersions`），别误判为新回归（P3）。
+- [ ] 改 `packages/shared-types` 后同样要先 `pnpm --filter @autodoc/shared-types build` 再 typecheck/test server：server 解析 `dist/`，否则新类型报「no exported member」（P3）。
 - [ ] pass 版本与 chunk 缓存共存时先定清「刷新路径」与「装配路径」各认谁：per函数 pass 刷新仍以内容寻址 chunk 增量为准，版本只在装配/点名重跑时优先；降级产物（failedBatches>0、heuristic 兜底树）禁止写版本（P2 见 2026-11-06 条）。
 - [ ] 改 `packages/core` 后跑 `@autodoc/server` 测试/实跑前必须先 `pnpm --filter @autodoc/core build`：server 解析 `@autodoc/core` 到 `dist/`，vitest 读的是旧编译产物，会拿旧的存储行为断言新代码（P1 pass 版本存储时误判「team init 400」为自身回归）。
 - [ ] 静态导出站清理 URL `source` 要「删除该键」而不是「改写为 `meta.pipeline`」：后者让分享链接带上看似可切换的来源参数，误导静态站仍可切管线（双管线前端实跑发现）。

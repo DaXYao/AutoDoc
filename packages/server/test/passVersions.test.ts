@@ -15,7 +15,7 @@ vi.mock('../src/ai.js', async (importActual) => {
 import { deepseekChat } from '../src/ai.js'
 import { AiCache } from '../src/aiCache.js'
 import { loadInsight, refreshInsightAI } from '../src/insight.js'
-import { compatForPass, isVersionCompatible, pickPassVersion } from '../src/passVersions.js'
+import { compatForPass, isVersionCompatible, pickPassVersion, AI_PASS_ORDER } from '../src/passVersions.js'
 
 /* ------------------------- prompt 识别词 ------------------------- */
 
@@ -415,6 +415,48 @@ describe('P2：依赖作废', () => {
     // narratives 与核心判定无关，缓存保留
     expect(cacheAfter.get(fp, 'narratives:v2')).toEqual({ 'chain:1': { narrative: 'n' } })
     expect(pickPassVersion(service.storage, 'flows', compatForPass('flows', second.graph))).toBeNull()
+    service.storage.close()
+  })
+})
+
+/* ------------------------- 5. P3：里程碑归档与 passVersionIds ------------------------- */
+
+describe('P3：里程碑归档与 passVersionIds', () => {
+  it('全量 force 归档里程碑并记录各 pass 版本 id', async () => {
+    mockRouter()
+    const service = await makeService(freshDir(), [fileOf('src/a.ts', [mkFn('fnA')])])
+    await refreshInsightAI(service, { force: true })
+    const snaps = service.storage.listInsightSnapshots()
+    expect(snaps).toHaveLength(1)
+    const ids = snaps[0].passVersionIds ?? {}
+    expect(ids.partition).toBeTruthy()
+    expect(ids.categories).toBeTruthy()
+    expect(service.storage.getPassVersion(ids.categories as string)?.pass).toBe('categories')
+    // 里程碑记录的版本与当前激活版本一致（装配/回滚同一口径）
+    expect(service.storage.getActivePassVersion('categories')).toBe(ids.categories)
+    service.storage.close()
+  })
+
+  it('单 pass 重跑不归档；随后 force 恢复归档', async () => {
+    mockRouter()
+    const service = await makeService(freshDir(), [fileOf('src/a.ts', [mkFn('fnA')])])
+    await refreshInsightAI(service, { force: true })
+    const before = service.storage.listInsightSnapshots().length
+    clearChunkCache(service, 'categories')
+    await refreshInsightAI(service, { passes: ['categories'] })
+    expect(service.storage.listInsightSnapshots()).toHaveLength(before)
+    await refreshInsightAI(service, { force: true })
+    expect(service.storage.listInsightSnapshots()).toHaveLength(before + 1)
+    service.storage.close()
+  })
+
+  it('点名全部九个 pass 视为全量重跑 → 归档', async () => {
+    mockRouter()
+    const service = await makeService(freshDir(), [fileOf('src/a.ts', [mkFn('fnA')])])
+    await refreshInsightAI(service, { force: true })
+    const before = service.storage.listInsightSnapshots().length
+    await refreshInsightAI(service, { passes: [...AI_PASS_ORDER] })
+    expect(service.storage.listInsightSnapshots()).toHaveLength(before + 1)
     service.storage.close()
   })
 })

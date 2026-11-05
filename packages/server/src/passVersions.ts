@@ -8,6 +8,7 @@ import type {
   ExternalSymbolInfo,
   FlowNode,
   FunctionCategory,
+  InsightSnapshotMeta,
   InternalStep,
   PassCompatKey,
   ProjectInsight
@@ -148,6 +149,90 @@ export function pickPassVersion(
     if (version) return version
   }
   return null
+}
+
+/**
+ * 不兼容原因（可直接展示给用户）；兼容返回 null。
+ * 逐字段给出可读原因，避免前端只显示一个布尔值。
+ */
+export function compatMismatchReason(
+  version: { compat: PassCompatKey },
+  compat: PassCompatKey
+): string | null {
+  if (version.compat.graphFingerprint !== compat.graphFingerprint) {
+    return '图谱已变化（源码结构指纹不一致），该版本不能用于当前项目状态'
+  }
+  if (compat.partitionBasis !== undefined && version.compat.partitionBasis !== compat.partitionBasis) {
+    return '模块划分已变化（划分基线不一致），该版本依赖旧划分'
+  }
+  if (compat.coreTableHash !== undefined && version.compat.coreTableHash !== compat.coreTableHash) {
+    return '核心函数表已变化（核心表哈希不一致），该版本依赖旧核心判定'
+  }
+  return null
+}
+
+/**
+ * 收集当前图谱下各 pass 实际生效的版本 id（激活/最新兼容版本）。
+ * 用于里程碑快照记录「组成它的各 pass 版本」：回滚时按这份引用批量切回。
+ * 无版本（走旧缓存兜底/跳过）的 pass 不出现在结果里。
+ */
+export function collectPassVersionIds(
+  storage: StorageAdapter,
+  graph: ProjectGraph
+): Partial<Record<AiPassKey, string>> {
+  const ids: Partial<Record<AiPassKey, string>> = {}
+  for (const pass of AI_PASS_ORDER) {
+    const version = pickPassVersion(storage, pass, compatForPass(pass, graph))
+    if (version) ids[pass] = version.id
+  }
+  return ids
+}
+
+/** 里程碑引用扫描：versionId → 引用它的 KEY 管线里程碑快照 id 列表 */
+export function milestoneRefsByVersion(
+  snapshots: InsightSnapshotMeta[],
+  pass?: AiPassKey
+): Map<string, string[]> {
+  const refs = new Map<string, string[]>()
+  for (const snap of snapshots) {
+    if (snap.pipeline !== 'key' || !snap.passVersionIds) continue
+    for (const [p, id] of Object.entries(snap.passVersionIds)) {
+      if (!id || (pass && p !== pass)) continue
+      const list = refs.get(id) ?? []
+      if (!list.includes(snap.id)) list.push(snap.id)
+      refs.set(id, list)
+    }
+  }
+  return refs
+}
+
+/** 里程碑引用的版本校验结果 */
+export interface MilestoneVersionCheck {
+  /** 缺失（版本不存在）的引用 */
+  missing: { pass: AiPassKey; id: string }[]
+  /** 存在但不兼容当前图谱的引用（附可读原因） */
+  incompatible: { pass: AiPassKey; id: string; reason: string }[]
+}
+
+/** 批量校验一组 pass 版本引用：全部存在且兼容才可整份回滚 */
+export function checkMilestoneVersions(
+  storage: StorageAdapter,
+  graph: ProjectGraph,
+  ids: Partial<Record<AiPassKey, string>>
+): MilestoneVersionCheck {
+  const result: MilestoneVersionCheck = { missing: [], incompatible: [] }
+  for (const pass of AI_PASS_ORDER) {
+    const id = ids[pass]
+    if (!id) continue
+    const version = storage.getPassVersion(id)
+    if (!version || version.pass !== pass) {
+      result.missing.push({ pass, id })
+      continue
+    }
+    const reason = compatMismatchReason(version, compatForPass(pass, graph))
+    if (reason) result.incompatible.push({ pass, id, reason })
+  }
+  return result
 }
 
 /* ------------------------- 套用（复用既有 apply 逻辑） ------------------------- */
