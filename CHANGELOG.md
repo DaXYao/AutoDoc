@@ -2,6 +2,19 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-05 · AI pass 独立版本：模型与存储层（多阶段 P1）· shared-types+core+docs
+
+- **动机**：九个 KEY AI pass 需要各自独立重跑、各自保留版本，并能（在兼容键满足时）跨时期搭配；现有整份洞察快照继续作为里程碑共存。
+- **模型**（`shared-types`）：新增 `PassCompatKey`（`graphFingerprint` 必填，`partitionBasis` / `coreTableHash` 可选）、`AiPassVersion`（id/pass/savedAt/compat/value + 可选 guarantee/chunkStats）、`AiPassVersionMeta`（列表用，无 value）；`InsightSnapshotMeta`/`InsightSnapshot` 增可选 `passVersionIds`（只建模，装配与写入留待 P2/P3）。`toSnapshotMeta` 透传该字段。
+- **接口**：`StorageAdapter` 增 `listPassVersions / getPassVersion / addPassVersion / deletePassVersion / getActivePassVersion / setActivePassVersion`，三个适配器全部实现。
+- **SQLite**：新表 `ai_pass_versions` + `(pass, saved_at)` 索引；`compat_json`/`value_json` 损坏时列表跳过、get 返回 null（可再生数据不 500）；激活指针存 `app_state` 键 `activePassVersion:<pass>`；`insight_history` 增 `pass_version_ids_json`（含 ALTER 迁移），读取 NULL → undefined。
+- **JSON**：侧车增 `passVersions` / `activePassVersions`，旧文件缺字段按空处理；残缺条目读取时跳过；沿用原子保存与写前备份。
+- **团队**：版本文件 `<teamRoot>/passVersions/<pass>/<id>.json`，复用既有 realpath containment、拒符号链接、`wx` 临时文件 + rename、ID/pass 白名单；同 id 拒绝覆盖、删除写前备份；激活指针镜像快照 activeId 委托本机适配器。pass 子目录首次写入时才建（服务端 `team init` 顶层白名单尚未含 `passVersions`，P5 接入同步路径时统一）。
+- **测试**：core 427→443（SQLite/JSON 六方法往返、按 pass 隔离、删激活版本清指针、重复 id 拒绝、compat/value 损坏容错、旧侧车缺字段、passVersionIds 快照往返；团队文件读写/备份/损坏跳过/非法 ID 与 junction 拒绝）。
+- **校验**：`pnpm test`（core 443 / server 674 / web 345，共 1462）、`pnpm lint`、`pnpm build` 全绿。
+- **边界**：未做装配选择、兼容键计算、路由、UI、里程碑引用写入与团队同步路径接入（P2/P3/P4/P5）。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-05 · 双管线终审修复：快照一致性、变更语义隔离与缓存有界 · server+web
 
 - **Agent 归档与实时一致**（`agentSupplyMerge.ts`）：合并归档前按正式 Agent 装配重读一次，避免「只供 partition、不供 flows」时实时视图有启发式脉络、归档快照却 `flows=[]`。

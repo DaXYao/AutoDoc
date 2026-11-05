@@ -14,6 +14,9 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type {
+  AiPassKey,
+  AiPassVersion,
+  AiPassVersionMeta,
   Annotation,
   AnnotationTargetType,
   ChangeRecord,
@@ -76,6 +79,23 @@ export interface TeamMigrationSummary {
 }
 
 const TARGET_TYPES: readonly AnnotationTargetType[] = ['function', 'file', 'module', 'call']
+
+/** AI pass 版本目录的一级子目录名白名单：pass 名直接参与路径，必须限定取值 */
+const AI_PASS_KEYS: readonly AiPassKey[] = [
+  'partition',
+  'coreJudgment',
+  'categories',
+  'coreRoles',
+  'narratives',
+  'keySteps',
+  'externals',
+  'blocks',
+  'flows'
+]
+
+function isAiPassKey(value: unknown): value is AiPassKey {
+  return typeof value === 'string' && (AI_PASS_KEYS as readonly string[]).includes(value)
+}
 
 /** Windows 保留设备名（大小写不敏感；带扩展名同样被系统当作设备） */
 const WINDOWS_RESERVED_DEVICE_NAMES = new Set<string>([
@@ -149,6 +169,19 @@ function isSnapshotRecord(value: unknown): value is InsightSnapshot {
     isRecord(value.stats) &&
     isRecord(value.insight)
   )
+}
+
+/**
+ * pass 版本文件形状校验：id/pass/savedAt/compat 必填且类型正确，value 字段必须存在
+ * （载荷形状按 pass 各自解释，存储层不校验其内部结构）。
+ */
+function isPassVersionRecord(value: unknown): value is AiPassVersion {
+  if (!isRecord(value)) return false
+  if (typeof value.id !== 'string' || value.id.length === 0) return false
+  if (!isAiPassKey(value.pass)) return false
+  if (typeof value.savedAt !== 'string') return false
+  if (!isRecord(value.compat) || typeof value.compat.graphFingerprint !== 'string') return false
+  return 'value' in value
 }
 
 /** 路径比较口径：Windows 大小写不敏感 */
@@ -235,6 +268,8 @@ export class TeamStorage implements StorageAdapter {
   projectKey: string
   readonly annotationsDir: string
   readonly insightHistoryDir: string
+  /** AI pass 独立版本根目录（其下按 pass 名分一级子目录） */
+  readonly passVersionsDir: string
   readonly supplyInsightDir: string
   readonly supplyChangesDir: string
   readonly manifestPath: string
@@ -266,6 +301,7 @@ export class TeamStorage implements StorageAdapter {
     this.projectKeyExplicit = options.projectKeyExplicit === true
     this.annotationsDir = join(this.teamRoot, 'annotations')
     this.insightHistoryDir = join(this.teamRoot, 'insightHistory')
+    this.passVersionsDir = join(this.teamRoot, 'passVersions')
     this.supplyInsightDir = join(this.teamRoot, 'supply', 'insight')
     this.supplyChangesDir = join(this.teamRoot, 'supply', 'changes')
     this.manifestPath = join(this.teamRoot, TEAM_MANIFEST_FILE)
@@ -294,6 +330,8 @@ export class TeamStorage implements StorageAdapter {
     this.assertManagedDirectoriesSafe()
     // 先校验 manifest 再建子目录：projectKey 不匹配/损坏时不在错误仓库里留垃圾
     this.loadOrCreateManifest()
+    // passVersions 不在此预建：服务端 team init 的「可接管目录」白名单尚未包含它（P5 接入同步路径时统一），
+    // 预建会让 `POST /api/team/init` 把空版本目录误判为非 AutoDoc 数据；改为首次写入时按需创建。
     for (const dir of [
       this.annotationsDir,
       this.insightHistoryDir,
@@ -364,6 +402,7 @@ export class TeamStorage implements StorageAdapter {
     for (const dir of [
       this.annotationsDir,
       this.insightHistoryDir,
+      this.passVersionsDir,
       join(this.teamRoot, 'supply'),
       this.supplyInsightDir,
       this.supplyChangesDir
@@ -675,6 +714,28 @@ export class TeamStorage implements StorageAdapter {
     return join(this.insightHistoryDir, `${id}.json`)
   }
 
+  /** pass 名先过白名单，避免 `../` 之类把版本文件写/读到团队仓库外 */
+  private passVersionDir(pass: AiPassKey): string {
+    if (!isAiPassKey(pass)) {
+      throw new Error(`AI pass 名称非法，拒绝访问团队目录：${String(pass)}`)
+    }
+    return join(this.passVersionsDir, pass)
+  }
+
+  private passVersionPath(pass: AiPassKey, id: string): string {
+    return join(this.passVersionDir(pass), `${id}.json`)
+  }
+
+  /** 按 id 找到版本文件所在路径（版本 id 全局唯一，逐个 pass 子目录探测）；找不到返回 null */
+  private findPassVersionPath(id: string): { path: string; pass: AiPassKey } | null {
+    if (!isSafeTeamFileId(id)) return null
+    for (const pass of AI_PASS_KEYS) {
+      const path = this.passVersionPath(pass, id)
+      if (existsSync(path)) return { path, pass }
+    }
+    return null
+  }
+
   /* ------------------------- 批注（团队仓库） ------------------------- */
 
   listAnnotations(targetId?: string): Annotation[] {
@@ -933,6 +994,83 @@ export class TeamStorage implements StorageAdapter {
       this.local.setActiveInsightSnapshotId(null, 'agent')
     }
     return true
+  }
+
+  /* ------------------------- AI pass 独立版本（团队仓库） ------------------------- */
+
+  listPassVersions(pass: AiPassKey): AiPassVersionMeta[] {
+    this.ensureInit()
+    if (!isAiPassKey(pass)) return []
+    const dir = this.passVersionDir(pass)
+    const metas: AiPassVersionMeta[] = []
+    for (const file of this.listJsonFiles(dir)) {
+      const version = this.readTeamJson(join(dir, file), 'pass 版本', isPassVersionRecord)
+      // 与快照列表同口径：只给元信息，不携带 value 载荷
+      if (!version || version.pass !== pass) continue
+      metas.push({
+        id: version.id,
+        pass: version.pass,
+        savedAt: version.savedAt,
+        compat: version.compat,
+        hasGuarantee: version.guarantee !== undefined
+      })
+    }
+    metas.sort((a, b) => b.savedAt.localeCompare(a.savedAt))
+    return metas
+  }
+
+  getPassVersion(id: string): AiPassVersion | null {
+    this.ensureInit()
+    const found = this.findPassVersionPath(id)
+    if (!found) return null
+    const version = this.readTeamJson(found.path, 'pass 版本', isPassVersionRecord)
+    // Windows 大小写不敏感：`ABC` 可能命中 `abc.json`，核对文件内 id 与请求 id 一致
+    return version && version.id === id ? version : null
+  }
+
+  addPassVersion(version: AiPassVersion): void {
+    this.ensureInit()
+    if (!isSafeTeamFileId(version.id)) {
+      throw new Error(`AI pass 版本 ID 不能作为团队文件名：${version.id}`)
+    }
+    // 入参已是 AiPassVersion，这里按 unknown 再校验一次（防止调用方绕过类型传入残缺记录）
+    if (!isPassVersionRecord(version as unknown)) {
+      throw new Error(`AI pass 版本记录格式非法，拒绝写入：${version.id}`)
+    }
+    const dir = this.passVersionDir(version.pass)
+    // 首次写某 pass 时按需建目录（仍走 ensureManagedDirectory 的祖先/realpath 校验）
+    this.ensureManagedDirectory(dir)
+    const path = join(dir, `${version.id}.json`)
+    // 一 id 一版本：已存在则拒绝，不覆盖任何已有版本（版本可手动删后再存）
+    if (existsSync(path)) {
+      throw new Error(`团队 pass 版本文件已存在，拒绝覆盖：${path}`)
+    }
+    this.writeJsonFile(path, version)
+  }
+
+  deletePassVersion(id: string): boolean {
+    this.ensureInit()
+    const found = this.findPassVersionPath(id)
+    if (!found) return false
+    const existing = this.readTeamJson(found.path, 'pass 版本', isPassVersionRecord)
+    // 损坏或大小写不敏感命中的同路径不同 id：不删，交人工处理
+    if (!existing || existing.id !== id) return false
+    this.backupTeamFile(found.path)
+    rmSync(found.path, { force: true })
+    // 激活指针是本机状态：删的正是该 pass 的激活版本时顺带清空（回退最新兼容版本）
+    if (this.local.getActivePassVersion(found.pass) === id) {
+      this.local.setActivePassVersion(found.pass, null)
+    }
+    return true
+  }
+
+  /** 激活指针沿用快照 activeId 的口径：属本机状态，委托本机适配器（不进团队仓库） */
+  getActivePassVersion(pass: AiPassKey): string | null {
+    return this.local.getActivePassVersion(pass)
+  }
+
+  setActivePassVersion(pass: AiPassKey, id: string | null): void {
+    this.local.setActivePassVersion(pass, id)
   }
 
   /* ------------------------- 本机 → 团队迁移 ------------------------- */

@@ -1,4 +1,4 @@
-import type { Annotation, AnnotationKind, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType, InsightSnapshot, InsightSnapshotMeta, InsightSource } from '@autodoc/shared-types'
+import type { AiPassKey, AiPassVersion, AiPassVersionMeta, Annotation, AnnotationKind, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType, InsightSnapshot, InsightSnapshotMeta, InsightSource } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 
 export interface NewAnnotationInput {
@@ -52,6 +52,8 @@ export function toSnapshotMeta(snapshot: InsightSnapshot): InsightSnapshotMeta {
   if (snapshot.agent !== undefined) meta.agent = snapshot.agent
   // 双管线：快照所属生产管线（缺省=开发期合并版 legacy）
   if (snapshot.pipeline !== undefined) meta.pipeline = snapshot.pipeline
+  // P1：里程碑引用的 per-pass 版本 id 组；缺省不携带，保持旧数据形状
+  if (snapshot.passVersionIds !== undefined) meta.passVersionIds = snapshot.passVersionIds
   return meta
 }
 
@@ -183,6 +185,21 @@ export interface StorageAdapter {
   getActiveInsightSnapshotId(pipeline?: InsightSource): string | null
   /** 设置指定管线的当前生效快照 id；传 null 回到实时计算视图（写操作，触发写前备份） */
   setActiveInsightSnapshotId(id: string | null, pipeline?: InsightSource): void
+
+  /* ------------------------- AI pass 独立版本（P1：每 pass 独立留存，可跨时期搭配） ------------------------- */
+
+  /** 某 pass 的版本元信息列表，新→旧排序（不含 value 载荷） */
+  listPassVersions(pass: AiPassKey): AiPassVersionMeta[]
+  /** 按 id 取完整 pass 版本；不存在/载荷损坏返回 null */
+  getPassVersion(id: string): AiPassVersion | null
+  /** 追加一个 pass 版本（写操作，触发写前备份）；同 id 已存在时抛错，不覆盖 */
+  addPassVersion(version: AiPassVersion): void
+  /** 删除单条 pass 版本；若它正是该 pass 的激活指针则顺带清空。返回是否删除成功 */
+  deletePassVersion(id: string): boolean
+  /** 某 pass 当前激活（用户选定）的版本 id；null=未指定（后续取最新兼容版本） */
+  getActivePassVersion(pass: AiPassKey): string | null
+  /** 设置某 pass 的激活版本 id；传 null 清除（写操作，触发写前备份） */
+  setActivePassVersion(pass: AiPassKey, id: string | null): void
 
   /* ------------------------- 增量解析缓存（I1，可再生数据：写前不备份，区别于批注/变更历史等用户数据） ------------------------- */
 

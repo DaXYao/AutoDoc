@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Annotation, InsightSnapshot, ProjectInsight } from '@autodoc/shared-types'
+import type { AiPassKey, AiPassVersion, Annotation, InsightSnapshot, PassCompatKey, ProjectInsight } from '@autodoc/shared-types'
 import { JsonStorage } from '../src/storage/JsonStorage.js'
 import { SqliteStorage } from '../src/storage/SqliteStorage.js'
 import { TeamStorage, isSafeTeamFileId } from '../src/storage/TeamStorage.js'
@@ -662,6 +662,127 @@ describe('TeamStorage：洞察快照', () => {
       /文件名/
     )
     expect(existsSync(join(root, 'escape.json'))).toBe(false)
+  })
+})
+
+/** 构造一条 pass 版本（P1） */
+function mkPassVersion(
+  id: string,
+  pass: AiPassKey,
+  savedAt: string,
+  compat?: Partial<PassCompatKey>
+): AiPassVersion {
+  return {
+    id,
+    pass,
+    savedAt,
+    compat: { graphFingerprint: `fp-${id}`, ...compat },
+    value: { marker: id }
+  }
+}
+
+describe('TeamStorage：AI pass 独立版本', () => {
+  let root: string
+  let teamRoot: string
+  let local: JsonStorage
+  let team: TeamStorage
+
+  beforeEach(() => {
+    root = freshDir()
+    teamRoot = join(root, 'team-data')
+    local = new JsonStorage(join(root, '.autodoc', 'autodoc.json'))
+    team = new TeamStorage(local, teamRoot, 'autodoc')
+    team.init()
+  })
+
+  afterEach(() => {
+    team.close()
+  })
+
+  it('add→list（仅 meta、新→旧、按 pass 隔离）→get（含 value）；pass 目录按需创建', () => {
+    team.addPassVersion(mkPassVersion('v1', 'categories', '2026-01-01T00:00:00.000Z'))
+    team.addPassVersion(
+      mkPassVersion('v3', 'categories', '2026-01-03T00:00:00.000Z', { partitionBasis: 'pb' })
+    )
+    team.addPassVersion(mkPassVersion('v2', 'categories', '2026-01-02T00:00:00.000Z'))
+    team.addPassVersion(mkPassVersion('f1', 'flows', '2026-01-04T00:00:00.000Z', { coreTableHash: 'ch' }))
+
+    // 目录布局：<teamRoot>/passVersions/<pass>/<id>.json
+    expect(existsSync(join(teamRoot, 'passVersions', 'categories', 'v1.json'))).toBe(true)
+    expect(existsSync(join(teamRoot, 'passVersions', 'flows', 'f1.json'))).toBe(true)
+
+    expect(team.listPassVersions('categories').map((m) => m.id)).toEqual(['v3', 'v2', 'v1'])
+    expect(team.listPassVersions('flows').map((m) => m.id)).toEqual(['f1'])
+    expect(team.listPassVersions('blocks')).toEqual([])
+
+    const meta = team.listPassVersions('categories')[0]
+    expect(meta.compat).toEqual({ graphFingerprint: 'fp-v3', partitionBasis: 'pb' })
+    expect(meta.hasGuarantee).toBe(false)
+    expect((meta as Partial<AiPassVersion>).value).toBeUndefined()
+
+    const full = team.getPassVersion('f1')
+    expect(full?.pass).toBe('flows')
+    expect(full?.value).toEqual({ marker: 'f1' })
+    expect(full?.compat.coreTableHash).toBe('ch')
+    expect(team.getPassVersion('nope')).toBeNull()
+  })
+
+  it('同 id 再次 add 拒绝覆盖；非法 ID / 非法 pass 不读写', () => {
+    team.addPassVersion(mkPassVersion('v1', 'categories', '2026-01-01T00:00:00.000Z'))
+    expect(() => team.addPassVersion(mkPassVersion('v1', 'categories', '2026-01-02T00:00:00.000Z'))).toThrow(
+      /拒绝覆盖/
+    )
+    expect(team.getPassVersion('v1')?.savedAt).toBe('2026-01-01T00:00:00.000Z')
+
+    expect(() =>
+      team.addPassVersion(mkPassVersion('../escape', 'categories', '2026-01-03T00:00:00.000Z'))
+    ).toThrow(/文件名/)
+    expect(existsSync(join(root, 'escape.json'))).toBe(false)
+    // pass 名参与路径：非法值一律不读（防目录穿越）
+    expect(team.listPassVersions('../categories' as AiPassKey)).toEqual([])
+  })
+
+  it('delete：移除文件并写前备份；删激活版本清空本机指针，不影响其它 pass', () => {
+    team.addPassVersion(mkPassVersion('v1', 'categories', '2026-01-01T00:00:00.000Z'))
+    team.addPassVersion(mkPassVersion('n1', 'narratives', '2026-01-01T00:00:00.000Z'))
+    team.setActivePassVersion('categories', 'v1')
+    team.setActivePassVersion('narratives', 'n1')
+    expect(team.getActivePassVersion('categories')).toBe('v1')
+
+    expect(team.deletePassVersion('v1')).toBe(true)
+    expect(existsSync(join(teamRoot, 'passVersions', 'categories', 'v1.json'))).toBe(false)
+    expect(listBackups(team.backupDir)).toHaveLength(1)
+    expect(team.getActivePassVersion('categories')).toBeNull()
+    expect(team.getActivePassVersion('narratives')).toBe('n1')
+    expect(team.deletePassVersion('v1')).toBe(false)
+  })
+
+  it('损坏/形状非法的版本文件：列表跳过、get null、add 不覆盖', () => {
+    const dir = join(teamRoot, 'passVersions', 'categories')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'bad.json'), '{broken', 'utf-8')
+    writeFileSync(join(dir, 'shape.json'), JSON.stringify({ id: 'shape', pass: 'categories' }), 'utf-8')
+
+    expect(team.listPassVersions('categories')).toEqual([])
+    expect(team.getPassVersion('bad')).toBeNull()
+    expect(team.getPassVersion('shape')).toBeNull()
+    expect(() => team.addPassVersion(mkPassVersion('bad', 'categories', '2026-01-01T00:00:00.000Z'))).toThrow(
+      /拒绝覆盖/
+    )
+    expect(readFileSync(join(dir, 'bad.json'), 'utf-8')).toBe('{broken')
+  })
+
+  it('passVersions 被替换成 junction/符号链接：不写入、不穿透、读取跳过', () => {
+    const outside = join(root, 'outside')
+    mkdirSync(outside, { recursive: true })
+    rmSync(join(teamRoot, 'passVersions'), { recursive: true, force: true })
+    symlinkSync(outside, join(teamRoot, 'passVersions'), process.platform === 'win32' ? 'junction' : 'dir')
+
+    expect(() =>
+      team.addPassVersion(mkPassVersion('v1', 'categories', '2026-01-01T00:00:00.000Z'))
+    ).toThrow(/符号链接|junction|越过团队仓库根/)
+    expect(team.listPassVersions('categories')).toEqual([])
+    expect(existsSync(join(outside, 'categories', 'v1.json'))).toBe(false)
   })
 })
 

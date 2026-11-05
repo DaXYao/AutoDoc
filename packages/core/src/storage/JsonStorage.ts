@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, w
 import { readFileSync } from 'node:fs'
 import { dirname, join, basename, extname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { Annotation, ChangeRecord, ChangeSource, InsightSnapshot, InsightSnapshotMeta, InsightSource } from '@autodoc/shared-types'
+import type { AiPassKey, AiPassVersion, AiPassVersionMeta, Annotation, ChangeRecord, ChangeSource, InsightSnapshot, InsightSnapshotMeta, InsightSource } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 import type {
   AnnotationPatch,
@@ -32,11 +32,29 @@ interface JsonData {
   activeAgentInsightSnapshotId?: string
   /** 增量解析缓存（I1，可再生数据非用户数据）；旧数据缺省视为无缓存 */
   parseCache?: ParseCache
+  /** AI pass 独立版本（P1）；旧数据缺省视为无版本 */
+  passVersions?: AiPassVersion[]
+  /** 各 pass 的激活版本 id（键=AiPassKey）；旧数据缺省视为未指定 */
+  activePassVersions?: Record<string, string>
 }
 
 /** 每次返回全新的空数据对象；避免 module 级单例的可变引用被写操作跨实例污染 */
 function emptyData(): JsonData {
   return { version: 1, annotations: [], changes: [], snapshots: {} }
+}
+
+/**
+ * pass 版本条目的最小形状校验：手工编辑/旧版本写入的残缺条目读取时跳过，
+ * 不让一条坏数据把整个列表读取打挂（value 载荷形状不在此校验，由装配阶段解释）。
+ */
+function isPassVersionEntry(value: unknown): value is AiPassVersion {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (typeof record.id !== 'string' || typeof record.pass !== 'string') return false
+  if (typeof record.savedAt !== 'string') return false
+  const compat = record.compat
+  if (compat === null || typeof compat !== 'object' || Array.isArray(compat)) return false
+  return typeof (compat as Record<string, unknown>).graphFingerprint === 'string'
 }
 
 const MAX_BACKUPS = 10
@@ -335,6 +353,68 @@ export class JsonStorage implements StorageAdapter {
       else this.data.activeAgentInsightSnapshotId = id
     } else if (id === null) delete this.data.activeInsightSnapshotId
     else this.data.activeInsightSnapshotId = id
+    this.save()
+  }
+
+  /* ------------------------- AI pass 独立版本（P1） ------------------------- */
+
+  listPassVersions(pass: AiPassKey): AiPassVersionMeta[] {
+    this.init()
+    // 与快照列表同口径：savedAt 新→旧；只返回元信息，不下发 value 载荷
+    return [...(this.data.passVersions ?? [])]
+      .filter(isPassVersionEntry)
+      .filter((version) => version.pass === pass)
+      .sort((a, b) => b.savedAt.localeCompare(a.savedAt))
+      .map((version) => ({
+        id: version.id,
+        pass: version.pass,
+        savedAt: version.savedAt,
+        compat: version.compat,
+        hasGuarantee: version.guarantee !== undefined
+      }))
+  }
+
+  getPassVersion(id: string): AiPassVersion | null {
+    this.init()
+    const found = (this.data.passVersions ?? []).find((version) => version.id === id)
+    return found && isPassVersionEntry(found) ? found : null
+  }
+
+  addPassVersion(version: AiPassVersion): void {
+    this.mutate()
+    const list = (this.data.passVersions ??= [])
+    // 一 id 一版本：同 id 不覆盖（与 SQLite 主键语义一致）
+    if (list.some((existing) => existing.id === version.id)) {
+      throw new Error(`AI pass 版本已存在，拒绝覆盖：${version.id}`)
+    }
+    list.push(version)
+    this.save()
+  }
+
+  deletePassVersion(id: string): boolean {
+    this.mutate()
+    const list = this.data.passVersions ?? []
+    const target = list.find((version) => version.id === id)
+    if (!target) return false
+    this.data.passVersions = list.filter((version) => version.id !== id)
+    // 删的是该 pass 的激活指针指向的版本：顺带清空，不留悬空指针
+    if (this.data.activePassVersions?.[target.pass] === id) {
+      delete this.data.activePassVersions[target.pass]
+    }
+    this.save()
+    return true
+  }
+
+  getActivePassVersion(pass: AiPassKey): string | null {
+    this.init()
+    return this.data.activePassVersions?.[pass] ?? null
+  }
+
+  setActivePassVersion(pass: AiPassKey, id: string | null): void {
+    this.mutate()
+    const pointers = (this.data.activePassVersions ??= {})
+    if (id === null) delete pointers[pass]
+    else pointers[pass] = id
     this.save()
   }
 

@@ -785,11 +785,57 @@ export interface InsightSnapshotMeta {
    * 只读可对比，禁止回滚。
    */
   pipeline?: InsightSource
+  /**
+   * 本快照引用的 per-pass 独立版本 id 组（里程碑 = 某组 pass 版本的固化引用）。
+   * P1 仅建模与存储；缺省 = 该快照不引用独立版本，整份洞察即全部内容。
+   */
+  passVersionIds?: Partial<Record<AiPassKey, string>>
 }
 
 /** 完整快照：元信息 + 整份 ProjectInsight */
 export interface InsightSnapshot extends InsightSnapshotMeta {
   insight: ProjectInsight
+}
+
+/* ------------------------- AI pass 独立版本（P1 模型与存储） ------------------------- */
+
+/**
+ * pass 版本的兼容键：后续按「激活版本 / 最新兼容版本」挑选时的判定依据。
+ * P1 只负责存取字段，兼容性比较与挑选逻辑在装配阶段实现。
+ * - graphFingerprint：产出该版本时的图谱指纹，所有 pass 必填；
+ * - partitionBasis：划分基线哈希，narratives / flows 等依赖划分的 pass 填写；
+ * - coreTableHash：核心函数表哈希，flows 额外依赖。
+ */
+export interface PassCompatKey {
+  graphFingerprint: string
+  partitionBasis?: string
+  coreTableHash?: string
+}
+
+/**
+ * 单个 AI pass 的一次独立产出：每个 pass 各自重跑、各自留存版本，
+ * 不同时期产出的版本可（在兼容键匹配时）搭配组装成完整洞察。
+ */
+export interface AiPassVersion {
+  id: string
+  pass: AiPassKey
+  savedAt: string
+  compat: PassCompatKey
+  /** pass 产出载荷；存储层不解释结构，由装配阶段按 pass 各自解析 */
+  value: unknown
+  /** 该 pass 产出时附带的语义担保（有则留存，随版本独立回放） */
+  guarantee?: SemanticGuarantee
+  /** 该 pass 的 chunk 增量统计（仅有文件级 chunk 的 pass 会带） */
+  chunkStats?: AiChunkStats
+}
+
+/** 版本列表/选择用的元信息：不含大体积 value，避免列表下发整份载荷 */
+export interface AiPassVersionMeta {
+  id: string
+  pass: AiPassKey
+  savedAt: string
+  compat: PassCompatKey
+  hasGuarantee: boolean
 }
 
 /**

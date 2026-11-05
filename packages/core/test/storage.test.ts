@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { InsightSnapshot, ProjectInsight } from '@autodoc/shared-types'
+import type { AiPassKey, AiPassVersion, InsightSnapshot, PassCompatKey, ProjectInsight } from '@autodoc/shared-types'
 import { JsonStorage, backupBaseName, pruneBackups } from '../src/storage/JsonStorage.js'
 import { SqliteStorage } from '../src/storage/SqliteStorage.js'
 import type { StorageAdapter } from '../src/storage/StorageAdapter.js'
@@ -56,6 +56,27 @@ function mkSnapshot(
     ...(meta?.note !== undefined ? { note: meta.note } : {}),
     insight
   }
+}
+
+/** 构造一条 pass 版本（P1）；compat 缺省只带 graphFingerprint */
+function mkPassVersion(
+  id: string,
+  pass: AiPassKey,
+  savedAt: string,
+  compat?: Partial<PassCompatKey>,
+  extra?: { guarantee?: boolean }
+): AiPassVersion {
+  const version: AiPassVersion = {
+    id,
+    pass,
+    savedAt,
+    compat: { graphFingerprint: `fp-${id}`, ...compat },
+    value: { marker: id }
+  }
+  if (extra?.guarantee) {
+    version.guarantee = { pass: 'categories', objectId: 'o1', status: 'declared', source: 'agent', claims: [] }
+  }
+  return version
 }
 
 function bestEffortRemove(dir: string): void {
@@ -440,6 +461,78 @@ function runAdapterSuite(create: (dir: string) => StorageAdapter): void {
     expect(storage.listInsightSnapshots()).toHaveLength(2)
     storage.addInsightSnapshot(mkSnapshot('s3', '2026-01-03T00:00:00.000Z', 'z'))
     expect(storage.listInsightSnapshots()).toHaveLength(3)
+  })
+
+  it('AI pass 版本：add→list（仅 meta、新→旧、按 pass 隔离）→get（含 value）往返', () => {
+    storage.addPassVersion(mkPassVersion('v1', 'categories', '2026-01-01T00:00:00.000Z'))
+    storage.addPassVersion(
+      mkPassVersion('v3', 'categories', '2026-01-03T00:00:00.000Z', { partitionBasis: 'pb' }, { guarantee: true })
+    )
+    storage.addPassVersion(mkPassVersion('v2', 'categories', '2026-01-02T00:00:00.000Z'))
+    storage.addPassVersion(
+      mkPassVersion('f1', 'flows', '2026-01-04T00:00:00.000Z', { partitionBasis: 'pb', coreTableHash: 'ch' })
+    )
+
+    expect(storage.listPassVersions('categories').map((m) => m.id)).toEqual(['v3', 'v2', 'v1'])
+    expect(storage.listPassVersions('flows').map((m) => m.id)).toEqual(['f1'])
+    expect(storage.listPassVersions('blocks')).toEqual([])
+
+    const meta = storage.listPassVersions('categories')[0]
+    expect(meta.compat).toEqual({ graphFingerprint: 'fp-v3', partitionBasis: 'pb' })
+    expect(meta.hasGuarantee).toBe(true)
+    // 列表只给元信息，不下发 value 载荷
+    expect((meta as Partial<AiPassVersion>).value).toBeUndefined()
+
+    const full = storage.getPassVersion('v2')
+    expect(full?.pass).toBe('categories')
+    expect(full?.value).toEqual({ marker: 'v2' })
+    expect(full?.guarantee).toBeUndefined()
+    expect(storage.getPassVersion('v3')?.guarantee?.status).toBe('declared')
+    expect(storage.getPassVersion('f1')?.compat.coreTableHash).toBe('ch')
+    expect(storage.getPassVersion('nope')).toBeNull()
+  })
+
+  it('AI pass 版本：激活指针按 pass 独立、设 null 清除；删激活版本后指针自动清空', () => {
+    storage.addPassVersion(mkPassVersion('v1', 'categories', '2026-01-01T00:00:00.000Z'))
+    storage.addPassVersion(mkPassVersion('n1', 'narratives', '2026-01-01T00:00:00.000Z'))
+    expect(storage.getActivePassVersion('categories')).toBeNull()
+
+    storage.setActivePassVersion('categories', 'v1')
+    storage.setActivePassVersion('narratives', 'n1')
+    expect(storage.getActivePassVersion('categories')).toBe('v1')
+    expect(storage.getActivePassVersion('narratives')).toBe('n1')
+    // 只清一个 pass，另一个不受影响
+    storage.setActivePassVersion('categories', null)
+    expect(storage.getActivePassVersion('categories')).toBeNull()
+    expect(storage.getActivePassVersion('narratives')).toBe('n1')
+
+    storage.setActivePassVersion('categories', 'v1')
+    expect(storage.deletePassVersion('v1')).toBe(true)
+    expect(storage.getActivePassVersion('categories')).toBeNull()
+    // 删不存在的版本返回 false，不误动指针
+    expect(storage.deletePassVersion('nope')).toBe(false)
+    expect(storage.getActivePassVersion('narratives')).toBe('n1')
+  })
+
+  it('AI pass 版本：同 id 重复 add 拒绝覆盖；删除后 list/get 均不再命中', () => {
+    storage.addPassVersion(mkPassVersion('v1', 'categories', '2026-01-01T00:00:00.000Z'))
+    expect(() => storage.addPassVersion(mkPassVersion('v1', 'categories', '2026-01-02T00:00:00.000Z'))).toThrow()
+    expect(storage.getPassVersion('v1')?.savedAt).toBe('2026-01-01T00:00:00.000Z')
+
+    expect(storage.deletePassVersion('v1')).toBe(true)
+    expect(storage.listPassVersions('categories')).toEqual([])
+    expect(storage.getPassVersion('v1')).toBeNull()
+  })
+
+  it('快照 passVersionIds：里程碑引用 id 组可选往返，缺省保持 undefined', () => {
+    const withRefs = mkSnapshot('s1', '2026-01-01T00:00:00.000Z', 'x')
+    withRefs.passVersionIds = { categories: 'v1', flows: 'f1' }
+    storage.addInsightSnapshot(withRefs)
+    expect(storage.getInsightSnapshot('s1')?.passVersionIds).toEqual({ categories: 'v1', flows: 'f1' })
+    expect(storage.listInsightSnapshots()[0].passVersionIds).toEqual({ categories: 'v1', flows: 'f1' })
+
+    storage.addInsightSnapshot(mkSnapshot('s2', '2026-01-02T00:00:00.000Z', 'y'))
+    expect(storage.getInsightSnapshot('s2')?.passVersionIds).toBeUndefined()
   })
 
   it('parse_cache：save/load 整份往返一致；无缓存时返回 null', () => {
@@ -846,6 +939,76 @@ describe('存储层迁移与向后兼容', () => {
     expect(updated?.label).toBe('命名')
     expect(updated?.note).toBeUndefined()
     storage.close()
+  })
+})
+
+describe('AI pass 版本：损坏容错与旧数据兼容', () => {
+  it('SqliteStorage：value_json 损坏 → get 返回 null，列表元信息仍可用', () => {
+    const dir = freshDir()
+    const path = join(dir, 'autodoc.db')
+    const storage = new SqliteStorage(path)
+    storage.init()
+    storage.addPassVersion(mkPassVersion('v1', 'categories', '2026-01-01T00:00:00.000Z'))
+    const db = new DatabaseSync(path)
+    db.prepare("UPDATE ai_pass_versions SET value_json = '{broken' WHERE id = 'v1'").run()
+    db.close()
+
+    expect(storage.getPassVersion('v1')).toBeNull()
+    expect(storage.listPassVersions('categories').map((m) => m.id)).toEqual(['v1'])
+    storage.close()
+  })
+
+  it('SqliteStorage：compat_json 损坏 → 列表跳过该条、get 返回 null（不抛）', () => {
+    const dir = freshDir()
+    const path = join(dir, 'autodoc.db')
+    const storage = new SqliteStorage(path)
+    storage.init()
+    storage.addPassVersion(mkPassVersion('v1', 'categories', '2026-01-01T00:00:00.000Z'))
+    storage.addPassVersion(mkPassVersion('v2', 'categories', '2026-01-02T00:00:00.000Z'))
+    const db = new DatabaseSync(path)
+    db.prepare("UPDATE ai_pass_versions SET compat_json = '{\"x\":1}' WHERE id = 'v1'").run()
+    db.close()
+
+    expect(storage.listPassVersions('categories').map((m) => m.id)).toEqual(['v2'])
+    expect(storage.getPassVersion('v1')).toBeNull()
+    expect(storage.getPassVersion('v2')).not.toBeNull()
+    storage.close()
+  })
+
+  it('JsonStorage：残缺条目读取时跳过、旧数据缺字段按空处理', () => {
+    const dir = freshDir()
+    const path = join(dir, 'autodoc.json')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        annotations: [],
+        changes: [],
+        snapshots: {},
+        passVersions: [
+          { id: 'ok', pass: 'categories', savedAt: '2026-01-03T00:00:00.000Z', compat: { graphFingerprint: 'fp' }, value: 1 },
+          { id: 'bad', pass: 'categories', savedAt: '2026-01-02T00:00:00.000Z' },
+          null
+        ]
+      }),
+      'utf-8'
+    )
+    const storage = new JsonStorage(path)
+    storage.init()
+    expect(storage.listPassVersions('categories').map((m) => m.id)).toEqual(['ok'])
+    expect(storage.getPassVersion('bad')).toBeNull()
+    expect(storage.getPassVersion('ok')?.value).toBe(1)
+    expect(storage.getActivePassVersion('categories')).toBeNull()
+    storage.close()
+
+    // 旧侧车数据完全没有 passVersions / activePassVersions 字段
+    const oldPath = join(dir, 'old.json')
+    writeFileSync(oldPath, JSON.stringify({ version: 1, annotations: [], changes: [], snapshots: {} }), 'utf-8')
+    const old = new JsonStorage(oldPath)
+    old.init()
+    expect(old.listPassVersions('flows')).toEqual([])
+    expect(old.getActivePassVersion('flows')).toBeNull()
+    old.close()
   })
 })
 

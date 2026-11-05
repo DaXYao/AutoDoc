@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { Annotation, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType, InsightSnapshot, InsightSnapshotMeta, InsightSnapshotStats, InsightSource, ProjectInsight } from '@autodoc/shared-types'
+import type { AiPassKey, AiPassVersion, AiPassVersionMeta, Annotation, AnnotationTargetType, ChangeCommitInfo, ChangeRecord, ChangeSource, ChangeType, InsightSnapshot, InsightSnapshotMeta, InsightSnapshotStats, InsightSource, ProjectInsight } from '@autodoc/shared-types'
 import type { FileSnapshot } from '../changes.js'
 import { backupBaseName, pruneBackups } from './JsonStorage.js'
 import type {
@@ -24,6 +24,11 @@ import { toSnapshotMeta } from './StorageAdapter.js'
  */
 function activePointerKey(pipeline: InsightSource): string {
   return pipeline === 'agent' ? 'activeInsightSnapshotId:agent' : 'activeInsightSnapshotId'
+}
+
+/** per-pass 激活版本指针在 app_state 中的键 */
+function activePassVersionKey(pass: AiPassKey): string {
+  return `activePassVersion:${pass}`
 }
 
 /**
@@ -98,6 +103,16 @@ export class SqliteStorage implements StorageAdapter {
         versionKey TEXT PRIMARY KEY,
         payloadJson TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS ai_pass_versions (
+        id TEXT PRIMARY KEY,
+        pass TEXT NOT NULL,
+        saved_at TEXT NOT NULL,
+        compat_json TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        guarantee_json TEXT,
+        chunk_stats_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_ai_pass_versions_pass ON ai_pass_versions(pass, saved_at);
     `)
     // 迁移前备份：仅升级已有库时触发，用 'premigrate' 类型命名（<base>.premigrate.<stamp>.bak），
     // 使其可与普通写前备份辨识、并受独立配额保护、不被普通备份 churn 立即轮转掉。
@@ -113,7 +128,8 @@ export class SqliteStorage implements StorageAdapter {
       'ALTER TABLE insight_history ADD COLUMN note TEXT',
       'ALTER TABLE insight_history ADD COLUMN source TEXT',
       'ALTER TABLE insight_history ADD COLUMN agent TEXT',
-      'ALTER TABLE insight_history ADD COLUMN pipeline TEXT'
+      'ALTER TABLE insight_history ADD COLUMN pipeline TEXT',
+      'ALTER TABLE insight_history ADD COLUMN pass_version_ids_json TEXT'
     ]) {
       try {
         this.db.exec(ddl)
@@ -320,7 +336,7 @@ export class SqliteStorage implements StorageAdapter {
     // 只 SELECT meta 列（不取 insight_json），按保存时间倒序（新→旧）
     const rows = this.conn()
       .prepare(
-        'SELECT id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, label, note, source, agent, pipeline FROM insight_history ORDER BY saved_at DESC'
+        'SELECT id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, label, note, source, agent, pipeline, pass_version_ids_json FROM insight_history ORDER BY saved_at DESC'
       )
       .all()
     return rows.map((row) => this.rowToSnapshotMeta(row))
@@ -351,7 +367,7 @@ export class SqliteStorage implements StorageAdapter {
     this.backupOnce()
     this.conn()
       .prepare(
-        'INSERT INTO insight_history (id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, insight_json, label, note, source, agent, pipeline) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO insight_history (id, saved_at, fingerprint, trigger, partition_feedback, ai_enabled, ai_generated, summary, stats_json, insight_json, label, note, source, agent, pipeline, pass_version_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
       .run(
         snapshot.id,
@@ -368,7 +384,8 @@ export class SqliteStorage implements StorageAdapter {
         snapshot.note ?? null,
         snapshot.source ?? null,
         snapshot.agent ?? null,
-        snapshot.pipeline ?? null
+        snapshot.pipeline ?? null,
+        snapshot.passVersionIds === undefined ? null : JSON.stringify(snapshot.passVersionIds)
       )
     return toSnapshotMeta(snapshot)
   }
@@ -431,6 +448,133 @@ export class SqliteStorage implements StorageAdapter {
         'INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
       )
       .run(key, id)
+  }
+
+  /* ------------------------- AI pass 独立版本（P1） ------------------------- */
+
+  listPassVersions(pass: AiPassKey): AiPassVersionMeta[] {
+    const rows = this.conn()
+      .prepare(
+        'SELECT id, saved_at, compat_json, guarantee_json FROM ai_pass_versions WHERE pass = ? ORDER BY saved_at DESC'
+      )
+      .all(pass) as Record<string, unknown>[]
+    const metas: AiPassVersionMeta[] = []
+    for (const row of rows) {
+      const compat = this.parseCompatKey(row.compat_json)
+      // compat 损坏的版本无法参与兼容判定：列表跳过该条（可再生数据，不抛）
+      if (!compat) continue
+      metas.push({
+        id: String(row.id),
+        pass,
+        savedAt: typeof row.saved_at === 'string' ? row.saved_at : '',
+        compat,
+        hasGuarantee: typeof row.guarantee_json === 'string' && row.guarantee_json.length > 0
+      })
+    }
+    return metas
+  }
+
+  getPassVersion(id: string): AiPassVersion | null {
+    const row = this.conn()
+      .prepare('SELECT * FROM ai_pass_versions WHERE id = ?')
+      .get(id) as Record<string, unknown> | undefined
+    if (!row) return null
+    const compat = this.parseCompatKey(row.compat_json)
+    if (!compat) {
+      console.warn(`[autodoc] AI pass 版本 ${id} 的兼容键损坏，视为不可用`)
+      return null
+    }
+    let value: unknown
+    try {
+      value = JSON.parse(String(row.value_json))
+    } catch {
+      console.warn(`[autodoc] AI pass 版本 ${id} 的载荷解析失败，视为不可用`)
+      return null
+    }
+    const version: AiPassVersion = {
+      id: String(row.id),
+      pass: String(row.pass) as AiPassKey,
+      savedAt: typeof row.saved_at === 'string' ? row.saved_at : '',
+      compat,
+      value
+    }
+    // 可选字段损坏时按缺省处理（不因附属信息损坏丢掉整个版本）
+    const guarantee = this.parseOptionalJson(row.guarantee_json)
+    if (guarantee !== undefined) version.guarantee = guarantee as AiPassVersion['guarantee']
+    const chunkStats = this.parseOptionalJson(row.chunk_stats_json)
+    if (chunkStats !== undefined) version.chunkStats = chunkStats as AiPassVersion['chunkStats']
+    return version
+  }
+
+  addPassVersion(version: AiPassVersion): void {
+    this.backupOnce()
+    this.conn()
+      .prepare(
+        'INSERT INTO ai_pass_versions (id, pass, saved_at, compat_json, value_json, guarantee_json, chunk_stats_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      )
+      .run(
+        version.id,
+        version.pass,
+        version.savedAt,
+        JSON.stringify(version.compat),
+        JSON.stringify(version.value),
+        version.guarantee === undefined ? null : JSON.stringify(version.guarantee),
+        version.chunkStats === undefined ? null : JSON.stringify(version.chunkStats)
+      )
+  }
+
+  deletePassVersion(id: string): boolean {
+    this.backupOnce()
+    const db = this.conn()
+    const row = db.prepare('SELECT pass FROM ai_pass_versions WHERE id = ?').get(id) as
+      | Record<string, unknown>
+      | undefined
+    const result = db.prepare('DELETE FROM ai_pass_versions WHERE id = ?').run(id)
+    const removed = Number(result.changes) > 0
+    // 删的是该 pass 的激活指针指向的版本：顺带清空（调用方回退到最新兼容版本）
+    if (removed && row && typeof row.pass === 'string') {
+      const pass = row.pass as AiPassKey
+      if (this.getActivePassVersion(pass) === id) this.setActivePassVersion(pass, null)
+    }
+    return removed
+  }
+
+  getActivePassVersion(pass: AiPassKey): string | null {
+    const row = this.conn()
+      .prepare('SELECT value FROM app_state WHERE key = ?')
+      .get(activePassVersionKey(pass))
+    return row && typeof row.value === 'string' && row.value.length > 0 ? row.value : null
+  }
+
+  setActivePassVersion(pass: AiPassKey, id: string | null): void {
+    this.backupOnce()
+    this.conn()
+      .prepare(
+        'INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+      )
+      .run(activePassVersionKey(pass), id)
+  }
+
+  /** compat_json → 兼容键；缺失/非对象/graphFingerprint 非字符串一律视为损坏 */
+  private parseCompatKey(value: unknown): AiPassVersionMeta['compat'] | null {
+    const parsed = this.parseOptionalJson(value)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    const record = parsed as Record<string, unknown>
+    if (typeof record.graphFingerprint !== 'string') return null
+    const compat: AiPassVersionMeta['compat'] = { graphFingerprint: record.graphFingerprint }
+    if (typeof record.partitionBasis === 'string') compat.partitionBasis = record.partitionBasis
+    if (typeof record.coreTableHash === 'string') compat.coreTableHash = record.coreTableHash
+    return compat
+  }
+
+  /** 解析可选 JSON 列：NULL/空串/损坏均返回 undefined */
+  private parseOptionalJson(value: unknown): unknown {
+    if (typeof value !== 'string' || value.length === 0) return undefined
+    try {
+      return JSON.parse(value)
+    } catch {
+      return undefined
+    }
   }
 
   loadParseCache(): ParseCache | null {
@@ -511,7 +655,21 @@ export class SqliteStorage implements StorageAdapter {
       source: row.source === 'agent' || row.source === 'mixed' || row.source === 'api' ? row.source : undefined,
       agent: typeof row.agent === 'string' && row.agent.length > 0 ? row.agent : undefined,
       // 双管线：缺省（旧行）= 开发期合并版 legacy
-      pipeline: row.pipeline === 'key' || row.pipeline === 'agent' ? row.pipeline : undefined
+      pipeline: row.pipeline === 'key' || row.pipeline === 'agent' ? row.pipeline : undefined,
+      // P1：里程碑引用的 per-pass 版本 id 组；NULL（旧行/未引用）→ undefined
+      passVersionIds: this.parsePassVersionIds(row.pass_version_ids_json)
+    }
+  }
+
+  /** pass_version_ids_json → 引用映射；缺失/损坏一律视为未引用（不阻断历史读取） */
+  private parsePassVersionIds(value: unknown): Partial<Record<AiPassKey, string>> | undefined {
+    if (typeof value !== 'string' || value.length === 0) return undefined
+    try {
+      const parsed: unknown = JSON.parse(value)
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+      return parsed as Partial<Record<AiPassKey, string>>
+    } catch {
+      return undefined
     }
   }
 
