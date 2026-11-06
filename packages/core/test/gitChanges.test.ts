@@ -6,7 +6,12 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { GitConfig } from '@autodoc/shared-types'
 import { DEFAULT_EXPAND, type NormalizedConfig } from '../src/config.js'
 import { applyGitHistory } from '../src/git/gitChanges.js'
-import type { GitChangedFile, GitClient, GitCommitMeta } from '../src/git/gitClient.js'
+import type {
+  GitChangedFile,
+  GitClient,
+  GitCommitMeta,
+  WorkingTreeResult
+} from '../src/git/gitClient.js'
 import { makeStableId } from '../src/identity.js'
 import { parserRegistry } from '../src/parser/registry.js'
 import { JsonStorage } from '../src/storage/JsonStorage.js'
@@ -127,6 +132,10 @@ class FakeGitClient implements GitClient {
     return c ? c.changes : []
   }
 
+  async workingTreeChanges(): Promise<WorkingTreeResult> {
+    return { ok: false, changes: [] }
+  }
+
   async readFileAtCommit(_rootDir: string, ref: string, path: string): Promise<string | null> {
     const c = this.resolveRef(ref)
     if (!c) return null
@@ -153,6 +162,9 @@ class ThrowingGitClient implements GitClient {
     throw new Error('git 命令失败（模拟）')
   }
   async changedFiles(): Promise<GitChangedFile[]> {
+    throw new Error('git 命令失败（模拟）')
+  }
+  async workingTreeChanges(): Promise<WorkingTreeResult> {
     throw new Error('git 命令失败（模拟）')
   }
   async readFileAtCommit(): Promise<string | null> {

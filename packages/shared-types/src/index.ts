@@ -970,6 +970,17 @@ export interface ImpactChangeset {
   changedFunctions: ChangedFunctionRef[]
   /** 当前文档生成时间（与 /api/meta 一致） */
   generatedAt: string
+  /**
+   * workspace 范围的数据来源：
+   * - git：Git 工作区相对 HEAD 的真实差异（含暂存与未跟踪文件）；
+   * - snapshot：非 Git 仓库 / HEAD 不存在（unborn）/ 读取失败时，回退到最近一次生成批次。
+   * commit / range 范围缺省。
+   */
+  workspaceSource?: 'git' | 'snapshot'
+  /** workspace 是否含近似结果（二进制 / 不支持语言 / 解析失败的文件按「当前全部函数 modified」降级） */
+  workspaceApproximate?: boolean
+  /** workspace 变更文件数是否超过上限被截断（仅保留前 2000 个） */
+  workspaceTruncated?: boolean
   /** G5：变更侧 Agent 语义（读时合并，撤回供给文件后自然消失）；无有效供给时缺省 */
   agentSemantics?: ImpactChangesetAgentSemantics
 }

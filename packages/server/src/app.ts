@@ -711,7 +711,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     }
     const source = rawSource === 'agent' ? 'agent' : 'key'
     try {
-      const changeset = getChangeset(service, scope)
+      const changeset = await getChangeset(service, scope)
       // 🟡5：轻量读时合并——复用 changeset 已取到的 snapshotRecords，供给目录无文件即早退。
       // 供给叠加属附加产物：读取洞察/扫描/担保校验任一步失败只降级为「无 Agent 语义」，不拖垮静态变更集。
       try {

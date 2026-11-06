@@ -26,6 +26,16 @@ export interface GitChangedFile {
 }
 
 /**
+ * 工作区相对 HEAD 的变更读取结果。
+ * ok=false 表示无法给出可信结果（非仓库 / HEAD 不存在（unborn）/ 读取失败），
+ * 调用方应整体降级（如回退快照批次），不可把空 changes 当成「工作区干净」。
+ */
+export interface WorkingTreeResult {
+  ok: boolean
+  changes: GitChangedFile[]
+}
+
+/**
  * Git 只读访问抽象（插件接口）。
  * 主流程只依赖该接口；测试可注入内存实现（FakeGitClient），
  * 生产使用 SimpleGitClient（基于 simple-git）。
@@ -45,6 +55,12 @@ export interface GitClient {
   recentCommits(rootDir: string, sinceHash: string | null, limit: number): Promise<GitCommitMeta[]>
   /** 某提交相对其父提交（根提交相对空树）变更的文件列表 */
   changedFiles(rootDir: string, commit: string): Promise<GitChangedFile[]>
+  /**
+   * 工作区（含暂存区）相对 HEAD 的变更文件列表。
+   * tracked 走 diff HEAD（含已暂存与未暂存），untracked 走 ls-files --others；
+   * 同路径以 tracked 结果优先。非仓库 / unborn HEAD / 失败返回 ok:false，不抛错。
+   */
+  workingTreeChanges(rootDir: string): Promise<WorkingTreeResult>
   /** 读取某提交下指定文件内容；不存在 / 二进制 / 失败返回 null */
   readFileAtCommit(rootDir: string, commit: string, repoRelPath: string): Promise<string | null>
   /**
@@ -148,6 +164,14 @@ export function parseNameStatus(output: string): GitChangedFile[] {
   return files
 }
 
+/** 解析 NUL 分隔的纯路径列表（如 `ls-files -z`），把反斜杠统一为 POSIX */
+function parseNullSeparatedPaths(output: string): string[] {
+  return output
+    .split('\u0000')
+    .filter((path) => path.length > 0)
+    .map(toPosix)
+}
+
 /**
  * 基于 simple-git 的 GitClient 实现。
  * 所有命令通过 raw() 下发，路径参数一律按「仓库根相对」解释；
@@ -218,6 +242,41 @@ export class SimpleGitClient implements GitClient {
     } catch (error) {
       this.degrade('changedFiles', error, `rootDir=${rootDir}, commit=${commit}`)
       return []
+    }
+  }
+
+  async workingTreeChanges(rootDir: string): Promise<WorkingTreeResult> {
+    try {
+      // tracked：diff HEAD 同时覆盖「已暂存」与「未暂存」改动（HEAD → 工作树）；
+      // -M 开启重命名检测；-z + quotePath=false 保证非 ASCII 路径不被转义。
+      const trackedOut = await this.git(rootDir).raw([
+        '-c',
+        'core.quotePath=false',
+        'diff',
+        '--name-status',
+        '-z',
+        '-M',
+        'HEAD'
+      ])
+      // untracked：--full-name 让输出以仓库根为基准（与 diff 口径一致，而非当前子目录）。
+      const untrackedOut = await this.git(rootDir).raw([
+        'ls-files',
+        '--others',
+        '--exclude-standard',
+        '--full-name',
+        '-z'
+      ])
+      // 同路径 tracked 优先：先放 tracked，再补 untracked（正常不会重叠，防御异常输出）。
+      const byPath = new Map<string, GitChangedFile>()
+      for (const file of parseNameStatus(trackedOut)) byPath.set(file.path, file)
+      for (const path of parseNullSeparatedPaths(untrackedOut)) {
+        if (!byPath.has(path)) byPath.set(path, { status: 'A', path })
+      }
+      return { ok: true, changes: [...byPath.values()] }
+    } catch (error) {
+      // 非仓库 / unborn HEAD（无提交时 HEAD 无法解析）/ 命令失败：整体不可信，交由调用方降级
+      this.degrade('workingTreeChanges', error, `rootDir=${rootDir}`)
+      return { ok: false, changes: [] }
     }
   }
 

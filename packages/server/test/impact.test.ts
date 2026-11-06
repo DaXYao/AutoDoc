@@ -1,10 +1,11 @@
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
-import type { ChangeType, ImpactChangeset, ImpactCommit } from '@autodoc/shared-types'
-import { createStorage, loadConfig } from '@autodoc/core'
+import type { ChangeType, FunctionDoc, ImpactChangeset, ImpactCommit } from '@autodoc/shared-types'
+import { createStorage, fingerprint, loadConfig, makeStableId } from '@autodoc/core'
 import { buildApp } from '../src/app.js'
 import type { DocService } from '../src/context.js'
 import type { ProjectManager } from '../src/projects.js'
@@ -62,9 +63,51 @@ async function makeApp(service: DocService | null, readOnly = false): Promise<Fa
   return buildApp({ manager: fakeManager(service), readOnly })
 }
 
+function git(dir: string, args: string[]): void {
+  execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+}
+
+/** 初始化仓库并提交当前目录全部文件（含 makeService 写入的配置） */
+function initRepo(dir: string): void {
+  git(dir, ['init', '-q'])
+  git(dir, ['add', '-A'])
+  git(dir, [
+    '-c',
+    'user.name=AutoDoc Test',
+    '-c',
+    'user.email=autodoc@example.com',
+    '-c',
+    'commit.gpgsign=false',
+    'commit',
+    '-q',
+    '-m',
+    'init'
+  ])
+}
+
+/** 以工作区源码构造文档文件（仅需 id/name/fingerprint，供 workspace 对比） */
+function docFiles(entries: Array<{ path: string; name: string; body: string }>): DocService['files'] {
+  return entries.map((entry) => ({
+    fileId: entry.path,
+    path: entry.path,
+    language: 'typescript',
+    functions: [
+      {
+        id: makeStableId(entry.path, null, entry.name, []),
+        name: entry.name,
+        fingerprint: fingerprint(entry.body)
+      } as unknown as FunctionDoc
+    ]
+  }))
+}
+
 const FN_A = 'src/a.ts::-::fnA@aaaaaaaaaaaa'
 const FN_B = 'src/b.ts::ClsB::methodB@bbbbbbbbbbbb'
 const FN_C = 'src/c.ts::-::fnC@cccccccccccc'
+
+const GIT_HEAD_TS = 'export function foo(): number {\n  return 1\n}\n'
+const GIT_MODIFIED_TS = 'export function foo(): number {\n  return 2\n}\n'
+const GIT_FN = makeStableId('a.ts', null, 'foo', [])
 
 /** 种入一批 git 来源变更记录（同提交共享 authorDate，与 gitChanges.gitMeta 写入语义一致） */
 function seedGit(
@@ -273,6 +316,7 @@ describe('GET /api/impact/changeset', () => {
     const body = res.json() as ImpactChangeset
     expect(body.scope).toBe('workspace')
     expect(body.commits).toEqual([])
+    expect(body.workspaceSource).toBe('snapshot')
     expect(body.generatedAt).toBe(service.generatedAt)
     expect(body.changedFunctions).toEqual([
       { functionId: FN_B, type: 'renamed', filePath: 'src/b.ts', name: 'methodB' },
@@ -286,6 +330,48 @@ describe('GET /api/impact/changeset', () => {
     const body = res.json() as ImpactChangeset
     expect(body.commits).toEqual([])
     expect(body.changedFunctions).toEqual([])
+    expect(body.workspaceSource).toBe('snapshot')
+  })
+
+  it('workspace（Git 仓库）：相对 HEAD 的函数级差异，workspaceSource=git；source=agent 静态变更集不变', async () => {
+    const dir = freshDir()
+    writeFileSync(join(dir, 'a.ts'), GIT_HEAD_TS, 'utf-8')
+    const gitService = await makeService(dir)
+    initRepo(dir)
+    gitService.files = docFiles([
+      { path: 'a.ts', name: 'foo', body: '{\n  return 1\n}' }
+    ])
+    const gitApp = await makeApp(gitService)
+
+    // 干净工作区：不存在「上次生成批次」残留
+    const clean = await gitApp.inject({ method: 'GET', url: '/api/impact/changeset?scope=workspace' })
+    expect(clean.statusCode).toBe(200)
+    const cleanBody = clean.json() as ImpactChangeset
+    expect(cleanBody.workspaceSource).toBe('git')
+    expect(cleanBody.changedFunctions).toEqual([])
+
+    // 未提交修改：只出该函数 modified
+    writeFileSync(join(dir, 'a.ts'), GIT_MODIFIED_TS, 'utf-8')
+    gitService.files = docFiles([
+      { path: 'a.ts', name: 'foo', body: '{\n  return 2\n}' }
+    ])
+    const dirty = await gitApp.inject({ method: 'GET', url: '/api/impact/changeset?scope=workspace' })
+    const dirtyBody = dirty.json() as ImpactChangeset
+    expect(dirtyBody.workspaceSource).toBe('git')
+    expect(dirtyBody.changedFunctions).toEqual([
+      { functionId: GIT_FN, type: 'modified', filePath: 'a.ts', name: 'foo' }
+    ])
+
+    // source=agent 在没有有效供给时只返回同一份静态变更集（行为不变）
+    const agent = await gitApp.inject({
+      method: 'GET',
+      url: '/api/impact/changeset?scope=workspace&source=agent'
+    })
+    expect(agent.statusCode).toBe(200)
+    const agentBody = agent.json() as ImpactChangeset
+    expect(agentBody.changedFunctions).toEqual(dirtyBody.changedFunctions)
+    expect(agentBody.agentSemantics).toBeUndefined()
+    await gitApp.close()
   })
 
   it('commit:<hash>：反查该提交的 git 记录；snapshot 记录不混入', async () => {

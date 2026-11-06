@@ -2,6 +2,15 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-06 · 变更影响页 workspace 改为 Git 工作区相对 HEAD（P1+P2）· core+server+shared-types+docs
+
+- **P1 Core**：`GitClient` 新增 `workingTreeChanges(rootDir)`（`WorkingTreeResult`）：tracked 走 `git diff --name-status -z -M HEAD`（覆盖已暂存与未暂存），untracked 走 `ls-files --others --exclude-standard --full-name -z` 并映射为 A，同路径 tracked 优先；非仓库 / unborn HEAD / 命令失败返回 `ok:false` 并走既有 degrade 日志，绝不抛错；路径统一为仓库根相对 POSIX。
+- **P2 Server**：新增 `workspaceChanges.ts#buildWorkspaceChangeset`，workspace 变更集改为「Git 工作区 vs HEAD」的函数级差异：HEAD 侧 `readFileAtCommit('HEAD')` + 解析器重建稳定 ID/指纹，当前侧取最近一次生成的 `service.files`；A/D/R/M 分别处理（R 以 oldPath 建 HEAD 基线）；二进制 / 不支持语言 / 解析失败的文件降级为「当前全部函数 modified」并标记 `workspaceApproximate`；变更文件上限 2000，超出标记 `workspaceTruncated`；非 Git / 无 HEAD / 读取失败回退最近 snapshot 批次并标记 `workspaceSource:'snapshot'`（正常为 `'git'`）。
+- **类型/路由**：`ImpactChangeset` 增可选 `workspaceSource` / `workspaceApproximate` / `workspaceTruncated`；`getChangeset` 改 async，commit/range 逻辑不变；路由改为 `await`。
+- **边界**：当前侧仍取最近一次生成结果（未 regenerate 的新文件/改动需生成后才可见）；不写仓库、不写 `.autodoc`、不改 Agent 供给合并与变更侧语义。
+- **测试**：core 新增真实仓库 workingTreeChanges 9 例（干净/修改/暂存/未跟踪/删除/重命名/子目录/非 ASCII/unborn/非仓库）；server 新增 8 例（干净/修改/未跟踪新增/删除/重命名/非 Git 回退/嵌套目录过滤/二进制近似）与路由 1 例（新字段 + source=agent 不变）。全仓 1532 项（core 452 / server 718 / web 362），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-06 · 四项修复终审：chunk 输入摘要、脏版本守卫与回滚口径 · server+core+web+docs
 
 - **chunk 型 pass 版本感知内容变化**：新增 `PassCompatKey.contentRevision`（chunk 内容哈希 + prompt 版本的有序摘要），`compatForCurrentPass` 统一供装配、写入、路由与里程碑校验使用。修复「常规刷新版本优先后，纯函数体/注释/prompt 变化被旧版本永久掩盖」的回归；旧版本缺该字段按存量兼容处理。补「仅改注释也让 blocks 重跑」用例，并同步修订 README 与 LESSONS 中与旧口径冲突的描述。

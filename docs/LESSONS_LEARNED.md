@@ -72,10 +72,17 @@
 - [ ] 「内容完全相同」比较前先递归丢弃 undefined 对象键：SQLite getInsightSnapshot 固定带可选 meta 字段，团队 JSON 没有这些键，否则二次迁移全部误报冲突。
 - [ ] 目录包含判断必须 `rel === '..' || rel.startsWith('..' + sep)`；备份轮转序号要取已有最大值+1，不能找第一个空位（刚被轮转删掉的最小序号会被新备份复用并立即删除）。
 - [ ] 单个 Vitest 文件里真实 git 子进程累计超过约 60s 时，会出现 `vitest-worker Timeout calling "onTaskUpdate"`：测试全过但进程 exit 1；按场景拆分测试文件并共享 fixture（`teamGitTestUtils.ts`），不要只调 `testTimeout`。
+- [ ] 工作区差异不能只用 `git diff HEAD`：未跟踪文件必须另跑 `ls-files --others --exclude-standard -z`；且 `ls-files` 在子目录调用默认输出「相对当前目录」路径，必须加 `--full-name` 才能与 diff 的仓库根相对路径对齐（否则前缀换算全错、变更全被过滤）。
 
 ---
 
 ## 教训条目
+
+### 2026-11-06 · Git 工作区变更：diff HEAD 不含未跟踪文件，ls-files 子目录路径口径不同
+- **现象**：新增 `GitClient.workingTreeChanges` 时，若只用 `git diff HEAD` 会漏掉新文件；在项目子目录调用 `ls-files --others` 得到的路径相对子目录，与 `diff` 的仓库根相对路径拼接前缀后对不上，变更被 `toProjectPath` 全部判为根外。
+- **根因**：`git diff` 默认输出仓库根相对路径（且只覆盖 tracked），`git ls-files` 默认输出当前目录相对路径；两者口径不同。
+- **正确做法**：untracked 用 `ls-files --others --exclude-standard --full-name -z`；tracked 用 `-c core.quotePath=false diff --name-status -z -M HEAD`；NUL 分隔解析后按路径合并（tracked 优先），并补「子目录调用」真实仓库用例。
+- **预防措施**：新增 Git 路径相关测试时至少覆盖一个从子目录调用的场景，避免只在仓库根验证。
 
 ### 2026-11-06 · 团队同步接入 passVersions 时的清单分散与摘要口径（P5）
 - **现象**：只把 `passVersions` 加进 `TEAM_TOP_LEVEL` 后，同步提交仍可能漏掉版本目录；迁移计数加字段后 web 用例因 `counts()` 预设缺键、行索引变化而变红；pass 版本冲突两侧摘要看起来完全一样。

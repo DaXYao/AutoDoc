@@ -4,9 +4,10 @@ import type { DocService } from './context.js'
 
 /**
  * C1：变更影响分析的后端变更集数据。
- * 数据来源为存储层既有的函数级变更记录（changes），本模块只做只读聚合：
+ * 数据来源为存储层既有的函数级变更记录（changes），本模块只读聚合：
  * - git 来源记录 → 按 commit.hash 聚合出提交候选列表；
- * - snapshot 来源记录 → 「最近一次 regenerate 批次」即当前工作区变更集。
+ * - snapshot 来源记录 → 仅作为 workspace 在非 Git / unborn HEAD / 读取失败时的回退批次
+ *   （正常路径由 workspaceChanges.ts 读取 Git 工作区相对 HEAD 的函数级差异）。
  */
 
 /** 400 级输入错误（未知 scope 格式 / range 形态非法 / range 端点不存在），对齐 AskInputError 范式 */
@@ -20,8 +21,8 @@ export const IMPACT_COMMITS_MAX_LIMIT = 200
  * workspace 批次识别容差（毫秒）。
  * 核查结论：generateDocs 写快照变更记录时 date 由 appendChange 逐条取 now（毫秒级互不相同），
  * C1 起已改为同批次共享同一时间戳；此处仍保留 60s 窗口以兼容旧版本写入的历史数据
- * （同批逐条时间戳有毫秒抖动）。副作用：两次 regenerate 间隔 <60s 时批次会被合并展示，
- * 语义仍是「最近的工作区变更」，可接受。
+ * （同批逐条时间戳有毫秒抖动）。副作用：两次 regenerate 间隔 <60s 时批次会被合并展示；
+ * 该窗口仅用于「非 Git / unborn HEAD」的 workspace 回退批次，正常路径以 Git 工作区差异为准。
  * 已知截断风险：旧版 JsonStorage 大批次逐条落盘可能跨分钟级（见 generate.ts 注释），
  * 跨度 >60s 的旧批次仅展示窗口内尾部记录；下一次 regenerate 写入共享 batchDate 后自愈。
  */
@@ -115,10 +116,13 @@ export function latestSnapshotBatch(records: FunctionChangeRecord[]): FunctionCh
   })
 }
 
-/** workspace：当前工作区变更 = snapshot 来源的最近一次 regenerate 批次 */
-function workspaceChangeset(service: DocService, scope: string): ImpactChangeset {
+/**
+ * workspace 的回退形态：非 Git 仓库 / unborn HEAD / 工作区读取失败时，
+ * 沿用最近一次 regenerate 批次的 snapshot 记录（来源由调用方标注 workspaceSource='snapshot'）。
+ */
+export function snapshotWorkspaceChangeset(service: DocService): ImpactChangeset {
   const records = service.storage.listChangeRecords({ source: 'snapshot' })
-  return buildChangeset(scope, [], latestSnapshotBatch(records), service.generatedAt)
+  return buildChangeset('workspace', [], latestSnapshotBatch(records), service.generatedAt)
 }
 
 /** commit:<hash>：git 来源且 commit.hash 精确匹配；未回填/写错的 hash 返回空变更集而非 404 */
@@ -158,10 +162,17 @@ function rangeChangeset(service: DocService, scope: string): ImpactChangeset {
   return buildChangeset(scope, slice.map((c) => c.hash), selected, service.generatedAt)
 }
 
-/** 解析 scope 并返回统一形态的变更集；未知格式抛 ImpactInputError（路由映射 400） */
-export function getChangeset(service: DocService, scope: string): ImpactChangeset {
+/**
+ * 解析 scope 并返回统一形态的变更集；未知格式抛 ImpactInputError（路由映射 400）。
+ * workspace 走 Git 工作区相对 HEAD 的真实差异（工作区构建较重，按需动态加载，避免与
+ * workspaceChanges → impact 的快照回退依赖形成静态循环）；commit / range 逻辑不变。
+ */
+export async function getChangeset(service: DocService, scope: string): Promise<ImpactChangeset> {
   const trimmed = scope.trim()
-  if (trimmed === 'workspace') return workspaceChangeset(service, trimmed)
+  if (trimmed === 'workspace') {
+    const { buildWorkspaceChangeset } = await import('./workspaceChanges.js')
+    return buildWorkspaceChangeset(service)
+  }
   if (trimmed.startsWith('commit:')) return commitChangeset(service, trimmed)
   if (trimmed.startsWith('range:')) return rangeChangeset(service, trimmed)
   throw new ImpactInputError(
