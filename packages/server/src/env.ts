@@ -52,23 +52,124 @@ export function loadEnv(baseDir: string = process.cwd()): void {
   }
 }
 
-export interface DeepSeekConfig {
+export type AiProvider = 'deepseek' | 'mimo'
+export type MaxTokensField = 'max_tokens' | 'max_completion_tokens'
+export type AiThinkingMode = 'enabled' | 'disabled'
+
+export interface AiConfig {
+  provider: AiProvider
   apiKey: string
+  /** 归一化后的 base（不含 /v1、/chat/completions、/anthropic 后缀） */
   baseUrl: string
   model: string
+  /** MiMo 只认 max_completion_tokens；DeepSeek 用 max_tokens */
+  maxTokensField: MaxTokensField
+  /** 仅 MiMo 混合推理模型使用；undefined = 不发送该字段 */
+  thinking?: AiThinkingMode
 }
 
-/** 读取 DeepSeek 配置；未配置 key 时返回 null（AI 能力优雅降级为纯静态分析） */
-export function getDeepSeekConfig(): DeepSeekConfig | null {
+const AI_DEFAULTS: Record<AiProvider, { baseUrl: string; model: string; label: string }> = {
+  deepseek: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', label: 'DeepSeek' },
+  mimo: {
+    baseUrl: 'https://token-plan-cn.xiaomimimo.com',
+    model: 'mimo-v2.6-flash',
+    label: 'MiMo'
+  }
+}
+
+export function aiProviderLabel(provider: AiProvider): string {
+  return AI_DEFAULTS[provider].label
+}
+
+function envOf(name: string): string | undefined {
+  const value = process.env[name]?.trim()
+  return value ? value : undefined
+}
+
+/**
+ * Base URL 归一化：允许用户直接粘贴官方文档里的完整地址。
+ * 代码固定拼 `/v1/chat/completions`，因此这里剥掉尾部 `/v1`、完整 `/chat/completions`
+ * 以及 Anthropic 兼容后缀 `/anthropic`，避免出现 `/v1/v1/...`。
+ */
+export function normalizeAiBaseUrl(raw: string): string {
+  let url = raw.trim().replace(/\/+$/, '')
+  url = url.replace(/\/chat\/completions$/i, '')
+  url = url.replace(/\/v1$/i, '')
+  url = url.replace(/\/anthropic$/i, '')
+  return url.replace(/\/+$/, '')
+}
+
+function inferProvider(base: string | undefined, model: string | undefined): AiProvider {
+  const explicit = envOf('AUTODOC_AI_PROVIDER')?.toLowerCase()
+  if (explicit === 'deepseek' || explicit === 'mimo') return explicit
+  if (envOf('MIMO_API_KEY')) return 'mimo'
+  if (model?.toLowerCase().startsWith('mimo-')) return 'mimo'
+  if (base?.toLowerCase().includes('xiaomimimo.com')) return 'mimo'
+  return 'deepseek'
+}
+
+/**
+ * 读取当前 KEY 链路的 AI 配置（OpenAI 兼容协议）。
+ * 优先级：AUTODOC_AI_* 通用变量 > 供应商变量（MIMO_* / DEEPSEEK_*）。
+ * 未配置 key 时返回 null（AI 能力优雅降级为纯静态分析）。
+ */
+export function getAiConfig(): AiConfig | null {
   loadEnv()
-  const apiKey = process.env.DEEPSEEK_API_KEY?.trim()
+
+  const genericKey = envOf('AUTODOC_AI_API_KEY')
+  const mimoKey = envOf('MIMO_API_KEY')
+  const legacyKey = envOf('DEEPSEEK_API_KEY')
+  // 供应商判定同时看通用/供应商变量，避免只改模型名时仍走旧默认 base
+  const baseHint =
+    envOf('AUTODOC_AI_BASE_URL') ?? envOf('MIMO_BASE_URL') ?? envOf('DEEPSEEK_BASE_URL')
+  const modelHint = envOf('AUTODOC_AI_MODEL') ?? envOf('MIMO_MODEL') ?? envOf('DEEPSEEK_MODEL')
+  const provider = inferProvider(baseHint, modelHint)
+
+  const apiKey = genericKey ?? (provider === 'mimo' ? mimoKey : undefined) ?? legacyKey
   if (!apiKey) return null
+
+  // base：通用变量优先；MiMo 只接受 MIMO_* 或显式指向小米域名的 DEEPSEEK_BASE_URL，
+  // 避免「切了模型但没切 base」时仍请求 DeepSeek。
+  let rawBase = envOf('AUTODOC_AI_BASE_URL')
+  if (!rawBase && provider === 'mimo') {
+    rawBase =
+      envOf('MIMO_BASE_URL') ??
+      (envOf('DEEPSEEK_BASE_URL')?.includes('xiaomimimo.com')
+        ? envOf('DEEPSEEK_BASE_URL')
+        : undefined)
+  }
+  if (!rawBase && provider === 'deepseek') rawBase = envOf('DEEPSEEK_BASE_URL')
+
+  // model：MiMo 只接受 MIMO_* 或 mimo-* 的模型名；旧 deepseek-flash 不会漏进 MiMo 请求
+  let model = envOf('AUTODOC_AI_MODEL')
+  if (!model && provider === 'mimo') {
+    model =
+      envOf('MIMO_MODEL') ??
+      (envOf('DEEPSEEK_MODEL')?.toLowerCase().startsWith('mimo-')
+        ? envOf('DEEPSEEK_MODEL')
+        : undefined)
+  }
+  if (!model && provider === 'deepseek') model = envOf('DEEPSEEK_MODEL')
+
+  const explicitMaxTokens = envOf('AUTODOC_AI_MAX_TOKENS_FIELD')
+  const maxTokensField: MaxTokensField =
+    explicitMaxTokens === 'max_tokens' || explicitMaxTokens === 'max_completion_tokens'
+      ? explicitMaxTokens
+      : provider === 'mimo'
+        ? 'max_completion_tokens'
+        : 'max_tokens'
+
+  const thinkingEnv = envOf('AUTODOC_AI_THINKING')?.toLowerCase()
+  // MiMo 默认关闭思考：AutoDoc 是结构化 JSON 输出，思考会占用输出预算且增加消耗
+  const thinking: AiThinkingMode | undefined =
+    provider === 'mimo' ? (thinkingEnv === 'enabled' ? 'enabled' : 'disabled') : undefined
+
   return {
+    provider,
     apiKey,
-    baseUrl: (process.env.DEEPSEEK_BASE_URL?.trim() || 'https://api.deepseek.com').replace(
-      /\/+$/,
-      ''
-    ),
-    model: process.env.DEEPSEEK_MODEL?.trim() || 'deepseek-flash'
+    baseUrl: normalizeAiBaseUrl(rawBase ?? AI_DEFAULTS[provider].baseUrl),
+    model: model ?? AI_DEFAULTS[provider].model,
+    maxTokensField,
+    ...(thinking ? { thinking } : {})
   }
 }

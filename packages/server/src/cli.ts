@@ -133,7 +133,7 @@ program
       const cwd = process.cwd()
       // 仓库根（hub base）：与 cwd 无关，供 hub 模式解析 configs/projects.json、相对项目路径
       const repoRoot = findRepoRoot()
-      // .env 尽早加载（锚定仓库根、cwd 无关），确保首次 getDeepSeekConfig 前 AI 配置已就绪
+      // .env 尽早加载（锚定仓库根、cwd 无关），确保首次 getAiConfig 前 AI 配置已就绪
       loadEnv(repoRoot)
       const manager = new ProjectManager({
         registryPath: options.root ? null : options.projects,

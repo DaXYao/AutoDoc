@@ -23,7 +23,7 @@ import type {
 import { deepseekChat, extractJson, type ChatMessage } from './ai.js'
 import { AiCache } from './aiCache.js'
 import type { DocService } from './context.js'
-import { getDeepSeekConfig } from './env.js'
+import { getAiConfig } from './env.js'
 import {
   DEFAULT_FLOW_CAPS,
   applyFlows,
@@ -1385,7 +1385,7 @@ export function loadInsight(
     const snap = service.storage.getInsightSnapshot(activeId)
     if (snap && snap.pipeline === source) return { insight: snap.insight, graph }
   }
-  const aiEnabled = getDeepSeekConfig() !== null
+  const aiEnabled = getAiConfig() !== null
   const cache = new AiCache(dirname(service.storage.dataPath))
   if (source === 'agent') {
     return {
@@ -1710,7 +1710,7 @@ export async function refreshInsightAI(
 ): Promise<InsightBundle> {
   const feedback = opts.feedback ?? ''
   const graph = buildGraph(service.files)
-  const aiEnabled = getDeepSeekConfig() !== null
+  const aiEnabled = getAiConfig() !== null
   const insight = buildInsight(graph, aiEnabled, feedback, 'key')
   const cache = new AiCache(dirname(service.storage.dataPath))
   // 双管线分离：KEY 刷新只服务 key 管线，**不再清除/套用 supply:***（Agent 供给是另一条独立管线）。

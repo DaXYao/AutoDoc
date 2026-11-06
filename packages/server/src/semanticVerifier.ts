@@ -24,7 +24,7 @@ import {
 } from './semanticGuarantee.js'
 
 /**
- * SG2：KEY（本地 DeepSeek API）语义产物的第二遍 LLM 复核。
+ * SG2：KEY（本地 DeepSeek / 小米 MiMo API）语义产物的第二遍 LLM 复核。
  *
  * 分工：
  * - 硬事实（签名/可见性/装饰器/内部与外部调用、代码块、链路 path/顺序、模块与脉络包含关系）

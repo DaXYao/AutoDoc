@@ -45,7 +45,7 @@ import {
   validateAgentTask
 } from './agentTasks.js'
 import { collectChangesSupplyLight, resolveChangesAgentSemantics, scopeToSupplyId } from './agentSupplyChanges.js'
-import { getDeepSeekConfig } from './env.js'
+import { getAiConfig } from './env.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
 import { AiCache } from './aiCache.js'
 import {
@@ -879,7 +879,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     ) {
       return reply.code(400).send({ error: 'invalid ask payload' })
     }
-    if (getDeepSeekConfig() === null) {
+    if (getAiConfig() === null) {
       return reply.code(409).send({ error: '未配置 AI（DEEPSEEK_API_KEY），就地追问不可用' })
     }
     try {
@@ -908,7 +908,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     ) {
       return reply.code(400).send({ error: 'invalid ask payload' })
     }
-    if (getDeepSeekConfig() === null) {
+    if (getAiConfig() === null) {
       return reply.code(409).send({ error: '未配置 AI（DEEPSEEK_API_KEY），函数级追问不可用' })
     }
     try {

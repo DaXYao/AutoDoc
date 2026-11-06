@@ -15,7 +15,7 @@ import {
   askFunction,
   readFunctionSource
 } from '../src/ask.js'
-import { getDeepSeekConfig } from '../src/env.js'
+import { getAiConfig } from '../src/env.js'
 import { buildGraph } from '../src/graph.js'
 
 /* ------------------------- 临时工程 fixture ------------------------- */
@@ -505,9 +505,9 @@ describe('askFunction（函数级 agentic 追问）', () => {
   it('AI-first：未注入 chat 且未配置 key → 抛错（路由转 409）', async () => {
     const { service } = await makeFixture()
     // 先触发一次 loadEnv（loaded=true），再删 key：避免仓库根 .env 在测试中途回填
-    getDeepSeekConfig()
+    getAiConfig()
     vi.stubEnv('DEEPSEEK_API_KEY', '')
-    expect(getDeepSeekConfig()).toBeNull()
+    expect(getAiConfig()).toBeNull()
     await expect(askFunction(service, req)).rejects.toThrow('未配置 AI')
     service.storage.close()
   })

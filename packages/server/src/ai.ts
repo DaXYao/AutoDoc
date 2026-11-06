@@ -1,4 +1,4 @@
-import { getDeepSeekConfig } from './env.js'
+import { aiProviderLabel, getAiConfig } from './env.js'
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -25,39 +25,57 @@ export function asChatReply(reply: string | ChatReply): ChatReply {
     : reply
 }
 
-/** 调用 DeepSeek chat completions（内置 fetch，零新依赖）；未配置 key 抛错由调用方降级 */
+/**
+ * 调用 OpenAI 兼容 chat completions（内置 fetch，零新依赖）。
+ * 支持 DeepSeek 与小米 MiMo（含 Token Plan）：字段名、思考开关由 provider 适配层决定。
+ * 未配置 key 抛错由调用方降级。
+ */
 export async function deepseekChat(
   messages: ChatMessage[],
   opts?: { temperature?: number; maxTokens?: number }
 ): Promise<ChatReply> {
-  const cfg = getDeepSeekConfig()
-  if (!cfg) throw new Error('DEEPSEEK_API_KEY 未配置')
+  const cfg = getAiConfig()
+  if (!cfg) throw new Error('AI API KEY 未配置')
+  const label = aiProviderLabel(cfg.provider)
+  const maxTokens = opts?.maxTokens ?? 2000
+  const body: Record<string, unknown> = {
+    model: cfg.model,
+    messages,
+    temperature: opts?.temperature ?? 0.2,
+    [cfg.maxTokensField]: maxTokens
+  }
+  if (cfg.provider === 'mimo' && cfg.thinking !== undefined) {
+    body.thinking = { type: cfg.thinking }
+  }
   const res = await fetch(`${cfg.baseUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${cfg.apiKey}`
     },
-    body: JSON.stringify({
-      model: cfg.model,
-      messages,
-      temperature: opts?.temperature ?? 0.2,
-      max_tokens: opts?.maxTokens ?? 2000
-    })
+    body: JSON.stringify(body)
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(`DeepSeek ${res.status}: ${text.slice(0, 200)}`)
+    throw new Error(`${label} ${res.status}: ${text.slice(0, 200)}`)
   }
   const data = (await res.json()) as {
-    choices?: { message?: { content?: string }; finish_reason?: string }[]
+    choices?: {
+      message?: { content?: string; reasoning_content?: string }
+      finish_reason?: string
+    }[]
   }
   const choice = data.choices?.[0]
   const content = choice?.message?.content
-  if (typeof content !== 'string') {
-    throw new Error('DeepSeek 返回缺少 choices[0].message.content')
-  }
   const finishReason = choice?.finish_reason ?? null
+  if (typeof content !== 'string') {
+    const reasoning = choice?.message?.reasoning_content
+    throw new Error(
+      `${label} 返回缺少 choices[0].message.content` +
+        (finishReason ? `（finish_reason=${finishReason}）` : '') +
+        (reasoning ? '；仅有 reasoning_content，请提高输出预算或关闭思考模式' : '')
+    )
+  }
   return { content, finishReason, truncated: finishReason === 'length' }
 }
 

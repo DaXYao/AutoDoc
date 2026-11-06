@@ -589,7 +589,7 @@ watch(
         title="可生成 AI 洞察"
       >
         <div class="flex items-center gap-2">
-          <span class="text-xs">已配置 DeepSeek。生成模块命名/职责、核心角色与链路叙事（按需+缓存）。</span>
+          <span class="text-xs">已配置 KEY API（DeepSeek / 小米 MiMo）。生成模块命名/职责、核心角色与链路叙事（按需+缓存）。</span>
           <n-button size="tiny" type="primary" :loading="aiBusy" @click="triggerAI(false)">
             生成 AI 洞察
           </n-button>
@@ -608,7 +608,7 @@ watch(
       </n-alert>
       <n-alert v-else-if="!agentMode && !insight.aiEnabled" type="warning" class="mb-3" title="未配置 AI">
         <span class="text-xs">
-          当前为纯静态图谱。可配置 DEEPSEEK_API_KEY，或切换到 Agent 视图，让外部 Agent 按规则契约供给语义（模块划分、脉络树、三分类、调用主干等）。
+          当前为纯静态图谱。可配置 KEY API（DEEPSEEK_API_KEY 或 MIMO_API_KEY），或切换到 Agent 视图，让外部 Agent 按规则契约供给语义（模块划分、脉络树、三分类、调用主干等）。
         </span>
       </n-alert>
 

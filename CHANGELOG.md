@@ -47,6 +47,17 @@
 - **测试**：新增 blocks 输入变化重跑用例；回滚回归补 `rerun` 不含 categories 断言。全仓 1514 项（core 443 / server 709 / web 362），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
 - **关联 commit**：随本批次提交。
 
+## 2026-11-06 · KEY 链路支持小米 MiMo（含 Token Plan）· server+web+docs
+
+- **provider 适配层**（`env.ts`）：KEY 链路不再写死 DeepSeek。支持 `MIMO_API_KEY`（`tp-`/`ttp-`，Token Plan）与旧 `DEEPSEEK_*`，并新增 `AUTODOC_AI_PROVIDER/API_KEY/BASE_URL/MODEL/MAX_TOKENS_FIELD/THINKING` 通用变量；按 key/model/base 自动识别供应商。
+- **URL 归一化**：允许直接粘贴官方带 `/v1`、`/chat/completions`、`/anthropic` 的地址，内部统一剥成 base，避免 `/v1/v1/...`。
+- **请求适配**（`ai.ts`）：MiMo 使用 `max_completion_tokens`（DeepSeek 仍 `max_tokens`）；MiMo 默认发送 `thinking: {type:'disabled'}`（结构化 JSON 更稳、更省），可用 `AUTODOC_AI_THINKING=enabled` 开启；错误前缀按 provider 显示，缺 content 时提示 reasoning_content 与输出预算。
+- **默认值**：MiMo → `https://token-plan-cn.xiaomimimo.com` + `mimo-v2.6-flash`；DeepSeek 行为不变。切换模型但未切 base 时，旧 DeepSeek base/model 不会泄漏到 MiMo 请求。
+- **UI/文档**：洞察页「已配置 AI / 未配置 AI」文案改为通用 KEY API；README 与 `.env.example` 增加 MiMo Token Plan 配置示例。
+- **测试**：新增 `aiProvider.test.ts`（URL 归一化、变量优先级、自动识别、DeepSeek/MiMo 请求体、thinking 开关）；全仓 1567 项（core 452 / server 729 / web 386），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
+- **边界**：未使用真实 MiMo KEY 实跑（无凭据）；请求形状按官方 OpenAI 兼容文档与单测验证。修改 `.env` 后需重启服务（配置只在进程启动时加载）。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-06 · 变更影响链路视角终审：变更节点侧向起点与计数口径 · web+docs
 
 - **变更 path 节点仍作为侧向起点**：`buildAffectedChains` 不再跳过直接命中的 path 节点，避免它侧向调用的另一个变更函数漏出本链路、被误归「未进入业务链路」；path 节点自身仍从侧向树排除，不重复。

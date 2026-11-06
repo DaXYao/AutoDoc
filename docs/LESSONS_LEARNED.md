@@ -9,6 +9,7 @@
 - 已被 AGENTS.md 沉淀为硬规则的教训，在本文件保留一条链接即可，不重复展开。
 
 ## 避坑清单（快速扫描）
+- [ ] 「OpenAI 兼容」不等于字段完全一致：小米 MiMo 用 `max_completion_tokens`（非 `max_tokens`）、`thinking` 控制思考，官方 Base URL 还自带 `/v1`；接入新供应商前逐项核对请求字段与 URL 拼接口径，不要直接假设 DeepSeek 的请求体可复用。
 - [ ] 给团队仓库新增托管顶层目录（如 `passVersions`）要同时改 `TEAM_TOP_LEVEL`、`TEAM_MANAGED_DIRS`、`commitKnownPaths` 的 `knownPaths`、`teamConflictKindOf`；TeamStorage 的「非空且无 manifest 拒绝接管」是另一层规则，别用 client `initRepo` 通过就断言路由可用（P5）。
 - [ ] 迁移计数/冲突类型是共享固定形状：加一类会连带前端 `Record` 文案、`counts()` 预设、总数与行索引断言；改前先 grep 所有构造点（P5）。
 - [ ] 「单 pass 重跑不归档里程碑」的判定不能把 `forcePartition` 算进局部：forcePartition 仍属全量归档路径；归纳条件写成「点名 passes 且不足九个且非 force 且非 forcePartition」才不归档（P3 归档门控）。

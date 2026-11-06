@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import type { AskFunctionRequest, AskRequest, AskResponse, CallEdge, FunctionDoc } from '@autodoc/shared-types'
 import { asChatReply, deepseekChat, extractJson, type ChatMessage } from './ai.js'
 import type { DocService } from './context.js'
-import { getDeepSeekConfig } from './env.js'
+import { getAiConfig } from './env.js'
 import type { ChatFn } from './flow.js'
 import { buildGraph, type ProjectGraph } from './graph.js'
 
@@ -155,7 +155,7 @@ function searchFunctions(graph: ProjectGraph, query: string): string {
 /** AI-first 守卫：未注入伪 chat 且未配置 key 时直接抛错（路由转 409），不做静态兜底 */
 function requireChat(deps?: { chat?: ChatFn }): ChatFn {
   if (deps?.chat) return deps.chat
-  if (getDeepSeekConfig() === null) {
+  if (getAiConfig() === null) {
     throw new Error('未配置 AI（DEEPSEEK_API_KEY），就地追问不可用')
   }
   return deepseekChat

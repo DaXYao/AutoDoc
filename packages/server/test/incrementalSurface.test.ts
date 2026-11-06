@@ -17,7 +17,7 @@ import type { ProjectManager } from '../src/projects.js'
  * 用最小假 ProjectManager（仅 getActive）承载 JSON 存储的 DocService，app.inject 打路由。
  */
 
-// 置空 key 确保 getDeepSeekConfig()=null（真实环境变量优先于 .env，空串视为未配置）：
+// 置空 key 确保 getAiConfig()=null（真实环境变量优先于 .env，空串视为未配置）：
 // 路由测试不得触发真实 AI 网络调用
 beforeAll(() => {
   process.env.DEEPSEEK_API_KEY = ''
