@@ -16,7 +16,10 @@ import {
   impactOverlayModel,
   IMPACT_OVERLAY_TOP_N,
   resolveImpactLanding,
-  upstreamRipple
+  upstreamRipple,
+  workspaceModeOf,
+  workspaceNoticesOf,
+  type WorkspaceSource
 } from '../utils/impact'
 import { fnJumpQuery } from '../utils/nav'
 import { indexChangesSemantics } from '../utils/agentSupply'
@@ -429,6 +432,32 @@ const insightFunctions = computed(() => insight.value?.functions ?? {})
 const changedFunctions = computed(() => changeset.value?.changedFunctions ?? [])
 const changedIds = computed(() => new Set(changedFunctions.value.map((f) => f.functionId)))
 
+/* ------------------------- 工作区口径（Git 实时 / 最近生成批次） ------------------------- */
+
+/**
+ * workspace 来源只在「确属 workspace 的变更集」上确认后保留：commit/range 变更集不带
+ * workspaceSource，若按「当前 changeset 缺省即 git」求值，快照项目切到单提交时标签会
+ * 闪回「工作区当前」；加载中/在途沿用上次已知来源，避免来回跳动。
+ */
+const lastWorkspaceSource = ref<WorkspaceSource>('git')
+watch(changeset, (value) => {
+  if (value?.scope === 'workspace' && value.workspaceSource) {
+    lastWorkspaceSource.value = value.workspaceSource
+  }
+})
+const workspaceSource = computed<WorkspaceSource>(() =>
+  changeset.value?.scope === 'workspace'
+    ? changeset.value.workspaceSource ?? lastWorkspaceSource.value
+    : lastWorkspaceSource.value
+)
+const workspaceMode = computed(() => workspaceModeOf({ workspaceSource: workspaceSource.value }))
+/** 口径说明只在当前变更集确为 workspace 时显示：加载中不亮出一句可能不成立的口径文案 */
+const workspaceHintVisible = computed(
+  () => mode.value === 'workspace' && changeset.value?.scope === 'workspace'
+)
+/** 近似 / 截断提示（后端可选字段，缺省为空数组） */
+const workspaceNotices = computed(() => workspaceNoticesOf(changeset.value))
+
 /* ------------------------- G6：变更侧 Agent 语义（读时合并，随 changeset 一起到） ------------------------- */
 
 /** null = 该 scope 无有效供给（或 Agent 已撤回文件）：三层各自不渲染，视图回到纯静态推导 */
@@ -610,13 +639,17 @@ const emptyDescription = computed(() => {
   if (mode.value === 'commit') {
     return '该提交暂无函数级变更记录，可能尚未回填提交历史，或不包含已支持语言的函数变更'
   }
+  // 非 Git 回退批次：空态需说明「这一批生成没有差异」，不能沿用「未提交改动」口径
+  if (mode.value === 'workspace' && workspaceMode.value.source === 'snapshot') {
+    return workspaceMode.value.emptyText
+  }
   if (commits.value !== null && commits.value.length === 0) {
     return '当前没有未提交的函数级改动，也没有可回看的 Git 提交'
   }
   if (commits.value !== null && commits.value.length > 0) {
     return '当前工作区没有函数级未提交改动，可切换到单提交或提交范围继续查看'
   }
-  return '当前工作区没有函数级未提交改动'
+  return workspaceMode.value.emptyText
 })
 
 function fnName(id: string): string {
@@ -715,7 +748,7 @@ function goFunction(id: string): void {
       <section class="ad-card mb-4 px-4 py-3">
         <div class="flex flex-wrap items-center gap-3">
           <n-radio-group :value="mode" size="small" @update:value="selectMode">
-            <n-radio-button value="workspace">工作区当前</n-radio-button>
+            <n-radio-button value="workspace">{{ workspaceMode.label }}</n-radio-button>
             <n-radio-button value="commit" :disabled="commits !== null && commits.length === 0">
               单提交
             </n-radio-button>
@@ -779,6 +812,18 @@ function goFunction(id: string): void {
         </div>
         <p v-if="mode === 'range'" class="mt-1.5 text-xs text-[color:var(--ad-ink-3)]">
           范围 = 提交列表（新→旧）上两端点间的闭区间，端点先后顺序无关
+        </p>
+        <!-- 工作区口径说明：Git 为常态口径；回退生成批次时用琥珀色显式标注来源 -->
+        <p
+          v-if="workspaceHintVisible"
+          class="mt-1.5 text-xs"
+          :class="
+            workspaceMode.source === 'snapshot'
+              ? 'text-amber-700'
+              : 'text-[color:var(--ad-ink-3)]'
+          "
+        >
+          {{ workspaceMode.description }}
         </p>
       </section>
 
@@ -863,6 +908,14 @@ function goFunction(id: string): void {
         </n-empty>
 
         <template v-else-if="changeset">
+          <!-- ============ workspace 降级提示（近似 / 截断） ============ -->
+          <div
+            v-if="workspaceNotices.length > 0"
+            class="mb-3 rounded-[length:var(--ad-radius)] border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-700"
+          >
+            <p v-for="notice in workspaceNotices" :key="notice">{{ notice }}</p>
+          </div>
+
           <!-- ============ 摘要卡 ============ -->
           <section class="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
             <div class="ad-card px-4 py-3">

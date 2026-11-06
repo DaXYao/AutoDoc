@@ -2,6 +2,14 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-06 · 变更影响页工作区变更标注 Git/生成批次来源（P3）· web+docs
+
+- **纯函数（`utils/impact.ts`）**：新增 `workspaceModeOf(changeset)` → `{ source, label, description, emptyText }`（`workspaceSource` 缺省按 git；snapshot 时标签「最近生成批次」、说明回退原因、空态「该生成批次没有函数级变更」）与 `workspaceNoticesOf(changeset)` → `string[]`（近似在前、截断在后，上限常量 `WORKSPACE_CHANGE_FILE_LIMIT=2000` 仅用于文案）。
+- **ImpactView**：workspace scope 单选标签按来源动态（「工作区当前」/「最近生成批次」），选择器下方给一行口径说明（snapshot 用琥珀色强调）；`workspaceApproximate` / `workspaceTruncated` 在摘要区上方以琥珀信息条逐行提示；Git 空态沿用既有「不含未提交改动」文案（含无提交/有提交两种变体），snapshot 空态改用批次口径。来源记在 `lastWorkspaceSource` 中只在 workspace 变更集上刷新，commit/range 变更集与加载中不闪回/跳变；单选、三模式、静态模式与自动回退逻辑未改。
+- **测试**：`test/impact.test.ts` 新增 9 项（git/snapshot 缺省、空态文案互异、approximate、truncated、两者同时、显式 false）。web 371 项全绿，`pnpm --filter @autodoc/web test`、`pnpm lint`、`pnpm build` 通过。
+- **边界**：未改后端 / shared-types / 依赖；未改 AGENTS.md。
+- **关联 commit**：随本批次提交（`feat(web): 工作区变更标注 Git/生成批次来源`）。
+
 ## 2026-11-06 · 变更影响页 workspace 改为 Git 工作区相对 HEAD（P1+P2）· core+server+shared-types+docs
 
 - **P1 Core**：`GitClient` 新增 `workingTreeChanges(rootDir)`（`WorkingTreeResult`）：tracked 走 `git diff --name-status -z -M HEAD`（覆盖已暂存与未暂存），untracked 走 `ls-files --others --exclude-standard --full-name -z` 并映射为 A，同路径 tracked 优先；非仓库 / unborn HEAD / 命令失败返回 `ok:false` 并走既有 degrade 日志，绝不抛错；路径统一为仓库根相对 POSIX。

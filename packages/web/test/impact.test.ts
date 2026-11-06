@@ -9,7 +9,10 @@ import {
   IMPACT_TAG,
   resolveImpactLanding,
   RIPPLE_TAG,
-  upstreamRipple
+  upstreamRipple,
+  WORKSPACE_CHANGE_FILE_LIMIT,
+  workspaceModeOf,
+  workspaceNoticesOf
 } from '../src/utils/impact'
 
 function chain(
@@ -268,5 +271,68 @@ describe('resolveImpactLanding', () => {
 
   it('工作区响应缺失时不做回退', () => {
     expect(resolveImpactLanding(null, commits).automatic).toBe(false)
+  })
+})
+
+describe('workspaceModeOf', () => {
+  it('Git 项目（workspaceSource=git）：标签「工作区当前」+ HEAD 口径说明', () => {
+    expect(workspaceModeOf({ workspaceSource: 'git' })).toEqual({
+      source: 'git',
+      label: '工作区当前',
+      description: '相对 HEAD 的未提交改动（含已暂存与未跟踪文件）',
+      emptyText: '当前没有未提交的函数级改动'
+    })
+  })
+
+  it('缺省（旧服务无 workspaceSource / 加载中无变更集）按 git 处理', () => {
+    expect(workspaceModeOf({}).source).toBe('git')
+    expect(workspaceModeOf(null).source).toBe('git')
+    expect(workspaceModeOf(undefined)).toEqual(workspaceModeOf({ workspaceSource: 'git' }))
+  })
+
+  it('snapshot：标签改「最近生成批次」，说明回退原因，空态不沿用「未提交改动」口径', () => {
+    const copy = workspaceModeOf({ workspaceSource: 'snapshot' })
+    expect(copy.source).toBe('snapshot')
+    expect(copy.label).toBe('最近生成批次')
+    expect(copy.description).toBe('当前项目无 Git 提交或 Git 不可用，展示最近一次生成时的函数差异')
+    expect(copy.emptyText).toBe('该生成批次没有函数级变更')
+  })
+
+  it('两种来源的空态文案互不相同（避免回退批次误报「没有未提交改动」）', () => {
+    const git = workspaceModeOf({ workspaceSource: 'git' })
+    const snapshot = workspaceModeOf({ workspaceSource: 'snapshot' })
+    expect(git.emptyText).not.toBe(snapshot.emptyText)
+    expect(git.label).not.toBe(snapshot.label)
+  })
+})
+
+describe('workspaceNoticesOf', () => {
+  it('无近似/截断标注 → 空数组（视图不渲染提示条）', () => {
+    expect(workspaceNoticesOf({})).toEqual([])
+    expect(workspaceNoticesOf(null)).toEqual([])
+  })
+
+  it('workspaceApproximate → 文件级近似提示', () => {
+    expect(workspaceNoticesOf({ workspaceApproximate: true })).toEqual([
+      '部分变更文件无法解析，已按文件级近似'
+    ])
+  })
+
+  it('workspaceTruncated → 带上限数量的截断提示', () => {
+    const notices = workspaceNoticesOf({ workspaceTruncated: true })
+    expect(notices).toEqual(['变更文件过多，仅展示前 2000 个'])
+    expect(notices[0]).toContain(String(WORKSPACE_CHANGE_FILE_LIMIT))
+  })
+
+  it('两个标注同时存在：先近似后截断，顺序固定', () => {
+    expect(
+      workspaceNoticesOf({ workspaceApproximate: true, workspaceTruncated: true })
+    ).toEqual(['部分变更文件无法解析，已按文件级近似', '变更文件过多，仅展示前 2000 个'])
+  })
+
+  it('显式 false 不产生提示', () => {
+    expect(
+      workspaceNoticesOf({ workspaceApproximate: false, workspaceTruncated: false })
+    ).toEqual([])
   })
 })

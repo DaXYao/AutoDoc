@@ -20,6 +20,70 @@ export const RIPPLE_TAG = '上游'
 /** 影响叠加图合并的链路上限（top5，超出部分不进图，防止大图不可读） */
 export const IMPACT_OVERLAY_TOP_N = 5
 
+/**
+ * workspace 变更集单次处理的变更文件上限，仅用于文案（与服务端
+ * workspaceChanges.ts 的 WORKSPACE_CHANGED_FILE_LIMIT 同口径，截断标记由后端给出）。
+ */
+export const WORKSPACE_CHANGE_FILE_LIMIT = 2000
+
+export type WorkspaceSource = 'git' | 'snapshot'
+
+/** 「工作区当前」口径的展示文案：来源（Git / 最近生成批次）决定标签、说明与空态 */
+export interface WorkspaceModeCopy {
+  /** 归一后的来源（缺省按 git 处理） */
+  source: WorkspaceSource
+  /** scope 单选标签 */
+  label: string
+  /** 选择器下方的口径说明 */
+  description: string
+  /** 该口径无函数级变更时的空态文案 */
+  emptyText: string
+}
+
+/**
+ * 「工作区当前」的文案由变更集来源决定：
+ * - git（含旧服务无该字段的缺省）：工作区相对 HEAD；
+ * - snapshot：非 Git / 无 HEAD 时回退的最近一次生成批次，必须显式标注，避免用户误以为是实时改动。
+ */
+export function workspaceModeOf(
+  changeset: Pick<ImpactChangeset, 'workspaceSource'> | null | undefined
+): WorkspaceModeCopy {
+  if (changeset?.workspaceSource === 'snapshot') {
+    return {
+      source: 'snapshot',
+      label: '最近生成批次',
+      description: '当前项目无 Git 提交或 Git 不可用，展示最近一次生成时的函数差异',
+      emptyText: '该生成批次没有函数级变更'
+    }
+  }
+  return {
+    source: 'git',
+    label: '工作区当前',
+    description: '相对 HEAD 的未提交改动（含已暂存与未跟踪文件）',
+    emptyText: '当前没有未提交的函数级改动'
+  }
+}
+
+/**
+ * workspace 变更集的降级提示（近似 / 截断），顺序固定：先近似后截断。
+ * 两者都缺省时返回空数组（视图不渲染提示条）。
+ */
+export function workspaceNoticesOf(
+  changeset:
+    | Pick<ImpactChangeset, 'workspaceApproximate' | 'workspaceTruncated'>
+    | null
+    | undefined
+): string[] {
+  const notices: string[] = []
+  if (changeset?.workspaceApproximate) {
+    notices.push('部分变更文件无法解析，已按文件级近似')
+  }
+  if (changeset?.workspaceTruncated) {
+    notices.push(`变更文件过多，仅展示前 ${WORKSPACE_CHANGE_FILE_LIMIT} 个`)
+  }
+  return notices
+}
+
 export interface ImpactLandingSelection {
   mode: 'workspace' | 'commit'
   commitHash: string | null
