@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import type { NewProjectInput, ProjectEntry, ProjectInfo } from '@autodoc/shared-types'
+import type { GenerateProgressFn } from '@autodoc/core'
 import { createDocService, scheduleGitBackfill, type DocService, type WarnFn } from './context.js'
 
 /**
@@ -45,6 +46,11 @@ export class ProjectManager {
   private projects = new Map<string, ManagedProject>()
   private order: string[] = []
   private activeId: string | null = null
+  /**
+   * 正在首次加载（全量生成）的项目 id：`activeId` 要等生成完成才切换，
+   * 长任务进度若只按 activeId 取数，add / 切到未加载项目期间整段扫描都不可见。
+   */
+  private loadingId: string | null = null
   private readonly registryPath: string | null
   private readonly baseDir: string
   private readonly warn: WarnFn
@@ -116,6 +122,19 @@ export class ProjectManager {
     return this.activeId
   }
 
+  /** 首次加载中的项目 id（无加载时为 null）；仅用于长任务进度的取数口径 */
+  getLoadingId(): string | null {
+    return this.loadingId
+  }
+
+  /**
+   * 新增/激活共用的 id 口径：root 先按 baseDir 解析，避免空名称项目
+   * 在「路由预先算 id」与「注册时算 id」两条路径得到不同结果（如 root='.'）。
+   */
+  projectIdFor(name: string, root: string): string {
+    return makeProjectId(name, isAbsolute(root) ? root : resolve(this.baseDir, root))
+  }
+
   /** 当前活动项目的 DocService；未激活返回 null */
   getActive(): DocService | null {
     if (!this.activeId) return null
@@ -139,7 +158,7 @@ export class ProjectManager {
   }
 
   /** 激活项目：懒加载 DocService（首次会执行全量生成），返回加载后的 service */
-  async activate(id: string): Promise<DocService> {
+  async activate(id: string, onProgress?: GenerateProgressFn): Promise<DocService> {
     const managed = this.projects.get(id)
     if (!managed) throw new Error(`项目不存在：${id}`)
     if (!managed.service) {
@@ -147,7 +166,12 @@ export class ProjectManager {
       if (!existsSync(rootDir)) {
         throw new Error(`项目根目录不存在：${rootDir}`)
       }
-      managed.service = await createDocService(rootDir, this.warn, configPath, id)
+      this.loadingId = id
+      try {
+        managed.service = await createDocService(rootDir, this.warn, configPath, id, onProgress)
+      } finally {
+        if (this.loadingId === id) this.loadingId = null
+      }
       // createDocService 内部已在首次全量生成后调度 Git 回填
     } else {
       // 复用已加载服务：切回时增量拾取新提交（后台异步、并发去重）
@@ -158,12 +182,12 @@ export class ProjectManager {
   }
 
   /** 新增项目：校验根目录存在 → 注册 → 持久化 → 立即激活加载 */
-  async add(input: NewProjectInput): Promise<ProjectInfo> {
+  async add(input: NewProjectInput, onProgress?: GenerateProgressFn): Promise<ProjectInfo> {
     const rootDir = isAbsolute(input.root) ? input.root : resolve(this.baseDir, input.root)
     if (!existsSync(rootDir)) {
       throw new Error(`目录不存在：${rootDir}`)
     }
-    const id = makeProjectId(input.name, rootDir)
+    const id = this.projectIdFor(input.name, rootDir)
     if (this.projects.has(id)) {
       throw new Error(`项目已存在（id=${id}），请换一个名称`)
     }
@@ -175,7 +199,7 @@ export class ProjectManager {
     }
     this.register(entry)
     await this.persist()
-    await this.activate(id)
+    await this.activate(id, onProgress)
     return this.list().find((p) => p.id === id)!
   }
 

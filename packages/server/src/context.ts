@@ -8,7 +8,7 @@ import {
   resolveTeamProjectKey,
   TeamStorage
 } from '@autodoc/core'
-import type { NormalizedConfig, StorageAdapter } from '@autodoc/core'
+import type { GenerateProgressFn, NormalizedConfig, StorageAdapter } from '@autodoc/core'
 import type {
   AiChunkPass,
   AiChunkStats,
@@ -109,7 +109,8 @@ export async function createDocService(
   rootDir: string,
   onWarn?: WarnFn,
   configPath?: string,
-  projectId?: string
+  projectId?: string,
+  onProgress?: GenerateProgressFn
 ): Promise<DocService> {
   const normalized = await loadConfig(rootDir, configPath)
   const local = createStorage(normalized.config.storage, rootDir)
@@ -150,7 +151,7 @@ export async function createDocService(
     }
   }
 
-  const { files, incremental } = await generateDocs({ rootDir, normalized, storage, onWarn })
+  const { files, incremental } = await generateDocs({ rootDir, normalized, storage, onWarn, onProgress })
   const service: DocService = {
     rootDir,
     normalized,
@@ -168,12 +169,17 @@ export async function createDocService(
 }
 
 /** 重新全量生成（--watch 与 /api/refresh 共用），只替换生成结果，不动用户数据 */
-export async function regenerate(service: DocService, onWarn?: WarnFn): Promise<void> {
+export async function regenerate(
+  service: DocService,
+  onWarn?: WarnFn,
+  onProgress?: GenerateProgressFn
+): Promise<void> {
   const { files, incremental } = await generateDocs({
     rootDir: service.rootDir,
     normalized: service.normalized,
     storage: service.storage,
-    onWarn
+    onWarn,
+    onProgress
   })
   service.files = files
   service.generatedAt = new Date().toISOString()

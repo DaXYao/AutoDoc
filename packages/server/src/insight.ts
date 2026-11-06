@@ -39,6 +39,7 @@ import {
 import { buildGraph, type CoreJudgment, type ProjectGraph } from './graph.js'
 import { collectWorkspacePackageNames } from './workspacePackages.js'
 import { isCategoryCandidate } from './categoryCandidates.js'
+import type { RunHandle, RunStageInput } from './progress.js'
 import type { StorageAdapter } from '@autodoc/core'
 import {
   AI_PASS_ORDER,
@@ -90,6 +91,16 @@ export interface ChunkCacheContext {
   cache: AiCache
   force?: boolean
   prune?: boolean
+  /** P2a：取消信号——每轮 chunk 开始前检查，已取消则停止后续批次 */
+  signal?: AbortSignal
+  /** P2a：每处理完一个 chunk（含缓存命中）回调，completed 从 1 递增 */
+  onProgress?: (completed: number) => void
+}
+
+/** P2a：批次型 AI 调用的取消信号与进度回调（onTick 每完成一批调用一次，含失败批） */
+export interface BatchAiOptions {
+  signal?: AbortSignal
+  onTick?: (completed: number, unit: string) => void
 }
 
 const MAX_AI_MODULES = 6
@@ -509,7 +520,10 @@ async function runChunkedPass<TOut extends Record<string, unknown>>(
   let rerun = 0
   const live = new Set<string>()
   const total = plan.chunks.length
+  let completedCount = 0
   for (let b = 0; b < total; b++) {
+    // 取消后不再发起新请求（已处理的 chunk 结果保留在 out 中，由调用方决定是否落库）
+    if (ctx?.signal?.aborted) break
     const items = plan.chunks[b]
     const lines = plan.linesOf(items)
     const hash = chunkHashOf(items, lines, PROMPT_VERSIONS[pass])
@@ -521,6 +535,7 @@ async function runChunkedPass<TOut extends Record<string, unknown>>(
       if (hit && typeof hit === 'object' && !Array.isArray(hit)) {
         Object.assign(out, hit)
         reused++
+        ctx.onProgress?.(++completedCount)
         continue
       }
     }
@@ -532,7 +547,8 @@ async function runChunkedPass<TOut extends Record<string, unknown>>(
       try {
         const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
           maxTokens,
-          temperature: AI_STRUCTURE_TEMPERATURE
+          temperature: AI_STRUCTURE_TEMPERATURE,
+          signal: ctx?.signal
         })
         if (reply.truncated) {
           console.warn(
@@ -559,8 +575,10 @@ async function runChunkedPass<TOut extends Record<string, unknown>>(
       }
     }
     if (!done) failedBatches++
+    ctx?.onProgress?.(++completedCount)
   }
-  if (ctx?.prune) pruneChunkCache(ctx.cache, pass, live)
+  // 取消时不能剪枝：live 只含已处理 chunk，按它清理会误删尚未处理的存活缓存
+  if (ctx?.prune && !ctx.signal?.aborted) pruneChunkCache(ctx.cache, pass, live)
   return { out, batches: rerun, failedBatches, chunk: { reused, rerun } }
 }
 
@@ -639,7 +657,8 @@ function systemPrompt(): ChatMessage {
 async function aiPartition(
   graph: ProjectGraph,
   feedback: string,
-  previous: PartitionEnvelope | null
+  previous: PartitionEnvelope | null,
+  signal?: AbortSignal
 ): Promise<PartitionEnvelope | null> {
   const ids = indexTable(graph)
   const lines = ids
@@ -666,7 +685,8 @@ async function aiPartition(
     `另给 summary(项目一句话概述)。` +
     `输出 JSON: {"summary":"...","modules":[{"name":"...","description":"...","members":[0,3,7]}]}`
   const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
-    maxTokens: PARTITION_MAX_TOKENS
+    maxTokens: PARTITION_MAX_TOKENS,
+    signal
   })
   // 截断（finish_reason=length）= 划分成员列表可能缺尾：不采纳、不写缓存，回退目录划分
   if (reply.truncated) {
@@ -912,7 +932,8 @@ export function collectExternalCandidates(
 export async function aiExternals(
   graph: ProjectGraph,
   selfPackages: Set<string>,
-  candidates?: ExternalCandidate[]
+  candidates?: ExternalCandidate[],
+  opts?: BatchAiOptions
 ): Promise<ExternalsResult> {
   const cands = candidates ?? collectExternalCandidates(graph, selfPackages)
   if (cands.length === 0) return { externals: {}, batches: 0, failedBatches: 0 }
@@ -920,6 +941,7 @@ export async function aiExternals(
   const multi = batches.length > 1
   const out: Record<string, Record<string, ExternalSymbolInfo>> = {}
   let failedBatches = 0
+  let completedBatches = 0
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b]
     // 全局 idx = 候选在去重排序后列表中的下标；仅接受本批范围内的 idx，避免 AI 幻觉越批污染
@@ -942,7 +964,8 @@ export async function aiExternals(
       try {
         const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
           maxTokens: EXTERNALS_MAX_TOKENS,
-          temperature: AI_STRUCTURE_TEMPERATURE
+          temperature: AI_STRUCTURE_TEMPERATURE,
+          signal: opts?.signal
         })
         if (reply.truncated) {
           console.warn(
@@ -986,12 +1009,16 @@ export async function aiExternals(
       }
     }
     if (!done) failedBatches++
+    opts?.onTick?.(++completedBatches, '批')
   }
   return { externals: out, batches: batches.length, failedBatches }
 }
 
 /** AI 按功能重要性判核心（而非调用次数）；函数多时分批，各批 core idx 取并集合并 */
-export async function aiCoreJudgment(graph: ProjectGraph): Promise<CoreJudgmentResult> {
+export async function aiCoreJudgment(
+  graph: ProjectGraph,
+  opts?: BatchAiOptions
+): Promise<CoreJudgmentResult> {
   const ids = indexTable(graph)
   const modName = new Map(graph.modules.map((m) => [m.id, m.name]))
   // 精简索引行：只留判定必需字段（idx|名|模块|分类|用途截断|入/出度|链路数|是否入口）；全局 idx 保证分批后 ids[idx] 映射稳定
@@ -1008,6 +1035,7 @@ export async function aiCoreJudgment(graph: ProjectGraph): Promise<CoreJudgmentR
   const multi = batches.length > 1
   const out: CoreJudgment = {}
   let failedBatches = 0
+  let completedBatches = 0
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b]
     const batchIdx = new Set(batch.map((x) => x.i))
@@ -1023,7 +1051,8 @@ export async function aiCoreJudgment(graph: ProjectGraph): Promise<CoreJudgmentR
       try {
         const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
           maxTokens: CORE_JUDGMENT_MAX_TOKENS,
-          temperature: AI_STRUCTURE_TEMPERATURE
+          temperature: AI_STRUCTURE_TEMPERATURE,
+          signal: opts?.signal
         })
         if (reply.truncated) {
           console.warn(
@@ -1057,12 +1086,13 @@ export async function aiCoreJudgment(graph: ProjectGraph): Promise<CoreJudgmentR
       }
     }
     if (!done) failedBatches++
+    opts?.onTick?.(++completedBatches, '批')
   }
   return { judgment: out, batches: batches.length, failedBatches }
 }
 
 /** 核心函数系统级角色 */
-async function aiCoreRoles(graph: ProjectGraph): Promise<Record<string, string>> {
+async function aiCoreRoles(graph: ProjectGraph, signal?: AbortSignal): Promise<Record<string, string>> {
   const cores = [...graph.insights.values()]
     .filter((f) => f.isCore)
     .sort((a, b) => b.coreScore - a.coreScore)
@@ -1078,7 +1108,8 @@ async function aiCoreRoles(graph: ProjectGraph): Promise<Record<string, string>>
     `以下是被多条调用链路依赖的核心函数(id|签名|静态用途|被调用次数|链路数)：\n${lines}\n` +
     `输出 JSON: {"<函数id>":"该函数在整个系统中的角色(一句话)"}`
   const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
-    maxTokens: AI_MAX_TOKENS
+    maxTokens: AI_MAX_TOKENS,
+    signal
   })
   if (reply.truncated) {
     console.warn('[autodoc] AI 核心角色输出被截断(finish_reason=length)，视为不完整，已忽略')
@@ -1138,7 +1169,10 @@ export function normalizeNarrativeEnvelope(
   return out
 }
 
-export async function aiNarratives(graph: ProjectGraph): Promise<NarrativeEnvelope> {
+export async function aiNarratives(
+  graph: ProjectGraph,
+  opts?: BatchAiOptions
+): Promise<NarrativeEnvelope> {
   const out: NarrativeEnvelope = {}
   const chainModules = graph.modules
     .filter((m) => m.chainIds.length > 0)
@@ -1149,6 +1183,7 @@ export async function aiNarratives(graph: ProjectGraph): Promise<NarrativeEnvelo
     )
   }
   const modulesWithChains = chainModules.slice(0, MAX_AI_MODULES)
+  let completedBatches = 0
   for (const mod of modulesWithChains) {
     const batches = chunkArray(mod.chainIds, NARRATIVES_CHAIN_BATCH)
     for (let b = 0; b < batches.length; b++) {
@@ -1185,7 +1220,8 @@ export async function aiNarratives(graph: ProjectGraph): Promise<NarrativeEnvelo
         try {
           const reply = await deepseekChat([systemPrompt(), { role: 'user', content: user }], {
             maxTokens: NARRATIVES_MAX_TOKENS,
-            temperature: AI_STRUCTURE_TEMPERATURE
+            temperature: AI_STRUCTURE_TEMPERATURE,
+            signal: opts?.signal
           })
           if (reply.truncated) {
             console.warn(
@@ -1221,6 +1257,7 @@ export async function aiNarratives(graph: ProjectGraph): Promise<NarrativeEnvelo
           )
         }
       }
+      opts?.onTick?.(++completedBatches, '批')
     }
   }
   return out
@@ -1372,6 +1409,8 @@ export interface InsightBundle {
   aiChunkStats?: Record<AiChunkPass, AiChunkStats>
   /** P2：本次刷新的每 pass 概览（重跑/复用/跳过），供路由层展示与 P3 单 pass 重跑反馈使用 */
   passRun?: AiPassRunOverview
+  /** P2a：本次刷新被取消（未完成段标 skipped，且不归档里程碑、不做第二遍语义担保） */
+  cancelled?: boolean
 }
 
 /** P2/P3：一次刷新中各 pass 的处理方式概览（类型定义已迁至共享类型，供前端复用） */
@@ -1391,7 +1430,24 @@ export interface RefreshOptions {
    * 单 pass 局部重跑时路由传 false：pass 版本已各自留存，不再固化整份里程碑。
    */
   archiveMilestone?: boolean
+  /** P2a：长任务进度句柄（可选；缺省时埋点全部短路，既有调用零影响） */
+  progress?: RunHandle
+  /** P2a：取消信号（无 progress 时可单独传，测试用；优先于 progress.signal） */
+  signal?: AbortSignal
 }
+
+/** P2a：洞察九段的进度定义（key 必须是 AiPassKey，顺序与执行顺序一致） */
+const INSIGHT_STAGE_INPUTS: (RunStageInput & { key: AiPassKey })[] = [
+  { key: 'partition', label: '模块划分', singleCall: true },
+  { key: 'coreJudgment', label: '核心判定', unit: '批' },
+  { key: 'categories', label: '三分类', unit: '块' },
+  { key: 'coreRoles', label: '核心角色', singleCall: true },
+  { key: 'narratives', label: '链路叙事', unit: '批' },
+  { key: 'keySteps', label: '主干识别', unit: '块' },
+  { key: 'externals', label: '外部库补全', unit: '批' },
+  { key: 'blocks', label: '内部步骤', unit: '块' },
+  { key: 'flows', label: '脉络树', unit: '轮' }
+]
 
 export interface LoadInsightOptions {
   /** 生产管线（缺省 key）。两套管线各自完整装配，互不覆盖。 */
@@ -1756,6 +1812,10 @@ export async function refreshInsightAI(
   opts: RefreshOptions = {}
 ): Promise<InsightBundle> {
   const feedback = opts.feedback ?? ''
+  const progress = opts.progress
+  const signal = opts.signal ?? progress?.signal
+  const isAborted = (): boolean => signal?.aborted === true
+  progress?.setStages(INSIGHT_STAGE_INPUTS)
   const graph = buildGraph(service.files)
   const aiEnabled = getAiConfig() !== null
   const insight = buildInsight(graph, aiEnabled, feedback, 'key')
@@ -1799,12 +1859,36 @@ export async function refreshInsightAI(
   const markReused = (pass: AiPassKey): void => {
     if (!passRun.reused.includes(pass)) passRun.reused.push(pass)
   }
+  /** 取消后进入某段：整段跳过、不发任何 AI 请求，并按契约标记 cancelled/skipped */
+  const enterPass = (pass: AiPassKey): boolean => {
+    if (isAborted()) {
+      status[pass] = 'skipped'
+      passRun.skipped.push(pass)
+      progress?.stageEnd(pass, 'cancelled')
+      return false
+    }
+    progress?.stageStart(pass)
+    return true
+  }
+  /**
+   * 单段收口：取消发生在该段中途=cancelled（半截结果不落版本）；
+   * 跳过=skipped；实际生成失败=failed；其余（复用/成功/部分批降级）一律 done。
+   */
+  const closeStage = (pass: AiPassKey, generated: boolean): void => {
+    if (!progress) return
+    if (isAborted()) progress.stageEnd(pass, 'cancelled')
+    else if (status[pass] === 'skipped') progress.stageEnd(pass, 'skipped')
+    else if (generated && status[pass] === 'failed') progress.stageEnd(pass, 'failed')
+    else progress.stageEnd(pass, 'done')
+  }
   /**
    * 成功后落版本：compat 必须在 partition 应用之后按当前 graph 计算（narratives/flows 依赖划分身份）。
    * 新增版本时做依赖作废（partition → flows 缓存 + narratives 缓存；coreJudgment → flows 缓存）；
    * 与现有版本深相等则复用旧版本、不作废任何东西（空转重跑不产生新版本）。
    */
   const commitPass = (pass: AiPassKey, value: unknown, chunkStats?: AiChunkStats): void => {
+    // 取消发生在该段生成中途时，产物可能是半截：不落版本，避免固化成「已完成」
+    if (isAborted()) return
     try {
       const result = writePassVersion(storage, pass, value, compatForCurrentPass(pass, graph), chunkStats)
       if (!result.added) return
@@ -1822,7 +1906,14 @@ export async function refreshInsightAI(
   // I2：per函数 pass（categories/keySteps/blocks）的 chunk 增量上下文与统计。
   // force=「重新生成」需无视命中全量重跑；prune=本次结束后清理不再存活的 chunk 键。
   // 单 pass 重跑**不**强制 chunk（pass 内部增量复用保留），故 force 只跟随整份 force。
-  const chunkCtx: ChunkCacheContext = { cache, force: forcedAll, prune: true }
+  // P2a：每个 chunk 段各自计数（completed 由 runChunkedPass 递增），并透传取消信号。
+  const chunkCtxOf = (pass: AiChunkPass): ChunkCacheContext => ({
+    cache,
+    force: forcedAll,
+    prune: true,
+    signal,
+    onProgress: (completed) => progress?.tick(pass, { completed })
+  })
   const aiChunkStats: Record<AiChunkPass, AiChunkStats> = {
     categories: { reused: 0, rerun: 0 },
     keySteps: { reused: 0, rerun: 0 },
@@ -1830,10 +1921,11 @@ export async function refreshInsightAI(
   }
 
   // 1) 划分（结构层，最先应用）：版本优先 → 旧缓存兜底 → 生成
+  const partitionLive = enterPass('partition')
   const partitionRerun = shouldRerun('partition')
   let p: PartitionEnvelope | undefined
   let partitionGenerated = false
-  if (!partitionRerun) {
+  if (partitionLive && !partitionRerun) {
     const pv = pickPassVersion(storage, 'partition', compatForCurrentPass('partition', graph))
     if (pv) {
       p = pv.value as PartitionEnvelope
@@ -1846,12 +1938,14 @@ export async function refreshInsightAI(
       if (p) status.partition = 'ok'
     }
   }
-  if (!p && !reuseOnly('partition')) {
+  if (partitionLive && !p && !reuseOnly('partition')) {
     const previous = cache.get<PartitionEnvelope>(fp, 'partition:latest') ?? null
+    // attempted（含失败）：只有真正发起生成才可能以 failed 收口
+    partitionGenerated = true
     try {
-      p = (await aiPartition(graph, feedback, previous)) ?? undefined
+      progress?.tick('partition')
+      p = (await aiPartition(graph, feedback, previous, signal)) ?? undefined
       status.partition = p ? 'ok' : 'failed'
-      partitionGenerated = !!p
     } catch (e) {
       status.partition = 'failed'
       console.warn(`[autodoc] AI 划分失败，回退目录划分：${e instanceof Error ? e.message : String(e)}`)
@@ -1861,25 +1955,29 @@ export async function refreshInsightAI(
       cache.set(fp, 'partition:latest', p)
       markRerun('partition')
     }
-  } else if (!p) {
+  } else if (partitionLive && !p) {
     status.partition = 'skipped'
     passRun.skipped.push('partition')
   }
-  if (p) {
-    apply('partition', p)
-    if (partitionGenerated) commitPass('partition', p)
-  } else {
-    // 划分失败回退目录：不记录 feedback，避免误导「已采纳」
-    insight.partitionFeedback = ''
+  if (partitionLive) {
+    if (p) {
+      apply('partition', p)
+      if (partitionGenerated) commitPass('partition', p)
+    } else {
+      // 划分失败回退目录：不记录 feedback，避免误导「已采纳」
+      insight.partitionFeedback = ''
+    }
+    closeStage('partition', partitionGenerated)
   }
 
   // 2) AI 核心判定（按功能重要性，覆盖静态中心度；函数多时内部分批合并）
+  const coreJudgmentLive = enterPass('coreJudgment')
   const coreJudgmentRerun = shouldRerun('coreJudgment')
   let cj: CoreJudgment = {}
   let cjReady = false
   let cjGenerated = false
   let cjDegraded = false
-  if (!coreJudgmentRerun) {
+  if (coreJudgmentLive && !coreJudgmentRerun) {
     const cjv = pickPassVersion(storage, 'coreJudgment', compatForCurrentPass('coreJudgment', graph))
     if (cjv) {
       cj = cjv.value as CoreJudgment
@@ -1894,11 +1992,14 @@ export async function refreshInsightAI(
     }
     if (cjReady) status.coreJudgment = Object.keys(cj).length > 0 ? 'ok' : 'failed'
   }
-  if (!cjReady && !reuseOnly('coreJudgment')) {
+  if (coreJudgmentLive && !cjReady && !reuseOnly('coreJudgment')) {
+    cjGenerated = true
     try {
-      const res = await aiCoreJudgment(graph)
+      const res = await aiCoreJudgment(graph, {
+        signal,
+        onTick: (completed) => progress?.tick('coreJudgment', { completed })
+      })
       cj = res.judgment
-      cjGenerated = true
       markRerun('coreJudgment')
       if (Object.keys(cj).length > 0) cache.set(fp, 'coreJudgment', cj)
       // 全部批次失败且无核心 → failed；否则 ok（含部分批降级，仍有有效核心）
@@ -1912,24 +2013,28 @@ export async function refreshInsightAI(
       console.warn(`[autodoc] AI 核心判定失败，回退静态中心度：${e instanceof Error ? e.message : String(e)}`)
       cj = {}
     }
-  } else if (!cjReady) {
+  } else if (coreJudgmentLive && !cjReady) {
     status.coreJudgment = 'skipped'
     passRun.skipped.push('coreJudgment')
   }
-  if (Object.keys(cj).length > 0) {
-    apply('coreJudgment', cj)
-    // 退化（部分批降级）结果不写版本：避免把不完整核心表固化成可复用版本
-    if (cjGenerated && !cjDegraded) commitPass('coreJudgment', cj)
+  if (coreJudgmentLive) {
+    if (Object.keys(cj).length > 0) {
+      apply('coreJudgment', cj)
+      // 退化（部分批降级）结果不写版本：避免把不完整核心表固化成可复用版本
+      if (cjGenerated && !cjDegraded) commitPass('coreJudgment', cj)
+    }
+    closeStage('coreJudgment', cjGenerated)
   }
 
   // 3) pending 函数 AI 分类（I2：文件级 chunk 增量——输入未变的 chunk 直接复用、零 AI 请求）
+  const categoriesLive = enterPass('categories')
   const hadPending = [...graph.nodes.values()].some(isCategoryCandidate)
   const categoriesRerun = shouldRerun('categories')
   let cats: CategoryEnvelope = {}
   let catsReady = false
   let catsGenerated = false
   let catsDegraded = false
-  if (!categoriesRerun) {
+  if (categoriesLive && !categoriesRerun) {
     // 常规刷新与点名重跑都先取版本：版本是用户可见的「当前选择」（可能已回滚），
     // chunk 只是其生成过程缓存；反过来会让回滚后的旧版本被最新 chunk 静默覆盖。
     const cv = pickPassVersion(storage, 'categories', compatForCurrentPass('categories', graph))
@@ -1950,12 +2055,12 @@ export async function refreshInsightAI(
       status.categories = Object.keys(cats).length > 0 ? 'ok' : hadPending ? 'failed' : 'skipped'
     }
   }
-  if (!catsReady && !reuseOnly('categories')) {
+  if (categoriesLive && !catsReady && !reuseOnly('categories')) {
     // 非点名场景：直接走 chunk 增量（命中复用、缺失才发请求），统计由 aiCategories 给出
+    catsGenerated = true
     try {
-      const res = await aiCategories(graph, chunkCtx)
+      const res = await aiCategories(graph, chunkCtxOf('categories'))
       cats = res.categories
-      catsGenerated = true
       aiChunkStats.categories = res.chunk
       status.categories = Object.keys(cats).length > 0 ? 'ok' : hadPending ? 'failed' : 'skipped'
       if (res.chunk.rerun === 0 && res.chunk.reused > 0) markReused('categories')
@@ -1968,22 +2073,26 @@ export async function refreshInsightAI(
       status.categories = 'failed'
       console.warn(`[autodoc] AI 分类失败：${e instanceof Error ? e.message : String(e)}`)
     }
-  } else if (!catsReady) {
+  } else if (categoriesLive && !catsReady) {
     status.categories = 'skipped'
     passRun.skipped.push('categories')
   }
-  apply('categories', cats)
-  if (catsGenerated && !catsDegraded && Object.keys(cats).length > 0) {
-    commitPass('categories', cats, aiChunkStats.categories)
+  if (categoriesLive) {
+    apply('categories', cats)
+    if (catsGenerated && !catsDegraded && Object.keys(cats).length > 0) {
+      commitPass('categories', cats, aiChunkStats.categories)
+    }
+    closeStage('categories', catsGenerated)
   }
 
   // 4) 核心角色
+  const coreRolesLive = enterPass('coreRoles')
   const hadCores = [...graph.insights.values()].some((f) => f.isCore)
   const coreRolesRerun = shouldRerun('coreRoles')
   let roles: Record<string, string> = {}
   let rolesReady = false
   let rolesGenerated = false
-  if (!coreRolesRerun) {
+  if (coreRolesLive && !coreRolesRerun) {
     const rv = pickPassVersion(storage, 'coreRoles', compatForCurrentPass('coreRoles', graph))
     if (rv) {
       roles = rv.value as Record<string, string>
@@ -2000,10 +2109,11 @@ export async function refreshInsightAI(
       status.coreRoles = Object.keys(roles).length > 0 ? 'ok' : hadCores ? 'failed' : 'skipped'
     }
   }
-  if (!rolesReady && !reuseOnly('coreRoles')) {
+  if (coreRolesLive && !rolesReady && !reuseOnly('coreRoles')) {
+    rolesGenerated = true
     try {
-      roles = await aiCoreRoles(graph)
-      rolesGenerated = true
+      progress?.tick('coreRoles')
+      roles = await aiCoreRoles(graph, signal)
       markRerun('coreRoles')
       if (Object.keys(roles).length > 0) cache.set(fp, 'coreRoles', roles)
       status.coreRoles = Object.keys(roles).length > 0 ? 'ok' : hadCores ? 'failed' : 'skipped'
@@ -2012,20 +2122,24 @@ export async function refreshInsightAI(
       console.warn(`[autodoc] AI 核心角色失败：${e instanceof Error ? e.message : String(e)}`)
       roles = {}
     }
-  } else if (!rolesReady) {
+  } else if (coreRolesLive && !rolesReady) {
     status.coreRoles = 'skipped'
     passRun.skipped.push('coreRoles')
   }
-  apply('coreRoles', roles)
-  if (rolesGenerated && Object.keys(roles).length > 0) commitPass('coreRoles', roles)
+  if (coreRolesLive) {
+    apply('coreRoles', roles)
+    if (rolesGenerated && Object.keys(roles).length > 0) commitPass('coreRoles', roles)
+    closeStage('coreRoles', rolesGenerated)
+  }
 
   // 5) 链路叙事（compat 含划分身份：必须在 partition 应用之后计算）
+  const narrativesLive = enterPass('narratives')
   const hadChainModules = graph.modules.some((m) => m.chainIds.length > 0)
   const narrativesRerun = shouldRerun('narratives')
   let narr: NarrativeEnvelope = {}
   let narrReady = false
   let narrGenerated = false
-  if (!narrativesRerun) {
+  if (narrativesLive && !narrativesRerun) {
     const nv = pickPassVersion(storage, 'narratives', compatForCurrentPass('narratives', graph))
     if (nv) {
       narr = nv.value as NarrativeEnvelope
@@ -2042,10 +2156,13 @@ export async function refreshInsightAI(
       status.narratives = Object.keys(narr).length > 0 ? 'ok' : hadChainModules ? 'failed' : 'skipped'
     }
   }
-  if (!narrReady && !reuseOnly('narratives')) {
+  if (narrativesLive && !narrReady && !reuseOnly('narratives')) {
+    narrGenerated = true
     try {
-      narr = await aiNarratives(graph)
-      narrGenerated = true
+      narr = await aiNarratives(graph, {
+        signal,
+        onTick: (completed) => progress?.tick('narratives', { completed })
+      })
       markRerun('narratives')
       if (Object.keys(narr).length > 0) cache.set(fp, NARRATIVES_CACHE_KEY, narr)
       status.narratives = Object.keys(narr).length > 0 ? 'ok' : hadChainModules ? 'failed' : 'skipped'
@@ -2054,14 +2171,18 @@ export async function refreshInsightAI(
       console.warn(`[autodoc] AI 链路叙事失败：${e instanceof Error ? e.message : String(e)}`)
       narr = {}
     }
-  } else if (!narrReady) {
+  } else if (narrativesLive && !narrReady) {
     status.narratives = 'skipped'
     passRun.skipped.push('narratives')
   }
-  apply('narratives', narr)
-  if (narrGenerated && Object.keys(narr).length > 0) commitPass('narratives', narr)
+  if (narrativesLive) {
+    apply('narratives', narr)
+    if (narrGenerated && Object.keys(narr).length > 0) commitPass('narratives', narr)
+    closeStage('narratives', narrGenerated)
+  }
 
   // 5b) 主干识别（keySteps，AI-first，无静态兜底；I2：文件级 chunk 增量）
+  const keyStepsLive = enterPass('keySteps')
   const hadKeyStepCandidates = [...graph.nodes.values()].some(
     (f) => f.calls.length >= KEY_STEPS_MIN_CALLS
   )
@@ -2070,7 +2191,7 @@ export async function refreshInsightAI(
   let keyStepsReady = false
   let keyStepsGenerated = false
   let keyStepsDegraded = false
-  if (!keyStepsRerun) {
+  if (keyStepsLive && !keyStepsRerun) {
     // 版本优先：回滚后的选择必须压过生成过程中的 chunk 缓存（常规刷新同样适用）。
     const kv = pickPassVersion(storage, 'keySteps', compatForCurrentPass('keySteps', graph))
     if (kv && isRecordValue(kv.value)) {
@@ -2090,11 +2211,11 @@ export async function refreshInsightAI(
         Object.keys(keySteps).length > 0 ? 'ok' : hadKeyStepCandidates ? 'failed' : 'skipped'
     }
   }
-  if (!keyStepsReady && !reuseOnly('keySteps')) {
+  if (keyStepsLive && !keyStepsReady && !reuseOnly('keySteps')) {
+    keyStepsGenerated = true
     try {
-      const res = await aiKeySteps(graph, chunkCtx)
+      const res = await aiKeySteps(graph, chunkCtxOf('keySteps'))
       keySteps = res.steps
-      keyStepsGenerated = true
       aiChunkStats.keySteps = res.chunk
       status.keySteps =
         Object.keys(keySteps).length > 0 ? 'ok' : hadKeyStepCandidates ? 'failed' : 'skipped'
@@ -2108,17 +2229,21 @@ export async function refreshInsightAI(
       status.keySteps = 'failed'
       console.warn(`[autodoc] AI 主干识别失败，前端将显示全部调用：${e instanceof Error ? e.message : String(e)}`)
     }
-  } else if (!keyStepsReady) {
+  } else if (keyStepsLive && !keyStepsReady) {
     status.keySteps = 'skipped'
     passRun.skipped.push('keySteps')
   }
-  apply('keySteps', keySteps)
-  if (keyStepsGenerated && !keyStepsDegraded && Object.keys(keySteps).length > 0) {
-    commitPass('keySteps', keySteps, aiChunkStats.keySteps)
+  if (keyStepsLive) {
+    apply('keySteps', keySteps)
+    if (keyStepsGenerated && !keyStepsDegraded && Object.keys(keySteps).length > 0) {
+      commitPass('keySteps', keySteps, aiChunkStats.keySteps)
+    }
+    closeStage('keySteps', keyStepsGenerated)
   }
 
   // 5c) 外部库 AI 补全（externals，AI-first，无静态兜底）：对裸模块说明符的外部调用，
   // 凭模型对公开库的通用知识补「用途/签名」；workspace 自有包（含分析本项目自身）一律排除
+  const externalsLive = enterPass('externals')
   const selfPkgs = collectWorkspacePackageNames(service.rootDir)
   // 候选只算一次：既用于 hadExternalCandidates 判空（skipped 语义），又传给 aiExternals 免重复计算
   const externalCandidates = collectExternalCandidates(graph, selfPkgs)
@@ -2128,7 +2253,7 @@ export async function refreshInsightAI(
   let externalsReady = false
   let externalsGenerated = false
   let externalsDegraded = false
-  if (!externalsRerun) {
+  if (externalsLive && !externalsRerun) {
     const ev = pickPassVersion(storage, 'externals', compatForCurrentPass('externals', graph))
     if (ev) {
       externals = ev.value as Record<string, Record<string, ExternalSymbolInfo>>
@@ -2146,11 +2271,14 @@ export async function refreshInsightAI(
         Object.keys(externals).length > 0 ? 'ok' : hadExternalCandidates ? 'failed' : 'skipped'
     }
   }
-  if (!externalsReady && !reuseOnly('externals')) {
+  if (externalsLive && !externalsReady && !reuseOnly('externals')) {
+    externalsGenerated = true
     try {
-      const res = await aiExternals(graph, selfPkgs, externalCandidates)
+      const res = await aiExternals(graph, selfPkgs, externalCandidates, {
+        signal,
+        onTick: (completed) => progress?.tick('externals', { completed })
+      })
       externals = res.externals
-      externalsGenerated = true
       markRerun('externals')
       if (Object.keys(externals).length > 0) cache.set(fp, 'externals', externals)
       status.externals =
@@ -2164,18 +2292,22 @@ export async function refreshInsightAI(
       console.warn(`[autodoc] AI 外部库补全失败，前端保持「外部/未解析」文案：${e instanceof Error ? e.message : String(e)}`)
       externals = {}
     }
-  } else if (!externalsReady) {
+  } else if (externalsLive && !externalsReady) {
     status.externals = 'skipped'
     passRun.skipped.push('externals')
   }
-  apply('externals', externals)
-  if (externalsGenerated && !externalsDegraded && Object.keys(externals).length > 0) {
-    commitPass('externals', externals)
+  if (externalsLive) {
+    apply('externals', externals)
+    if (externalsGenerated && !externalsDegraded && Object.keys(externals).length > 0) {
+      commitPass('externals', externals)
+    }
+    closeStage('externals', externalsGenerated)
   }
 
   // 5d) 内部步骤归一（blocks，AI-first，无静态兜底；I2：文件级 chunk 增量）：把有注释块函数的
   // codeBlocks 归并为有序「内部步骤」大纲；失败/为空时 internalSteps 保持 undefined，前端回退原文展示。
   // 降级信号不再需要信封持久化：失败 chunk 不写缓存，loadInsight 回读时未命中 chunk 数即 failedBatches 等价物
+  const blocksLive = enterPass('blocks')
   const hadBlockCandidates = [...graph.nodes.values()].some((f) => f.codeBlocks.length > 0)
   const blocksRerun = shouldRerun('blocks')
   let internalSteps: Record<string, InternalStep[]> = {}
@@ -2183,7 +2315,7 @@ export async function refreshInsightAI(
   let blocksGenerated = false
   let blocksDegraded = false
   let blocksLegacyMisses = 0
-  if (!blocksRerun) {
+  if (blocksLive && !blocksRerun) {
     // 版本优先：回滚后的选择必须压过生成过程中的 chunk 缓存（常规刷新同样适用）。
     const bv = pickPassVersion(storage, 'blocks', compatForCurrentPass('blocks', graph))
     if (bv && isRecordValue(bv.value)) {
@@ -2207,11 +2339,11 @@ export async function refreshInsightAI(
       status.blocks = blocksStatusOf(internalSteps, blocksLegacyMisses, hadBlockCandidates)
     }
   }
-  if (!blocksReady && !reuseOnly('blocks')) {
+  if (blocksLive && !blocksReady && !reuseOnly('blocks')) {
+    blocksGenerated = true
     try {
-      const res = await aiInternalSteps(graph, chunkCtx)
+      const res = await aiInternalSteps(graph, chunkCtxOf('blocks'))
       internalSteps = res.steps
-      blocksGenerated = true
       aiChunkStats.blocks = res.chunk
       status.blocks = blocksStatusOf(internalSteps, res.failedBatches, hadBlockCandidates)
       if (res.chunk.rerun === 0 && res.chunk.reused > 0) markReused('blocks')
@@ -2224,16 +2356,20 @@ export async function refreshInsightAI(
       status.blocks = 'failed'
       console.warn(`[autodoc] AI 内部步骤失败，前端将回退注释块原文：${e instanceof Error ? e.message : String(e)}`)
     }
-  } else if (!blocksReady) {
+  } else if (blocksLive && !blocksReady) {
     status.blocks = 'skipped'
     passRun.skipped.push('blocks')
   }
-  apply('blocks', internalSteps)
-  if (blocksGenerated && !blocksDegraded && Object.keys(internalSteps).length > 0) {
-    commitPass('blocks', internalSteps, aiChunkStats.blocks)
+  if (blocksLive) {
+    apply('blocks', internalSteps)
+    if (blocksGenerated && !blocksDegraded && Object.keys(internalSteps).length > 0) {
+      commitPass('blocks', internalSteps, aiChunkStats.blocks)
+    }
+    closeStage('blocks', blocksGenerated)
   }
 
   // 6) 递归脉络架构树（依赖前 5 段的 modules/core/chains/narratives）
+  const flowsLive = enterPass('flows')
   const flowCfg = service.normalized.config.insight?.flow ?? {}
   const caps: FlowCaps = {
     maxDepth: flowCfg.maxDepth ?? DEFAULT_FLOW_CAPS.maxDepth,
@@ -2243,6 +2379,7 @@ export async function refreshInsightAI(
   let flowsAiOk = false
   let flowsStatus: AiPassStatus = 'failed'
   let flowsWriteFailed = false
+  let flowsGenerated = false
   const flowsRerun = shouldRerun('flows')
   // Major-1：forcePartition（「提交划分建议」主流程）会让 pass1 重算划分 → 模块变成新的 mod:i，
   // 若仍复用陈旧 flows:tree，树会按旧划分归组、mod:i 深链跳错模块 ⇒ 与 force 同样绕过整树缓存。
@@ -2251,7 +2388,7 @@ export async function refreshInsightAI(
   // 无 basis 的旧缓存视同不匹配，走重算/兜底而不是按旧划分复用。
   const pass6Basis = flowTreeBasis(graph)
   // 双管线分离：KEY 管线恒用本地 flows:tree（Agent 整树供给只属于 Agent 管线，不抑制本管线）。
-  {
+  if (flowsLive) {
     let flowsTree: FlowTreeCache | undefined
     if (!invalidateFlows) {
       const fv = pickPassVersion(storage, 'flows', compatForCurrentPass('flows', graph))
@@ -2290,8 +2427,20 @@ export async function refreshInsightAI(
       }
       let roots: FlowNode[] = []
       const stats: FlowGenStats = { subtreeFailures: 0, emptyResponses: 0 }
-      const flowDeps: FlowDeps = { cache, fingerprint: fp, caps, stats }
+      // P2a：每轮真正发起 chat 前 tick（含重试轮）；有 signal 时才包 chat，避免改变默认行为
+      let flowRounds = 0
+      const flowDeps: FlowDeps = {
+        cache,
+        fingerprint: fp,
+        caps,
+        stats,
+        onRequest: () => progress?.tick('flows', { completed: ++flowRounds })
+      }
+      if (signal) {
+        flowDeps.chat = (messages, chatOpts) => deepseekChat(messages, { ...chatOpts, signal })
+      }
       try {
+        flowsGenerated = true
         roots = await generateFlows(graph, insight, flowDeps)
         markRerun('flows')
         flowsAiOk = roots.length > 0
@@ -2343,8 +2492,12 @@ export async function refreshInsightAI(
     }
     const flowsProduced = !!insight.flows && insight.flows.length > 0
     status.flows = !flowsProduced ? 'skipped' : flowsWriteFailed ? 'failed' : flowsStatus
+    closeStage('flows', flowsGenerated)
   }
 
+  // P2a：取消后不做第二遍语义担保、不归档里程碑；已完成段的版本已在上面各自留存。
+  // SG2 本身不含 signal，期间收到的取消只能在它返回后补判，避免把已取消的运行当成完整成功归档。
+  let cancelled = isAborted()
   insight.aiGenerated = touched
   cache.set(fp, 'aiStatus', status)
   insight.aiStatus = status
@@ -2352,7 +2505,7 @@ export async function refreshInsightAI(
   // 硬事实走静态校验；意图类走 KEY 第二遍 LLM（命中 guarantee:* 缓存则不重复请求）。
   // 双管线分离后本管线不含任何 Agent 断言，不再为 Agent 对象做第二遍复核。
   // 单 pass 局部重跑跳过整份复核：否则会为未点名的 pass 也补发 LLM 请求，违背「只重跑点名项」。
-  if (!partialPassRun) {
+  if (!partialPassRun && !cancelled) {
     try {
       const sg2 = await attachKeyGuarantees(insight, graph, cache, {
         force: opts.force === true,
@@ -2385,8 +2538,9 @@ export async function refreshInsightAI(
   // saveInsightSnapshot 内部 try/catch，失败不影响主流程。
   // P3：单 pass 局部重跑不归档整份里程碑（各 pass 版本已独立留存）；全量 force / forcePartition
   // 与常规刷新保持归档。里程碑记录组成它的各 pass 版本 id，供整份回滚批量切换。
+  cancelled = cancelled || isAborted()
   const archiveMilestone = opts.archiveMilestone ?? !partialPassRun
-  if (archiveMilestone) {
+  if (archiveMilestone && !cancelled) {
     saveInsightSnapshot(
       service,
       insight,
@@ -2395,5 +2549,5 @@ export async function refreshInsightAI(
       collectPassVersionIds(storage, graph, status, (p) => compatForCurrentPass(p, graph))
     )
   }
-  return { insight, graph, aiChunkStats, passRun }
+  return { insight, graph, aiChunkStats, passRun, ...(cancelled ? { cancelled: true } : {}) }
 }

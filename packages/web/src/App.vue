@@ -1,30 +1,40 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import type { DropdownOption } from 'naive-ui'
-import type { InsightSource } from '@autodoc/shared-types'
+import type { InsightSource, TaskProgress as TaskProgressSnapshot } from '@autodoc/shared-types'
 import { getMode } from './data/api'
 import {
   appReady,
   appState,
   bootstrap,
+  refreshInsight,
   regenerateActive,
+  reloadAll,
   switchProject,
   switchSource
 } from './store/app'
+import { progressState, startProgressTracking, subscribeProgressHandlers } from './store/progress'
 import { formatDate } from './utils/format'
 import { formatIncrementalSummary } from './utils/incremental'
 import { INSIGHT_SOURCE_OPTIONS, withInsightSourceQuery } from './utils/insightSource'
+import { resolveProgressConfig, shouldShowProgress } from './utils/progress'
 import { teamStatusPill } from './utils/team'
 import { toast } from './utils/toast'
 import { themeOverrides, adBtnOutlineOverrides } from './theme'
 import SearchBar from './components/SearchBar.vue'
+import TaskProgress from './components/TaskProgress.vue'
 import TeamPanel from './components/TeamPanel.vue'
 
 const router = useRouter()
 
+let unsubscribeProgress: (() => void) | null = null
+
 onMounted(async () => {
   await bootstrap()
+  // F5 重连：已有 current 时首拉即恢复轮询；完成时由壳层兜底刷新当前视图数据
+  unsubscribeProgress = subscribeProgressHandlers({ onFinished: handleTaskFinished })
+  void startProgressTracking()
   // hub 模式且尚无活动项目：跳转到项目选择页
   if (appState.hubEnabled && appState.activeProjectId === null) {
     await router.replace({ name: 'projects' })
@@ -34,6 +44,39 @@ onMounted(async () => {
     await router.replace({ name: 'files' })
   }
 })
+
+onUnmounted(() => {
+  unsubscribeProgress?.()
+  unsubscribeProgress = null
+})
+
+/**
+ * 任务完成兜底：洞察页自己订阅并刷新，壳层只处理「不在洞察页」的情况以免重复请求；
+ * 扫描完成后当前视图的数据可能已过期，直接走既有的全量重载。
+ */
+function handleTaskFinished(task: TaskProgressSnapshot): void {
+  if (task.kind === 'insight') {
+    if (appState.source !== 'key') return
+    if (router.currentRoute.value.name === 'insight') return
+    // 后台兜底刷新：失败不打断壳层（409 无活动项目仍由 api 层钩子驱动自愈）
+    void refreshInsight().catch(() => {})
+    return
+  }
+  if (task.kind === 'scan') void reloadAll().catch(() => {})
+}
+
+/** 顶栏 compact 指示：仅 KEY 管线 + 本地服务 + 运行中任务 */
+const compactTask = computed(() => {
+  const task = progressState.current
+  return shouldShowProgress(task, appState.source, isStatic.value) ? task : null
+})
+const progressConfig = computed(() => resolveProgressConfig(appState.meta))
+
+function goCompactTask(): void {
+  const task = compactTask.value
+  if (!task) return
+  void router.push({ name: task.kind === 'scan' ? 'projects' : 'insight' })
+}
 
 const readOnly = computed(() => appState.meta?.readOnly ?? false)
 const isStatic = computed(() => appReady.value && getMode() === 'static')
@@ -260,6 +303,14 @@ async function handleRefresh(): Promise<void> {
           </div>
 
           <div class="ad-header-actions ml-auto flex items-center gap-2 min-w-0">
+            <TaskProgress
+              v-if="compactTask"
+              variant="compact"
+              :task="compactTask"
+              :now-ms="progressState.nowMs"
+              :config="progressConfig"
+              @navigate="goCompactTask"
+            />
             <n-tag v-if="readOnly" size="small" type="warning" class="shrink-0">
               只读
             </n-tag>

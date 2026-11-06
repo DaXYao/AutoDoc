@@ -5,12 +5,20 @@ import type {
   FileSummary,
   FunctionDocView,
   FunctionIndexEntry,
+  ProgressUiConfig,
   ServerMeta
 } from '@autodoc/shared-types'
 import type { DocService } from './context.js'
 
 /** 变更历史只展示最近三次，更早记录仅计归档数量（数据仍全量保留） */
 const RECENT_CHANGE_LIMIT = 3
+
+/** 进度提醒/轮询缺省值：配置 ui.progress 未覆盖时下发，避免前端各自硬编码 */
+const DEFAULT_PROGRESS_UI: Required<ProgressUiConfig> = {
+  stallWarnMs: 120000,
+  singleCallStallWarnMs: 300000,
+  pollMs: 1000
+}
 
 export function toFileSummary(file: FileDoc): FileSummary {
   const counts: FileSummary['counts'] = {
@@ -93,11 +101,20 @@ export function toMeta(
   readOnly = false,
   pipeline?: ServerMeta['pipeline']
 ): ServerMeta {
+  const progress = service.normalized.config.ui?.progress
   return {
     generatedAt: service.generatedAt,
     root: service.rootDir,
     readOnly,
-    ui: { defaultExpand: service.normalized.defaultExpand },
+    ui: {
+      defaultExpand: service.normalized.defaultExpand,
+      progress: {
+        stallWarnMs: progress?.stallWarnMs ?? DEFAULT_PROGRESS_UI.stallWarnMs,
+        singleCallStallWarnMs:
+          progress?.singleCallStallWarnMs ?? DEFAULT_PROGRESS_UI.singleCallStallWarnMs,
+        pollMs: progress?.pollMs ?? DEFAULT_PROGRESS_UI.pollMs
+      }
+    },
     editor: service.normalized.config.editor ?? {},
     storage: { type: service.storage.kind },
     fileCount: service.files.length,

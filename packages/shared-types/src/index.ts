@@ -452,6 +452,8 @@ export interface AutodocConfig {
   classification?: ClassificationConfig
   ui?: {
     defaultExpand?: DefaultExpandConfig
+    /** 长任务进度：停滞阈值与轮询间隔（/api/meta 下发生效值） */
+    progress?: ProgressUiConfig
   }
   storage?: StorageConfig
   /** 团队协作：启用后批注/洞察快照读写团队数据仓库（见 docs/TEAM_COLLABORATION.md） */
@@ -466,7 +468,11 @@ export interface ServerMeta {
   generatedAt: string
   root: string
   readOnly: boolean
-  ui: { defaultExpand: Required<DefaultExpandConfig> }
+  ui: {
+    defaultExpand: Required<DefaultExpandConfig>
+    /** 可选：旧静态导出站数据没有该字段，前端须容错并按内置默认值 */
+    progress?: Required<ProgressUiConfig>
+  }
   editor: EditorConfig
   storage: { type: 'sqlite' | 'json' }
   fileCount: number
@@ -735,6 +741,8 @@ export interface InsightResponse extends ProjectInsight {
   aiChunkStats?: Record<AiChunkPass, AiChunkStats>
   /** P3：本次 POST /api/insight/ai 的每 pass 概览（仅当次响应附带，不持久化） */
   passRun?: AiPassRunOverview
+  /** P2a：本次生成被用户取消（已完成段的版本保留，未完成段标记 skipped） */
+  cancelled?: boolean
 }
 
 /** P3：一次 KEY 刷新中各 pass 的处理方式概览（重跑/复用/跳过） */
@@ -1047,6 +1055,72 @@ export interface AskResponse {
   rounds: number
   /** true=触发安全天花板/协议失败后的兜底解答（质量可能下降） */
   degraded: boolean
+  /** true=用户取消，answer 为空占位；前端不渲染答案区 */
+  cancelled?: boolean
+}
+
+/* ------------------------- 长任务进度（旁路轮询） ------------------------- */
+
+/** 长任务种类：项目扫描 / 洞察九段 AI 生成 / 问一问 */
+export type TaskKind = 'scan' | 'insight' | 'ask'
+
+export type TaskStageState = 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'cancelled'
+
+/**
+ * 单个阶段的进度快照：只暴露天然计数单位，不提供百分比。
+ * 前端按 updatedAt 判定停滞；singleCall 阶段用更长的停滞阈值。
+ */
+export interface TaskStageProgress {
+  /** AiPassKey / 'parse' / 'graph' / 'ask' */
+  key: string
+  /** 中文标签：模块划分/三分类/已解析文件… */
+  label: string
+  state: TaskStageState
+  /** 天然计数单位：已完成块数/文件数，无百分比 */
+  completed?: number
+  /** 计数单位名：'块' | '文件' | '条链路' | '批' */
+  unit?: string
+  /** 单次模型调用段（无内部进度）：前端只显示等待秒数并用更长停滞阈值 */
+  singleCall?: boolean
+  startedAt?: string
+  endedAt?: string
+  ms?: number
+}
+
+/** GET /api/progress 返回的单项目进度快照 */
+export interface TaskProgress {
+  runId: string
+  kind: TaskKind
+  projectId: string
+  /** 当前一句话（如「三分类 · 已完成 12 块」） */
+  label: string
+  stages: TaskStageProgress[]
+  startedAt: string
+  /** 任意 tick 都刷新，前端据此判定停滞 */
+  updatedAt: string
+  /** 单调递增，前端可判断是否有新动静 */
+  seq: number
+  done: boolean
+  cancelled?: boolean
+  error?: string
+  /** 扫描任务不可取消 */
+  cancelable: boolean
+}
+
+/** GET /api/progress 响应：无活动项目时两者均为 null */
+export interface TaskProgressResponse {
+  current: TaskProgress | null
+  last: TaskProgress | null
+}
+
+/** 长任务进度的提醒阈值与轮询间隔（配置 ui.progress，/api/meta 下发生效值） */
+export interface ProgressUiConfig {
+  /** 普通阶段停滞提醒阈值（毫秒，默认 120000） */
+  stallWarnMs?: number
+  /** 单次模型调用阶段停滞阈值（默认 300000） */
+  singleCallStallWarnMs?: number
+  /** 前端轮询间隔（默认 1000） */
+  pollMs?: number
 }
 
 /* ------------------------- Agent 语义供给通道（G1） ------------------------- */

@@ -232,6 +232,32 @@ describe('loadConfig：team 配置（团队数据仓库）', () => {
   })
 })
 
+describe('loadConfig：ui.progress（长任务进度阈值）', () => {
+  it('接受合法阈值并原样保留', async () => {
+    const n = await loadWith({
+      ui: { progress: { stallWarnMs: 60000, singleCallStallWarnMs: 180000, pollMs: 500 } }
+    })
+    expect(n.config.ui?.progress).toEqual({
+      stallWarnMs: 60000,
+      singleCallStallWarnMs: 180000,
+      pollMs: 500
+    })
+  })
+
+  it('拒绝 0/负数/小数（避免每帧轮询或立刻报停滞）', async () => {
+    await expect(loadWith({ ui: { progress: { stallWarnMs: 0 } } })).rejects.toThrow(/stallWarnMs/)
+    await expect(loadWith({ ui: { progress: { singleCallStallWarnMs: -1 } } })).rejects.toThrow(
+      /singleCallStallWarnMs/
+    )
+    await expect(loadWith({ ui: { progress: { pollMs: 99.5 } } })).rejects.toThrow(/pollMs/)
+  })
+
+  it('未配置 ui.progress 时保持 undefined（由服务端下发默认值）', async () => {
+    const n = await loadWith({ include: ['**/*.ts'] })
+    expect(n.config.ui?.progress).toBeUndefined()
+  })
+})
+
 describe('resolveTeamProjectKey：projectKey 缺省派生与显式校验', () => {
   it('显式合法值原样返回', () => {
     expect(resolveTeamProjectKey(freshDir(), 'autodoc-team_1.0')).toBe('autodoc-team_1.0')

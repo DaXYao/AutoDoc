@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import type {
@@ -7,13 +7,15 @@ import type {
   AiPassRunOverview,
   AiPassVersionListResponse,
   AiPassVersionListItem,
-  FlowNode
+  FlowNode,
+  TaskProgress as TaskProgressSnapshot
 } from '@autodoc/shared-types'
 import {
   deletePassVersion,
   fetchPassVersions,
   getMode,
   isNoActiveProjectError,
+  isRunInProgressError,
   rollbackPassVersion
 } from '../data/api'
 import {
@@ -27,6 +29,12 @@ import {
   regenerateInsightAI,
   repartitionInsight
 } from '../store/app'
+import {
+  cancelCurrentTask,
+  progressState,
+  startProgressTracking,
+  subscribeProgressHandlers
+} from '../store/progress'
 import { AI_PASS_LABELS, AI_PASS_ORDER, AI_STATUS_META, formatDate } from '../utils/format'
 import { failedAiPassesOf, passVersionActions, type PassVersionActionState } from '../utils/insightPasses'
 import { PASS_SOURCE_META, isAgentStaticBaseline, resolvePassSourceState, summarizeAgentSupply } from '../utils/agentSupply'
@@ -37,6 +45,7 @@ import { drillTargetId, toggleGraphGroup } from '../utils/flow'
 import { flowTreeModel } from '../utils/graphModel'
 import { getGraphCfg, patchGraphCfg, setGraphCfg } from '../utils/graphPersist'
 import { lookupGuarantee, isGeneratedModuleDescription } from '../utils/semanticGuarantee'
+import { resolveProgressConfig } from '../utils/progress'
 import AgentSourceBadge from '../components/AgentSourceBadge.vue'
 import AgentSupplyPanel from '../components/AgentSupplyPanel.vue'
 import FlowTree from '../components/FlowTree.vue'
@@ -44,10 +53,12 @@ import GraphView from '../components/graph/GraphView.vue'
 import GuaranteedBlock from '../components/GuaranteedBlock.vue'
 import InsightHistory from '../components/InsightHistory.vue'
 import SemanticGuaranteeBadge from '../components/SemanticGuaranteeBadge.vue'
+import TaskProgress from '../components/TaskProgress.vue'
 
 const router = useRouter()
 const message = useMessage()
-const aiBusy = ref(false)
+/** 本视图发起的 AI 请求是否在途（与「已有洞察任务在跑」分开，后者用于 F5 重连） */
+const aiRequestBusy = ref(false)
 const feedback = ref('')
 const partitionBusy = ref(false)
 /** 历史版本区（每次生成 AI 后新快照入档，需要刷新列表） */
@@ -57,33 +68,100 @@ const historyRef = ref<InstanceType<typeof InsightHistory> | null>(null)
 const source = computed(() => appState.source)
 const agentMode = computed(() => source.value === 'agent')
 
+/** Agent 视图不展示 KEY 管线的本地进度 */
+const taskOfInsight = computed(() =>
+  !agentMode.value && progressState.current?.kind === 'insight' ? progressState.current : null
+)
+/** 本地请求在途或洞察任务在跑：F5 重连后按钮仍保持 loading */
+const aiBusy = computed(() => aiRequestBusy.value || taskOfInsight.value !== null)
+const progressConfig = computed(() => resolveProgressConfig(appState.meta))
+
+/**
+ * 本次会话刚结束的洞察任务：只由 onFinished 写入，F5 不自动拿历史 last 冒充。
+ * 完成后收成一行摘要，直到用户开始下一次生成或切换项目/来源。
+ */
+const finishedTask = ref<TaskProgressSnapshot | null>(null)
+const displayTask = computed(
+  () => taskOfInsight.value ?? (agentMode.value ? null : finishedTask.value)
+)
+
+let unsubscribeProgress: (() => void) | null = null
+
 onMounted(() => {
+  // 壳层与页面都要在完成时收口：startProgressTracking 的回调是覆盖式的，必须走订阅
+  unsubscribeProgress = subscribeProgressHandlers({
+    onStarted: () => {
+      finishedTask.value = null
+    },
+    onFinished: handleTaskFinished
+  })
   // 仅 KEY 管线允许自动触发本地 AI；Agent 视图的语义由外部供给决定
   if (!agentMode.value) void triggerAI(false)
 })
 
+onUnmounted(() => {
+  unsubscribeProgress?.()
+  unsubscribeProgress = null
+})
+
+function handleTaskFinished(task: TaskProgressSnapshot): void {
+  if (task.kind !== 'insight') return
+  finishedTask.value = task
+  if (agentMode.value) return
+  // 本地请求仍在自己收尾：POST 返回会自行写回 insight，避免并发重复请求
+  if (aiRequestBusy.value) return
+  // 后台兜底刷新：失败不打断页面（409 无活动项目仍由 api 层钩子驱动自愈）
+  void refreshInsight().catch(() => {})
+  void historyRef.value?.reload()
+}
+
 // 切回 KEY 时补一次按需 AI（组件不重挂载，onMounted 不会再跑；命中缓存则秒回）
 watch(source, (next) => {
   if (next === 'key') void triggerAI(false)
+  else finishedTask.value = null
 })
+
+/** 切项目后旧项目的结束摘要不能挂在新项目上 */
+watch(
+  () => appState.activeProjectId,
+  () => {
+    finishedTask.value = null
+  }
+)
 
 async function triggerAI(force: boolean): Promise<void> {
   if (agentMode.value) return
   const cur = appState.insight
   if (!cur || !cur.aiEnabled) return
   if (!force && cur.aiGenerated) return
-  aiBusy.value = true
+  if (aiBusy.value) return
+  aiRequestBusy.value = true
+  finishedTask.value = null
   try {
-    if (force) await regenerateInsightAI()
-    else await ensureInsightAI()
+    // 先发请求再挂轮询：服务端在处理 POST 时才登记 current，倒序首拉会落空
+    const request = force ? regenerateInsightAI() : ensureInsightAI()
+    void startProgressTracking()
+    await request
     void historyRef.value?.reload()
   } catch (error) {
-    // 409 由 store 的自愈流程负责提示（并会自行重载数据），这里不再叠一条无指向的错误
-    if (!isNoActiveProjectError(error)) {
+    if (isRunInProgressError(error)) {
+      // 同项目已有任务在跑：不弹错，重新挂上进度即可
+      void startProgressTracking()
+    } else if (!isNoActiveProjectError(error)) {
+      // 无活动项目的 409 由 store 的自愈流程负责提示，这里不再叠一条无指向的错误
       message.error(error instanceof Error ? error.message : String(error))
     }
   } finally {
-    aiBusy.value = false
+    aiRequestBusy.value = false
+  }
+}
+
+async function handleCancelProgress(): Promise<void> {
+  try {
+    await cancelCurrentTask()
+    message.success('已请求取消，已完成的段会保留')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error))
   }
 }
 
@@ -496,9 +574,10 @@ watch(
           size="small"
           secondary
           :loading="aiBusy"
+          :disabled="aiBusy"
           @click="triggerAI(true)"
         >
-          重新生成 AI
+          {{ aiBusy ? '生成中…' : '重新生成 AI' }}
         </n-button>
         <n-button size="small" quaternary @click="router.push({ name: 'home' })">
           查看变更影响
@@ -520,6 +599,18 @@ watch(
       </template>
     </n-empty>
     <template v-else>
+      <!-- 长任务进度（KEY 管线洞察九段）：生成中可浏览旧结果，完成后收起为一行摘要 -->
+      <div v-if="displayTask" class="mb-3">
+        <TaskProgress
+          variant="inline"
+          :task="displayTask"
+          :now-ms="progressState.nowMs"
+          :config="progressConfig"
+          :old-result-notice="true"
+          @cancel="handleCancelProgress"
+        />
+      </div>
+
       <!-- G3：Agent 语义供给状态条（仅 Agent 视图；静态导出站隐藏）；整条即抽屉开关。
            置于历史区之上：回滚态时「合并被拒」与紧随其后的「回到实时」按钮上下相邻，动线连贯 -->
       <section

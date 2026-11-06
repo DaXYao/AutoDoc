@@ -30,6 +30,7 @@ import type {
   ProjectsResponse,
   RefreshCheckResponse,
   ServerMeta,
+  TaskProgressResponse,
   TeamConflictChoice,
   TeamMigrationPreview,
   TeamMigrationRunResult,
@@ -55,11 +56,12 @@ export function isHubEnabled(): boolean {
   return hubEnabled
 }
 
-/** HTTP 非 2xx：保留状态码，供调用方区分「409 无活动项目」与真·服务异常 */
+/** HTTP 非 2xx：保留状态码与后端判别码，供调用方区分「409 无活动项目」与并发任务等业务拒绝 */
 export class ApiError extends Error {
   constructor(
     readonly status: number,
-    message: string
+    message: string,
+    readonly code?: string
   ) {
     super(message)
     this.name = 'ApiError'
@@ -73,25 +75,56 @@ export function setNoActiveProjectHandler(fn: (() => void) | null): void {
   noActiveProjectHandler = fn
 }
 
+/** 只有后端原文 'no active project' 的 409 才是激活丢失；并发任务等 409 不在此列 */
 export function isNoActiveProjectError(e: unknown): boolean {
-  return e instanceof ApiError && e.status === 409
+  return e instanceof ApiError && e.status === 409 && e.message === 'no active project'
 }
 
-/** 非 2xx 的唯一出口：409 时通知观察者并造 ApiError（message 由各调用点原样传入，文案不变） */
-function apiError(res: Response, message: string, observe = true): ApiError {
+/** 并发任务拒绝（同项目已有 scan/insight/ask 在跑）：不得触发激活恢复，UI 应改为挂上进度 */
+export function isRunInProgressError(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 409 && e.code === 'run-in-progress'
+}
+
+interface ErrorBody {
+  error?: string
+  code?: string
+}
+
+async function readErrorBody(res: Response): Promise<ErrorBody> {
+  return (await res.json().catch(() => ({}))) as ErrorBody
+}
+
+/** 非 2xx 的唯一出口：仅「无活动项目」的 409 才通知观察者 */
+function apiError(res: Response, message: string, observe = true, code?: string): ApiError {
   if (observe && res.status === 409) noActiveProjectHandler?.()
-  return new ApiError(res.status, message)
+  return new ApiError(res.status, message, code)
+}
+
+/** 按响应体判别 409 语义：并发任务的 409 不能误触发重激活流程 */
+function errorFromBody(
+  res: Response,
+  body: ErrorBody,
+  fallback: string,
+  observe = true
+): ApiError {
+  const noActive = body.error === 'no active project'
+  return apiError(res, body.error ?? fallback, observe && noActive, body.code)
 }
 
 /** 同 apiError，但优先展示后端 error 文案 */
 async function errorFromResponse(res: Response, fallback: string): Promise<ApiError> {
-  const detail = await res.json().catch(() => ({}))
-  return apiError(res, (detail as { error?: string }).error ?? `${fallback}：${res.status}`)
+  return errorFromBody(res, await readErrorBody(res), `${fallback}：${res.status}`)
 }
 
 async function fetchJson<T>(url: string, observe = true): Promise<T> {
   const res = await fetch(url)
-  if (!res.ok) throw apiError(res, `请求失败：${res.status} ${url}`, observe)
+  if (!res.ok) {
+    // 409 文案与 code 来自后端（no active project / run-in-progress），不能压成通用「请求失败」
+    if (res.status === 409) {
+      throw errorFromBody(res, await readErrorBody(res), `请求失败：409 ${url}`, observe)
+    }
+    throw apiError(res, `请求失败：${res.status} ${url}`, observe)
+  }
   return (await res.json()) as T
 }
 
@@ -514,9 +547,43 @@ export async function fetchAnnotations(targetId: string): Promise<Annotation[]> 
 /** I3：重新生成文档，返回本次解析层增量统计（服务端未给出时 undefined，成功提示不追加摘要） */
 export async function refreshDocs(): Promise<IncrementalParseStats | undefined> {
   const res = await fetch('/api/refresh', { method: 'POST' })
-  if (!res.ok) throw apiError(res, `重新生成失败：${res.status}`)
+  // 扫描并发时后端返回 409 run-in-progress：按响应体分类，不能当作激活丢失
+  if (!res.ok) throw await errorFromResponse(res, '重新生成失败')
   const data = (await res.json().catch(() => ({}))) as { incremental?: IncrementalParseStats }
   return data.incremental
+}
+
+/* ------------------------- 长任务进度（旁路轮询） ------------------------- */
+
+/**
+ * 当前项目进度快照。进度只是辅助信息：静态模式、非 2xx 与网络异常一律返回 null，
+ * 不打断（也不回滚）主流程；409 观察者钩子同样不在这里触发。
+ */
+export async function fetchTaskProgress(): Promise<TaskProgressResponse | null> {
+  if (mode !== 'api') return null
+  try {
+    const res = await fetch('/api/progress')
+    if (!res.ok) return null
+    return (await res.json()) as TaskProgressResponse
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 请求取消当前任务（runId 缺省时取消服务端在途任务）。
+ * 静态模式静默返回；403 只读 / 404 无任务 / 409 任务已变化等抛 ApiError。
+ * 409 只有在后端原文为 'no active project' 时才触发自愈；「任务已变化」不重激活。
+ * 由调用方决定提示文案。
+ */
+export async function cancelTaskRun(runId?: string): Promise<void> {
+  if (mode !== 'api') return
+  const res = await fetch('/api/progress/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(runId === undefined ? {} : { runId })
+  })
+  if (!res.ok) throw await errorFromResponse(res, '取消任务失败')
 }
 
 /* ------------------------- Agent 语义供给通道（G3） ------------------------- */

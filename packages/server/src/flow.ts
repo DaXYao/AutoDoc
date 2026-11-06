@@ -81,6 +81,8 @@ export interface FlowDeps {
   stats?: FlowGenStats
   /** 问题B：反重复下钻——跟踪已产出的 (label+fnIds) 键，避免同函数在多兄弟/多层重复成节点 */
   seenNodeKeys?: Set<string>
+  /** P2a：每次真正发起 chat 前回调（供进度按「轮」计数；含重试轮） */
+  onRequest?: () => void
 }
 
 /**
@@ -494,6 +496,7 @@ async function requestRoots(
   let lastErr = 'AI 脉络主线返回无法解析'
   for (let attempt = 1; attempt <= FLOW_PARSE_RETRIES; attempt++) {
     try {
+      deps?.onRequest?.()
       const reply = asChatReply(
         await chat([systemPrompt(), { role: 'user', content: user }], {
           maxTokens: flowMaxTokens(graph.modules.length),
@@ -626,6 +629,7 @@ async function requestChildren(
   let lastErr = 'AI 脉络子节点返回无法解析'
   for (let attempt = 1; attempt <= FLOW_PARSE_RETRIES; attempt++) {
     try {
+      deps?.onRequest?.()
       const reply = asChatReply(
         await chat([systemPrompt(), { role: 'user', content: user }], {
           maxTokens: flowMaxTokens(candidateIds.length),

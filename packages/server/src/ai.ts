@@ -32,7 +32,7 @@ export function asChatReply(reply: string | ChatReply): ChatReply {
  */
 export async function deepseekChat(
   messages: ChatMessage[],
-  opts?: { temperature?: number; maxTokens?: number }
+  opts?: { temperature?: number; maxTokens?: number; signal?: AbortSignal }
 ): Promise<ChatReply> {
   const cfg = getAiConfig()
   if (!cfg) throw new Error('AI API KEY 未配置')
@@ -53,7 +53,9 @@ export async function deepseekChat(
       'Content-Type': 'application/json',
       Authorization: `Bearer ${cfg.apiKey}`
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    // 取消时中止在途请求；调用方负责把 AbortError 按失败批/取消处理
+    signal: opts?.signal
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')

@@ -22,7 +22,25 @@ export interface GenerateInput {
   normalized: NormalizedConfig
   storage: StorageAdapter
   onWarn?: (message: string) => void
+  onProgress?: GenerateProgressFn
 }
+
+export interface GenerateProgressEvent {
+  phase: 'parse' | 'graph' | 'done'
+  /** 已解析文件数（phase=parse 时有效） */
+  parsedFiles?: number
+  /** 累计函数数（phase=parse 时有效） */
+  functionCount?: number
+  /** 已建图文件数（phase=graph 时有效） */
+  graphedFiles?: number
+  totalFiles: number
+}
+
+export type GenerateProgressFn = (event: GenerateProgressEvent) => void
+
+/** 进度节流窗口：每 N 个文件或距上次上报 ≥200ms 上报一次（小仓库也不至于零进度） */
+const PROGRESS_FILE_STEP = 10
+const PROGRESS_INTERVAL_MS = 200
 
 export interface GenerateOutput {
   files: FileDoc[]
@@ -1482,6 +1500,25 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
   )
   const knownPaths = new Set(relPaths)
 
+  const totalFiles = relPaths.length
+  const progress = input.onProgress
+  // 埋点失败不得中断生成：首次抛错后停发，避免每个 tick 都刷屏
+  let progressBroken = false
+  const emit = (event: GenerateProgressEvent): void => {
+    if (!progress || progressBroken) return
+    try {
+      progress(event)
+    } catch (error) {
+      progressBroken = true
+      console.warn(`[autodoc] 进度回调失败，后续进度上报已停用：${String(error)}`)
+    }
+  }
+  emit({ phase: 'parse', parsedFiles: 0, functionCount: 0, totalFiles })
+  let parsedFiles = 0
+  let functionCount = 0
+  let lastParseReportedAt = Date.now()
+  let lastParseReportedCount = 0
+
   // 阶段一：增量解析。versionKey 不符（解析器升级/配置指纹变化）视作空缓存 → 全量重解析
   const { versionKey, cachedEntries } = loadValidParseCache(normalized, storage)
   const nextEntries: Record<string, ParseCacheEntry> = {}
@@ -1546,7 +1583,19 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
       parsed: parsed.functions,
       imports: parsed.imports
     })
+    parsedFiles++
+    functionCount += functions.length
+    const reportNow = Date.now()
+    if (
+      parsedFiles - lastParseReportedCount >= PROGRESS_FILE_STEP ||
+      reportNow - lastParseReportedAt >= PROGRESS_INTERVAL_MS
+    ) {
+      lastParseReportedCount = parsedFiles
+      lastParseReportedAt = reportNow
+      emit({ phase: 'parse', parsedFiles, functionCount, totalFiles })
+    }
   }
+  emit({ phase: 'parse', parsedFiles, functionCount, totalFiles })
   // removed = 缓存有而本次扫描无（已删除/移出扫描范围）；随整份替换自然从缓存消失
   for (const relPath of Object.keys(cachedEntries)) {
     if (!knownPaths.has(relPath)) stats.removed++
@@ -1629,6 +1678,9 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
   const batchDate = new Date().toISOString()
 
   // 阶段二：建图 + 变更检测
+  let graphedFiles = 0
+  let lastGraphReportedAt = Date.now()
+  let lastGraphReportedCount = 0
   for (const unit of units) {
     const { relPath, functions, parsed, imports } = unit
 
@@ -1707,7 +1759,20 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
       language: unit.language,
       functions
     })
+
+    graphedFiles++
+    const reportNow = Date.now()
+    if (
+      graphedFiles - lastGraphReportedCount >= PROGRESS_FILE_STEP ||
+      reportNow - lastGraphReportedAt >= PROGRESS_INTERVAL_MS
+    ) {
+      lastGraphReportedCount = graphedFiles
+      lastGraphReportedAt = reportNow
+      emit({ phase: 'graph', graphedFiles, totalFiles })
+    }
   }
+  emit({ phase: 'graph', graphedFiles, totalFiles })
+  emit({ phase: 'done', totalFiles })
 
   return { files, changes: allChanges, incremental: stats }
 }

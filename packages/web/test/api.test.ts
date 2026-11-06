@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
   addAnnotation,
+  cancelTaskRun,
   clearInsightRollback,
   continueTeamMerge,
   createAgentTaskPackage,
@@ -14,13 +15,16 @@ import {
   fetchInsightHistory,
   fetchMeta,
   fetchPassVersions,
+  fetchTaskProgress,
   fetchTeamStatus,
   getMode,
   initDataSource,
   isHubEnabled,
   isNoActiveProjectError,
+  isRunInProgressError,
   mergeAgentSupply,
   mergeAgentTaskPackage,
+  refreshDocs,
   regenInsightPasses,
   requestInsightAI,
   requestInsightPartition,
@@ -107,7 +111,7 @@ afterEach(() => {
 })
 
 describe('ApiError 与 409 观察钩子', () => {
-  it('GET 409 抛 ApiError：状态码可读、原文案不变、钩子触发一次', async () => {
+  it('GET 409 抛 ApiError：采用后端原文、可识别为无活动项目、钩子触发一次', async () => {
     await enterHubMode()
     const hooked = countingHandler()
     stubRoutes({ '/api/meta': noActiveProject })
@@ -117,7 +121,7 @@ describe('ApiError 与 409 观察钩子', () => {
     expect(error).toBeInstanceOf(ApiError)
     expect((error as ApiError).status).toBe(409)
     expect(isNoActiveProjectError(error)).toBe(true)
-    expect((error as Error).message).toBe('请求失败：409 /api/meta')
+    expect((error as Error).message).toBe('no active project')
     expect(hooked()).toBe(1)
   })
 
@@ -313,6 +317,48 @@ describe('洞察 AI 接口的 409/非 409 口径', () => {
 
     await expect(requestInsightAI(true)).resolves.toBeNull()
     await expect(requestInsightPartition('建议')).resolves.toBeNull()
+    expect(hooked()).toBe(0)
+  })
+
+  it('并发任务 409（code=run-in-progress）不触发激活恢复，且可被 isRunInProgressError 识别', async () => {
+    await enterHubMode()
+    const hooked = countingHandler()
+    stubRoutes({
+      '/api/insight/ai': () =>
+        json(
+          {
+            error: '已有任务进行中，请等待完成或取消后重试',
+            code: 'run-in-progress',
+            runId: 'r1',
+            kind: 'insight'
+          },
+          409
+        )
+    })
+
+    const error = await requestInsightAI(true).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(409)
+    expect((error as ApiError).code).toBe('run-in-progress')
+    expect(isRunInProgressError(error)).toBe(true)
+    expect(isNoActiveProjectError(error)).toBe(false)
+    expect((error as Error).message).toBe('已有任务进行中，请等待完成或取消后重试')
+    expect(hooked()).toBe(0)
+  })
+
+  it('扫描并发 409（/api/refresh）同样不触发恢复，保留后端文案', async () => {
+    await enterHubMode()
+    const hooked = countingHandler()
+    stubRoutes({
+      '/api/refresh': () =>
+        json({ error: '有任务正在进行中，请稍后重试', code: 'run-in-progress' }, 409)
+    })
+
+    const error = await refreshDocs().catch((e: unknown) => e)
+
+    expect(isRunInProgressError(error)).toBe(true)
+    expect((error as Error).message).toBe('有任务正在进行中，请稍后重试')
     expect(hooked()).toBe(0)
   })
 })
@@ -653,6 +699,69 @@ describe('P4：单 pass 重跑与独立版本接口', () => {
     await expect(regenInsightPasses(['flows'])).resolves.toBeNull()
     await expect(rollbackPassVersion('v1')).rejects.toThrow('pass 版本操作仅本地服务可用')
     await expect(deletePassVersion('v1')).rejects.toThrow('pass 版本操作仅本地服务可用')
+    expect(urls).toEqual([])
+  })
+})
+
+describe('长任务进度（旁路轮询）', () => {
+  it('fetchTaskProgress：GET /api/progress，非 2xx 与网络异常一律 null', async () => {
+    await enterHubMode()
+    const payload = { current: null, last: null }
+    const urls = stubRoutes({ '/api/progress': () => json(payload) })
+
+    await expect(fetchTaskProgress()).resolves.toEqual(payload)
+    expect(urls).toEqual(['/api/progress'])
+
+    stubRoutes({ '/api/progress': () => json({ error: 'boom' }, 500) })
+    await expect(fetchTaskProgress()).resolves.toBeNull()
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('offline')
+      })
+    )
+    await expect(fetchTaskProgress()).resolves.toBeNull()
+  })
+
+  it('cancelTaskRun：POST JSON body，缺省 runId 传空对象；4xx 保留后端文案', async () => {
+    await enterHubMode()
+    const calls: { url: string; init?: RequestInit }[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(input), init })
+        return json({ ok: true, runId: 'r1' })
+      })
+    )
+
+    await cancelTaskRun('r1')
+    await cancelTaskRun()
+
+    expect(calls.map((call) => call.url)).toEqual([
+      '/api/progress/cancel',
+      '/api/progress/cancel'
+    ])
+    expect(calls.map((call) => call.init?.method)).toEqual(['POST', 'POST'])
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ runId: 'r1' })
+    expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({})
+
+    stubRoutes({ '/api/progress/cancel': () => json({ error: '任务已变化，请刷新后重试' }, 409) })
+    await expect(cancelTaskRun('r0')).rejects.toThrow('任务已变化，请刷新后重试')
+  })
+
+  it('静态导出站：进度读返回 null、取消静默返回，两者都不发请求', async () => {
+    stubRoutes({
+      '/api/projects': () => json({ error: 'not found' }, 404),
+      '/api/meta': () => json({ error: 'not found' }, 404),
+      'autodoc-data.json': () => json(EXPORT_DATA)
+    })
+    await initDataSource()
+    expect(getMode()).toBe('static')
+
+    const urls = stubRoutes({})
+    await expect(fetchTaskProgress()).resolves.toBeNull()
+    await expect(cancelTaskRun()).resolves.toBeUndefined()
     expect(urls).toEqual([])
   })
 })

@@ -8,6 +8,7 @@
 - 记录标准：这个做法确实解决了问题、且以后可能再次用到。
 
 ## 经验索引（快速扫描）
+- [ ] **长任务实时进度（旁路 registry + 常驻轮询 + 取消）**：服务端内存 registry 维护 current/last，读接口不要求活动项目、写接口矩阵化错误码，409 必须读 body 区分 no-active 与 run-in-progress；埋点整体可选、取消贯通到实际 IO 并以 200+cancelled 收口；前端首拉后常驻轮询、按 runId 去重通知，纯函数吃快照 + nowMs，壳层与页面用带退订的订阅；新增配置项三处同步（shared-types → core configSchema → /api/meta）（见 2026-11-07 条）。
 - [ ] **变更影响用链路视角而非上下游分区**：受影响链路=path 直接命中 ∪ path 函数沿 calleeIds 可达的变更函数；侧向子图先求「能到达变更」的相关集再建树，环守卫 + 共享节点 repeated 叶子；变更节点自身也要作为侧向起点（否则其下游的另一个变更函数会漏出链路）；UI 以链路树为主、未入链路变更函数进兜底区（见 2026-11-06 条）。
 - [ ] **双管线独立装配的测试写法**：夹具补 `pipeline` + 断言显式 `source`（`key` 默认 / `agent` 显式）+ 供给叠加用 `agentBaselineOnly` 底座再调 `applyAgentSemantics`；每条用例同时验「KEY 自有结果」与「Agent 自有结果」并互不覆盖、`aiSource` 无 mixed、`force` 不清 `supply:*`（见 2026-11-05 条）。
 - [ ] **一键 Agent 任务包**：本地任务目录（短提示 + 完整索引 + answers/）+ partition 先应用得到新 basis + 符号引用（模块名 / 链路 symbolicKey / 函数稳定 ID）归一 + 复用既有 scan/merge + repair.md + 完成标记；任务过期要同时看图谱与函数体指纹（见 2026-10-22 条）。
@@ -53,6 +54,18 @@
 ---
 
 ## 成功经验条目
+
+### 2026-11-07 · 长任务实时进度：旁路 registry + 常驻轮询 + 取消全链路
+- **适用条件**：已有串行/分批的长任务（AI 多 pass、项目扫描、就地追问），需要在不改主流程、不落存储的前提下提供实时进度、停滞提醒、可取消与 F5 重连。
+- **做法**：
+  1. **服务端只做旁路观测**：按 projectId 维护 current/last 的内存 registry；`beginRun` 同项目互斥，句柄提供 tick/setStages/stageStart/stageEnd/finish 与 AbortSignal；`finish` 收口仍 running 的段；scan 强制不可取消；不引定时器、不落库，重启丢失可接受。
+  2. **读接口不要求活动项目**（无项目返回两个 null，readOnly 放行）；写接口（取消）矩阵化 403/409/400/404，stale runId 回业务错误；并发用 `runExclusive`（同 kind 同参复用 promise，异参/异任务 409 `code:'run-in-progress'`）。前端 409 必须读 body，只有 `no active project` 才触发重激活。
+  3. **埋点整体可选**：`progress?` 全程 `?.` 短路；每段 enterPass（取消则整段跳过不发请求）+ closeStage（done/skipped/failed）；取消信号透传到实际 IO，落版本放 `commitPass` 守卫，取消跳过 prune、不做第二遍担保、不归档里程碑；路由 catch 判 `abortRequested` 返回 200+cancelled 而非错误码。
+  4. **轮询常驻**：首拉后无论有无 current 都起定时器（静态模式直接返回）；started/finished 按 runId 去重、完成后不 stopTimers，否则之后新发起的任务永远不被发现；间隔读 `meta.ui.progress`，已用时秒表固定 1s。
+  5. **UI 收口**：纯函数只吃快照 + nowMs（时长/段序/停滞/总结/tone/显示闸门），组件只渲染不起定时器；inline 完成收摘要可展开，compact 顶栏共用同一闸门；壳层与页面都要完成回调时用带退订的订阅集合，不能各调一次覆盖式 start。
+  6. **新增配置项通用做法**（适用：任何进入 autodoc.config 的字段）：shared-types → core `configSchema`（`additionalProperties:false`，并给阈值下界）→ `/api/meta` 下发生效值（默认 120000 / 300000 / 1000），三处同步并补路由测试。
+- **验证**：伪 chat 注入 AbortSignal + 假定时器/stub fetch + scan 两段快照的进程内用例；Edge CDP 隔离服务验证九段/停滞/取消/摘要/静态站零请求（详见 CHANGELOG 2026-11-07 条）。
+- **关联**：`server/src/progress.ts`、`server/src/app.ts`、`server/src/insight.ts`、`core/src/generate.ts`、`web/src/store/progress.ts`、`web/src/utils/progress.ts`、`web/src/components/TaskProgress.vue`。
 
 ### 2026-11-06 · 变更影响页：用链路树承载「直接命中 + 侧向调用」
 - **场景**：用户心智是「先看变更函数，再看哪些业务链路会执行到它」，而不是分别看上游/下游名单。**适用条件**：已有链路 path 与函数级 caller/callee 索引。

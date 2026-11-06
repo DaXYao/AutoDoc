@@ -9,6 +9,8 @@
 - 已被 AGENTS.md 沉淀为硬规则的教训，在本文件保留一条链接即可，不重复展开。
 
 ## 避坑清单（快速扫描）
+- [ ] 长任务进度按「活动项目」取数会漏掉首次加载：add / 切到未加载项目时 activeId 要等全量生成结束才切换，整段扫描不可见（只有 refresh 可见）；进度取数口径要单独记录「加载中的项目 id」（activate 期间设置、finally 清理），并且路由预计算 id 与注册 id 必须共用同一个解析函数（空名称 + 相对根如 `.` 会让两边分叉）。
+- [ ] 取消 + 缓存剪枝必须互斥：chunk 循环按取消 break 后，live 集合只含已处理 chunk，照常 prune 会删除未处理 chunk 的存活缓存；取消路径必须跳过 prune（P2a 洞察取消）。取消判定还必须在**后续无 signal 的阶段**（如 SG2 语义担保）返回后复核一次，否则取消发生在该阶段期间仍会归档里程碑并返回非 cancelled。
 - [ ] 「OpenAI 兼容」不等于字段完全一致：小米 MiMo 用 `max_completion_tokens`（非 `max_tokens`）、`thinking` 控制思考，官方 Base URL 还自带 `/v1`；接入新供应商前逐项核对请求字段与 URL 拼接口径，不要直接假设 DeepSeek 的请求体可复用。
 - [ ] 给团队仓库新增托管顶层目录（如 `passVersions`）要同时改 `TEAM_TOP_LEVEL`、`TEAM_MANAGED_DIRS`、`commitKnownPaths` 的 `knownPaths`、`teamConflictKindOf`；TeamStorage 的「非空且无 manifest 拒绝接管」是另一层规则，别用 client `initRepo` 通过就断言路由可用（P5）。
 - [ ] 迁移计数/冲突类型是共享固定形状：加一类会连带前端 `Record` 文案、`counts()` 预设、总数与行索引断言；改前先 grep 所有构造点（P5）。
@@ -47,6 +49,8 @@
 - [ ] 模块新增导出后浏览器白屏报 "does not provide an export named"：vite transform 缓存 + 浏览器模块缓存双重陈旧，普通 reload 无效，必须重启 dev server（见 2026-10-17 D1 条）。
 - [ ] 跨进程内存态（hub activeId）丢失时禁止「先收回状态再恢复」：把 `activeProjectId` 做成 id→null→id 抖动，会被多个视图的 `watch(activeProjectId)` 读成「切了两次项目」（ImpactView 复位自动重生横幅并重跑全量增量、GraphView 重挂载顶掉图/树开关）；恢复期用独立信号（activationRecovering）表达，只有最终失败才做真实的 id→null 迁移。
 - [ ] 数据层禁止把 HTTP 状态码压扁成 Error 文案、更禁止一律 catch 返 null：视图只剩「服务异常」这种模糊文案，还会建议对该状态无效的操作（无活动项目时点「重新扫描」）；要保留 status 并按原因分文案。
+- [ ] 409 不能只看状态码：并发任务的 `409 {code:'run-in-progress'}` 若也通知「无活动项目」观察者，会误触发重激活；`errorFromResponse` 与 `fetchJson` 都必须读 body，仅 `error === 'no active project'` 才自愈，`isNoActiveProjectError` 也要校验该原文（P4a）。
+- [ ] 进度 store 的 `startProgressTracking({onFinished})` 是覆盖式的：壳层在 bootstrap 后注册、页面在 onMounted 注册，后注册者会挤掉前者（表现为 F5 重连后完成不刷新/摘要不出现）；多消费者必须走带退订的订阅集合（P4a `subscribeProgressHandlers`）。
 - [ ] 「防重试风暴」的记账要按「一次事件」而不是「一个会话」计数：写成「同一 id 会话内只尝试一次」会让用户第二次重启服务就不再自愈（实机连开带跑两轮才抓到）；成功恢复不记账，只对失败记账。
 - [ ] 把**位置化 id**（`mod:N` / `chain:N` 这类数组下标 id）写进对外契约时，必须双重对账：文件级「划分身份指纹」（不符=契约过期，整份拒绝）+ 条目级锚点（模块名 / 链路入口函数稳定 id，漂移只判该条）。只有文字提示「重新划分后可能变化」等于没有防护——旧文件照样通过校验并静默落到别的对象上。
 - [ ] 只读派生产物（索引 / 校验 / 建议清单）必须与「即将写入的那份基线」同源：吃了回滚快照短路（`loadInsight` 命中 `activeInsightSnapshotId` 即 return、不比图指纹）就会与实时图谱错位——索引冻结在旧划分、新文件的函数根本不在里面。

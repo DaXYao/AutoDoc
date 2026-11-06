@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import type { Annotation, AskResponse, CallEdge, FunctionCategory } from '@autodoc/shared-types'
 import { addAnnotation, askCallStep, deleteAnnotation } from '../data/api'
 import { appState, findFunctionEntry } from '../store/app'
+import { cancelCurrentTask, progressState } from '../store/progress'
 import { CATEGORY_LABELS, ROLE_COLORS, ROLE_LABELS, formatDate } from '../utils/format'
 import { formatAskMeta } from '../utils/ask'
 import { externalSymbolInfo } from '../utils/externals'
@@ -46,6 +47,39 @@ const panelOpen = ref(false)
 const question = ref('')
 const asking = ref(false)
 const response = ref<AskResponse | null>(null)
+/** 本次提问被取消：不渲染答案区，只提示一行 */
+const askCancelled = ref(false)
+
+/* 等待秒数：服务端有 ask 任务时用进度快照的秒表，否则退回本地 1s 计时 */
+const localAskStartMs = ref(0)
+const localNowMs = ref(0)
+let askTimer: ReturnType<typeof setInterval> | null = null
+const askTask = computed(() => (progressState.current?.kind === 'ask' ? progressState.current : null))
+const askElapsedSec = computed(() => {
+  const task = askTask.value
+  const started = task ? Date.parse(task.startedAt) : Number.NaN
+  const base = Number.isFinite(started) ? started : localAskStartMs.value
+  const now = Number.isFinite(started) ? progressState.nowMs : localNowMs.value
+  return Math.max(Math.floor((now - base) / 1000), 0)
+})
+
+function startAskTimer(): void {
+  localAskStartMs.value = Date.now()
+  localNowMs.value = Date.now()
+  if (askTimer !== null) clearInterval(askTimer)
+  askTimer = setInterval(() => {
+    localNowMs.value = Date.now()
+  }, 1000)
+}
+
+function stopAskTimer(): void {
+  if (askTimer !== null) {
+    clearInterval(askTimer)
+    askTimer = null
+  }
+}
+
+onUnmounted(stopAskTimer)
 
 /* 「提炼为追问记录」保存子态 */
 const distilling = ref(false)
@@ -67,13 +101,29 @@ async function handleAsk(): Promise<void> {
   if (!q || asking.value) return
   asking.value = true
   response.value = null
+  askCancelled.value = false
   distilling.value = false
+  startAskTimer()
   try {
-    response.value = await askCallStep(props.edge.callerId, props.edge.stepId, q)
+    const result = await askCallStep(props.edge.callerId, props.edge.stepId, q)
+    // 取消：后端返回 cancelled，不渲染答案区也不报错
+    askCancelled.value = result.cancelled === true
+    response.value = result.cancelled ? null : result
   } catch (error) {
     message.error(error instanceof Error ? error.message : '提问失败')
   } finally {
     asking.value = false
+    stopAskTimer()
+  }
+}
+
+/** 请求取消当前 ask 任务：服务端中止模型请求并收口，answer 以 cancelled 返回 */
+async function handleCancelAsk(): Promise<void> {
+  try {
+    await cancelCurrentTask()
+    message.success('已请求取消')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '取消失败')
   }
 }
 
@@ -211,9 +261,15 @@ async function handleDeleteFollowup(followup: Annotation): Promise<void> {
             提问
           </n-button>
           <span v-if="asking" class="text-xs text-[color:var(--ad-ink-2)]">
-            AI 正在检索相关代码，可能需要数十秒…
+            AI 正在检索相关代码 · 已 {{ askElapsedSec }} 秒
           </span>
+          <n-button v-if="asking" size="tiny" quaternary @click="handleCancelAsk">取消</n-button>
         </div>
+
+        <!-- 取消提示：取代答案区，不报错 -->
+        <p v-if="askCancelled && !asking" class="mt-2 text-xs text-[color:var(--ad-ink-3)]">
+          已取消本次提问
+        </p>
 
         <!-- 答案区：Markdown 渲染（已禁用 HTML，防 XSS） -->
         <div v-if="response" class="mt-2 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-surface)] px-3 py-2">

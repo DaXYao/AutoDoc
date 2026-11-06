@@ -289,7 +289,7 @@ describe('hub 活动项目记住与 409 自愈', () => {
     expect(store.appState.activeProjectId).toBe('p1')
   })
 
-  it('与激活无关的 409（未配置 AI）不动状态：恢复前先用注册表核实', async () => {
+  it('与激活无关的 409（未配置 AI）不触发恢复：注册表与文档数据都不动', async () => {
     const { api, store, hub } = await setup()
     await store.bootstrap()
     hub.blocked = [
@@ -300,16 +300,17 @@ describe('hub 活动项目记住与 409 自愈', () => {
     const projectsRef = store.appState.projects
 
     await expect(api.askFunction('a::fn', '问题')).rejects.toThrow('未配置 AI')
-    await vi.waitFor(() => expect(hub.count('GET /api/projects')).toBeGreaterThan(projectsCalls))
+    // 只有后端原文 'no active project' 的 409 才走自愈；业务 409 连预检都不应发起
     await settle()
 
+    expect(hub.count('GET /api/projects')).toBe(projectsCalls)
     expect(hub.activateCalls).toBe(0)
     expect(store.appState.activeProjectId).toBe('p1')
     expect(store.appState.activationLost).toBe(false)
     expect(store.appState.meta).not.toBeNull()
     expect(toastDouble.info).not.toHaveBeenCalled()
     expect(toastDouble.warning).not.toHaveBeenCalled()
-    // 对账命中同 id 同列表：不得产生新数组写入，也不该重拉一次文档数据
+    // 没有真实项目切换：不得产生新数组写入，也不该重拉一次文档数据
     expect(store.appState.projects).toBe(projectsRef)
     expect(hub.count('GET /api/meta')).toBe(metaCalls)
   })
@@ -361,11 +362,12 @@ describe('hub 活动项目记住与 409 自愈', () => {
     const { api, store, hub } = await setup()
     await store.bootstrap()
     hub.activeId = 'p2'
-    hub.blocked = [{ prefix: '/api/ask', error: '未配置 AI' }]
+    // 真实的无活动项目 409 才会进入自愈；预检随后发现服务端其实已激活 p2
+    hub.blocked = [{ prefix: '/api/ask', error: 'no active project' }]
     const projectsBefore = store.appState.projects
     const metaCalls = hub.count('GET /api/meta')
 
-    await expect(api.askFunction('a::fn', '问题')).rejects.toThrow('未配置 AI')
+    await expect(api.askFunction('a::fn', '问题')).rejects.toThrow('no active project')
     await vi.waitFor(() => expect(store.appState.activeProjectId).toBe('p2'))
     await settle()
 

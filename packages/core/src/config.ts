@@ -101,6 +101,16 @@ const configSchema = {
             // 脉络树自动展开深度：非负整数、[0, 10]（上界防呆，避免一次性展开超大树）
             flowAutoExpandDepth: { type: 'integer', minimum: 0, maximum: 10 }
           }
+        },
+        progress: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            // 阈值下界防呆：0 或负数会让前端每帧轮询或立刻报停滞
+            stallWarnMs: { type: 'integer', minimum: 1000 },
+            singleCallStallWarnMs: { type: 'integer', minimum: 1000 },
+            pollMs: { type: 'integer', minimum: 100 }
+          }
         }
       }
     },

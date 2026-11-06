@@ -2,6 +2,32 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-07 · 长任务进度初审修复：首次加载扫描进度可见性 / add id 口径 / 取消中途段状态 · server+docs
+
+- **首次加载（添加并分析 / 切到未加载项目）扫描进度整段不可见**：`GET /api/progress` 只按 `manager.getActiveId()` 取数，而 activeId 要等 `createDocService` 全量生成结束才切换，加载期间 current 恒为 null（只有 `/api/refresh` 可见）。`ProjectManager` 新增 `loadingId` / `getLoadingId()`（activate 首次加载期间设置、finally 清理），路由优先按它取数；加载结束或失败自动回落 activeId，不改变其它路由的激活语义。
+- **add 的进度 key 与注册 id 口径统一**：新增 `ProjectManager.projectIdFor(name, root)`（root 先按 baseDir 解析），`add` 与 `POST /api/projects` 共用；修复空名称 + 相对根（如 `root='.'`）时路由预计算与注册结果分叉、进度落到孤儿键的问题。
+- **取消中途段的阶段状态改为 cancelled**：`closeStage` 在 AbortSignal 已触发时标 cancelled（此前同段会显示 done 或 failed），与「中途取消不落版本」一致；未开始段仍由 `enterPass` 标 cancelled。
+- **后台刷新兜底不再产生未处理拒绝**：壳层/洞察页在任务完成后的 `refreshInsight` / `reloadAll` 补 `.catch`（失败静默；409 无活动项目仍由 api 层钩子自愈）。
+- **测试**：新增「首次加载期间 getLoadingId 可取到扫描进度」「add 与 projectIdFor 同口径」「/api/progress 优先 loadingId」用例，更新取消中途段状态断言；server typecheck、server 776 项、web typecheck、web 435 项、ESLint 全绿。
+- **边界**：未改接口协议/存储/数据模型；新增两个只读管理器方法。
+- **关联 commit**：待提交（随本轮长任务进度批次）。
+
+## 2026-11-07 · 长任务实时进度（洞察九段 / 项目扫描 / 问一问）· shared-types+core+server+web+docs
+
+- **动机**：洞察九段生成、项目扫描与就地追问都是分钟级任务，此前只有「进行中」静态文案：用户看不到段进度与停滞、不能取消、F5 后丢失运行上下文。
+- **共享类型与配置**：新增 `TaskKind` / `TaskStageState` / `TaskStageProgress` / `TaskProgress` / `TaskProgressResponse` / `ProgressUiConfig`；`AutodocConfig.ui.progress` 与 `ServerMeta.ui.progress`（`stallWarnMs` / `singleCallStallWarnMs` / `pollMs`，默认 120000 / 300000 / 1000，旧静态导出站数据无需改造）；`AskResponse`、`InsightBundle` / `InsightResponse` 增可选 `cancelled`。core `configSchema` 同步接受 `ui.progress` 并设下界防呆。
+- **进度 registry（`server/src/progress.ts`）**：按 projectId 维护「当前运行 / 最近一次完成」；`beginRun` 同项目互斥，`RunHandle` 提供 `tick` / `setStages` / `stageStart` / `stageEnd` / `finish` 与 `AbortSignal`；`finish` 收口仍在 running 的段并补 `ms`，current 清空、last 保留；scan 强制不可取消；`runExclusive` 让同 kind 同参数复用同一 promise、异参或其它任务返回 conflict；纯内存、无定时器、重启丢失可接受。
+- **旁路路由**：`GET /api/progress`（不要求活动项目，无项目返回两个 null，readOnly 放行）；`POST /api/progress/cancel`（403 readOnly / 409 无活动项目 / 400 runId 非法 / 404 无任务 / 400 扫描不可取消 / 409 runId 过期，成功 abort signal）；`/api/meta` 下发生效的 `ui.progress`。
+- **洞察九段**：`refreshInsightAI` 增可选 `progress` / `signal`，九段按 `AiPassKey` 定义（partition/coreRoles 单次调用，coreJudgment/narratives/externals 按批，categories/keySteps/blocks 按块，flows 按轮）；段首取消整段跳过不发请求，段中取消不固化半截版本、跳过缓存 prune、不做第二遍担保、不归档里程碑，返回 `cancelled:true`。`POST /api/insight/ai` 与 `/api/insight/partition` 走 `runInsightTask`，冲突 409 `{code:'run-in-progress'}`。
+- **项目扫描**：core `generate` 增 `onProgress`（parse 每 10 文件或距上次 ≥200ms 节流，graph 同口径，末发 done；回调异常只告警一次且不影响生成结果）；`add（添加并分析）` / `activate` / `refresh` 均透传（`add` 的缺口由主代理实机验收发现并补齐，id 口径与注册表一致）；`POST /api/projects`、`/api/projects/:id/activate` 与 `/api/refresh` 走 `runScanTask` 两段（parse/graph）快照，在途任务 409 `{code:'run-in-progress'}`，扫描不可取消。
+- **问一问**：`/api/ask` 与 `/api/ask/function` 以 kind=ask 单段 run 包裹，`run.signal` 透传 chat；取消时按 `abortRequested` 收口为 200 + `{cancelled:true}`，不新造错误码。
+- **前端**：`fetchTaskProgress` / `cancelTaskRun`（静态模式与非 2xx 一律不打断主流程）；`ApiError.code` 与 409 读 body 区分 `no active project`（触发重激活）与 `run-in-progress`（静默重挂进度）。轮询 store 首拉后**常驻轮询**（默认 1s，秒表固定 1s），started/finished 按 runId 去重、完成后不停止；`subscribeProgressHandlers` 支持壳层与页面多订阅。纯函数 `utils/progress` 承担时长、段序、停滞、总结、tone 与显示闸门。`TaskProgress.vue` inline（标题 / 当前段 / 九段耗时 / 取消 / 停滞提醒 / 旧结果提示，完成收摘要可展开）与 compact（顶栏圆点 + `生成中 N/M`）。洞察页与顶栏接线（F5 重连、完成后刷新洞察/项目、scan 跳项目页）、项目卡实时扫描文案（`已解析 N 个文件 · M 个函数`）、问一问等待秒数与取消按钮。
+- **初审/终审修复**：`ProjectManager` 记录 `loadingId`，`GET /api/progress` 优先按加载中的项目取数（首次 add / 切到未加载项目时 activeId 要等扫描结束才切换，原实现整段进度不可见），并新增 `projectIdFor` 让路由预计算 id 与注册 id 同口径；取消判定在 SG2 语义担保返回后再复核一次（SG2 无 signal，期间取消仍需避免归档与误报成功）；步骤级「问一问」（CallNode）补齐等待秒数、取消按钮与 `cancelled` 收口，与 FlowTree 对齐。
+- **影响范围**：新增两个旁路进度接口与一组 `ui.progress` 配置；既有响应仅新增可选字段，CLI 与无进度消费者零影响；静态导出站无进度 UI 且不请求 `/api/progress`，只探测 `/api/projects`、`/api/meta`。
+- **验证**：core 25 文件 457 项、server 36 文件 776 项、web 26 文件 435 项（共 87 文件 1668 项）全部通过；`pnpm lint`（含四包 typecheck）与 `pnpm build` 全绿。主代理用 MiMo flash + 隔离服务（7799）对临时项目做真机验收：九段逐段推进与块/轮计数、顶栏「生成中 9/9」、F5 后进度面板重新接上、取消后 abort 在途请求且不归档里程碑、单段重跑完成收成摘要、添加项目扫描快照（3 文件）均通过；250 文件项目的扫描完成过快未能截到过程文案，该路径由 `/api/projects` 路由测试与 P4a 的 mock UI 验收覆盖。
+- **边界**：进度为瞬时观测量，不落存储、重启丢失；中断的任务不自动重跑；未新增依赖。
+- **关联 commit**：待提交（本轮尚未提交 git）。
+
 ## 2026-11-06 · 变更影响页链路视角（P2+P3：链路树 UI 与实机验收）· web+docs
 
 - **新组件 `components/ImpactChainTree.vue`**：链路头（叙事 / 模块名 / 重要性 / 变更处数，可折叠）+ 主干 path（序号、函数、`stepRoles` 角色、直接命中红色徽标）+ 步骤下的侧向调用子树（`SideBranchNode` 拍平为行，祖先竖线与肘线纯 CSS，无新依赖；`changed` 红色、`repeated` 叶子带「共享/环路」title）。链路与侧向默认展开，逐链路/逐分支折叠状态只放组件内 ref（不写 localStorage）；侧向节点同样可聚焦、可点击跳函数。Agent 供给的链路影响解释与「本次变更角色」经 `impact` / `changed-extra` 插槽注入，组件不感知供给来源。

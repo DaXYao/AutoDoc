@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { addProject, appState, removeProject, switchProject } from '../store/app'
+import { progressState, startProgressTracking } from '../store/progress'
 import { pickFolder } from '../data/api'
 import { adBtnInkOverrides } from '../theme'
 import { TEAM_CONFIG_EXAMPLE, teamStatusPill } from '../utils/team'
@@ -53,9 +54,17 @@ async function handleBrowse(): Promise<void> {
   }
 }
 
+/** 卡片进度文案：当前扫描任务正好属于该卡片项目时用服务端实时 label，否则保留「分析中…」 */
+function scanLabel(projectId: string): string | null {
+  const task = progressState.current
+  return task?.kind === 'scan' && task.projectId === projectId ? task.label : null
+}
+
 async function handleSelect(id: string): Promise<void> {
   if (busyId.value) return
   busyId.value = id
+  // 轮询常驻（App 已挂）；静态模式或首拉未启动时补一次兜底（非 api 模式内部直接返回）
+  if (!progressState.polling) void startProgressTracking()
   try {
     await switchProject(id)
     await router.push({ name: 'home' })
@@ -247,7 +256,9 @@ async function handleRemove(id: string, name: string): Promise<void> {
               <template v-else>
                 <span class="text-[color:var(--ad-ink-3)]">尚未加载，点击即分析</span>
               </template>
-              <span v-if="busyId === project.id" class="ml-2 text-[color:var(--ad-accent-ink)]">分析中…</span>
+              <span v-if="busyId === project.id" class="ml-2 text-[color:var(--ad-accent-ink)]">
+                {{ scanLabel(project.id) ?? '分析中…' }}
+              </span>
             </div>
           </button>
           <button

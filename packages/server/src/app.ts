@@ -2,12 +2,27 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify'
 import fastifyStatic from '@fastify/static'
-import type { AiChunkPass, AiChunkStats, AiPassKey, AiPassVersionListResponse, AnnotationKind, AnnotationTargetType, AgentSupplyResponse, AskFunctionRequest, AskRequest, InsightHistoryResponse, InsightResponse, InsightSource, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse, TeamConflictChoice } from '@autodoc/shared-types'
+import type { AiChunkPass, AiChunkStats, AiPassKey, AiPassVersionListResponse, AnnotationKind, AnnotationTargetType, AgentSupplyResponse, AskFunctionRequest, AskRequest, AskResponse, InsightHistoryResponse, InsightResponse, InsightSource, NewProjectInput, ProjectInsight, ProjectsResponse, RefreshCheckResponse, TaskKind, TeamConflictChoice } from '@autodoc/shared-types'
 import { inspectParseCache, resolveShowRecent } from '@autodoc/core'
+import type { GenerateProgressFn } from '@autodoc/core'
 import { regenerate, type DocService } from './context.js'
 import { pickFolder } from './pickFolder.js'
 import type { ProjectManager } from './projects.js'
-import { compatForCurrentPass, loadInsight, refreshInsightAI } from './insight.js'
+import {
+  beginRun,
+  findActiveRun,
+  getProjectProgress,
+  requestCancel,
+  runExclusive,
+  type RunStageInput
+} from './progress.js'
+import {
+  compatForCurrentPass,
+  loadInsight,
+  refreshInsightAI,
+  type InsightBundle,
+  type RefreshOptions
+} from './insight.js'
 import {
   abortTeamMerge,
   continueTeamMerge,
@@ -46,6 +61,7 @@ import {
 } from './agentTasks.js'
 import { collectChangesSupplyLight, resolveChangesAgentSemantics, scopeToSupplyId } from './agentSupplyChanges.js'
 import { getAiConfig } from './env.js'
+import { deepseekChat } from './ai.js'
 import { toFileDocView, toFileSummary, toFunctionIndex, toMeta } from './views.js'
 import { AiCache } from './aiCache.js'
 import {
@@ -122,6 +138,112 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   const { manager } = options
   const readOnly = options.readOnly ?? false
 
+  /** P2a：洞察九段进度定义（key 必须与 AiPassKey 一致，前端按段渲染） */
+  const INSIGHT_STAGES: (RunStageInput & { key: AiPassKey })[] = [
+    { key: 'partition', label: '模块划分', singleCall: true },
+    { key: 'coreJudgment', label: '核心判定', unit: '批' },
+    { key: 'categories', label: '三分类', unit: '块' },
+    { key: 'coreRoles', label: '核心角色', singleCall: true },
+    { key: 'narratives', label: '链路叙事', unit: '批' },
+    { key: 'keySteps', label: '主干识别', unit: '块' },
+    { key: 'externals', label: '外部库补全', unit: '批' },
+    { key: 'blocks', label: '内部步骤', unit: '块' },
+    { key: 'flows', label: '脉络树', unit: '轮' }
+  ]
+
+  /**
+   * P2a：洞察生成的统一入口——同项目同参数复用同一 promise（防重复点击），
+   * 不同参数/其它任务在跑时返回 conflict 供路由转 409。
+   */
+  const runInsightTask = async (
+    service: DocService,
+    projectId: string,
+    refreshOpts: RefreshOptions,
+    paramsKey: string
+  ): Promise<
+    | { ok: true; bundle: InsightBundle }
+    | { ok: false; runId: string; kind: TaskKind }
+  > => {
+    const outcome = runExclusive({
+      projectId,
+      kind: 'insight',
+      paramsKey,
+      task: async () => {
+        const run = beginRun({
+          kind: 'insight',
+          projectId,
+          stages: INSIGHT_STAGES,
+          cancelable: true
+        })
+        try {
+          const bundle = await refreshInsightAI(service, { ...refreshOpts, progress: run })
+          run.finish({ cancelled: bundle.cancelled === true })
+          return bundle
+        } catch (error) {
+          run.finish({ error: error instanceof Error ? error.message : String(error) })
+          throw error
+        }
+      }
+    })
+    if (!outcome.ok) return { ok: false, runId: outcome.runId, kind: outcome.kind }
+    return { ok: true, bundle: await outcome.promise }
+  }
+
+  /** P2b：扫描两段定义（key 固定为 parse/graph，前端按段渲染） */
+  const SCAN_STAGES: RunStageInput[] = [
+    { key: 'parse', label: '解析源码', unit: '文件' },
+    { key: 'graph', label: '建图与变更检测', unit: '文件' }
+  ]
+
+  /**
+   * P2b：扫描（解析 + 建图）的统一入口。扫描不可取消，同项目已有在途任务时返回
+   * conflict 供路由转 409；任务的错误照常抛给路由，进度 run 已在抛出前收口为 failed。
+   */
+  const runScanTask = async <T>(
+    projectId: string,
+    task: (report: GenerateProgressFn) => Promise<T>
+  ): Promise<{ ok: true; value: T } | { ok: false }> => {
+    if (findActiveRun(projectId)) return { ok: false }
+    const run = beginRun({ kind: 'scan', projectId, cancelable: false, stages: SCAN_STAGES })
+    let parseEnded = false
+    let graphStarted = false
+    const report: GenerateProgressFn = (event) => {
+      if (event.phase === 'parse') {
+        const parsed = event.parsedFiles ?? 0
+        run.tick('parse', {
+          completed: parsed,
+          label: `已解析 ${parsed} 个文件 · ${event.functionCount ?? 0} 个函数`
+        })
+        return
+      }
+      if (event.phase === 'graph') {
+        if (!graphStarted) {
+          graphStarted = true
+          parseEnded = true
+          run.stageEnd('parse', 'done')
+          run.stageStart('graph')
+        }
+        const graphed = event.graphedFiles ?? 0
+        run.tick('graph', { completed: graphed, label: `已建图 ${graphed} 个文件` })
+        return
+      }
+      // done：两段都收口（无 graph 事件时 graph 仍停在 pending，必须显式结束）
+      if (!parseEnded) {
+        parseEnded = true
+        run.stageEnd('parse', 'done')
+      }
+      run.stageEnd('graph', 'done')
+    }
+    try {
+      const value = await task(report)
+      run.finish()
+      return { ok: true, value }
+    } catch (error) {
+      run.finish({ error: error instanceof Error ? error.message : String(error) })
+      throw error
+    }
+  }
+
   // API 响应禁缓存：避免浏览器缓存 /api GET 导致切换/重新生成后 UI 仍显示陈旧数据
   app.addHook('onSend', async (req, reply) => {
     if (req.url.startsWith('/api/')) {
@@ -139,8 +261,15 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   app.post<{ Params: { id: string } }>('/api/projects/:id/activate', async (req, reply) => {
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const { id } = req.params
     try {
-      const service = await manager.activate(req.params.id)
+      const outcome = await runScanTask(id, (report) => manager.activate(id, report))
+      if (!outcome.ok) {
+        return reply
+          .code(409)
+          .send({ error: '有任务正在进行中，请稍后重试', code: 'run-in-progress' })
+      }
+      const service = outcome.value
       return {
         ok: true,
         activeId: manager.getActiveId(),
@@ -158,13 +287,24 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     if (typeof body.root !== 'string' || body.root.trim().length === 0) {
       return reply.code(400).send({ error: '缺少 root（项目根目录）' })
     }
+    const root = body.root.trim()
+    const name = typeof body.name === 'string' ? body.name : ''
+    // 「添加并分析」也会跑全量扫描：与 activate 共用同一套 progress。
+    // id 必须与注册表同口径（root 相对路径/空名称都由 manager.projectIdFor 解析）。
+    const projectId = manager.projectIdFor(name, root)
     try {
-      const info = await manager.add({
-        name: typeof body.name === 'string' ? body.name : '',
-        root: body.root.trim(),
-        config: typeof body.config === 'string' ? body.config : undefined
-      })
-      return reply.code(201).send(info)
+      const outcome = await runScanTask(projectId, (report) =>
+        manager.add(
+          { name, root, config: typeof body.config === 'string' ? body.config : undefined },
+          report
+        )
+      )
+      if (!outcome.ok) {
+        return reply
+          .code(409)
+          .send({ error: '有任务正在进行中，请稍后重试', code: 'run-in-progress' })
+      }
+      return reply.code(201).send(outcome.value)
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
@@ -345,12 +485,34 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       }
       passes = picked.length > 0 ? picked : undefined
     }
-    const { insight, aiChunkStats, passRun } = await refreshInsightAI(service, {
+    const projectId = manager.getActiveId()
+    if (!projectId) return reply.code(409).send({ error: 'no active project' })
+    const refreshOpts: RefreshOptions = {
       force: body.force === true,
       feedback: typeof body.feedback === 'string' ? body.feedback : '',
       passes
+    }
+    // 同参并发复用同一 promise；参数不同或其它任务在跑 → 409
+    const paramsKey = JSON.stringify({
+      force: refreshOpts.force === true,
+      feedback: refreshOpts.feedback,
+      passes: passes ? [...passes].sort() : null
     })
-    return { ...toInsightResponse(service, insight, aiChunkStats), passRun }
+    const outcome = await runInsightTask(service, projectId, refreshOpts, paramsKey)
+    if (!outcome.ok) {
+      return reply.code(409).send({
+        error: '已有任务进行中，请等待完成或取消后重试',
+        code: 'run-in-progress',
+        runId: outcome.runId,
+        kind: outcome.kind
+      })
+    }
+    const { insight, aiChunkStats, passRun, cancelled } = outcome.bundle
+    return {
+      ...toInsightResponse(service, insight, aiChunkStats),
+      passRun,
+      ...(cancelled ? { cancelled: true } : {})
+    }
   })
 
   // P3：pass 独立版本列表（只读）：当前图下的兼容状态 / 是否激活 / 被哪些里程碑引用
@@ -454,12 +616,32 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     const service = manager.getActive()
     if (!service) return reply.code(409).send({ error: 'no active project' })
     const body = (req.body ?? {}) as { feedback?: unknown; force?: unknown }
-    const { insight, aiChunkStats } = await refreshInsightAI(service, {
+    const projectId = manager.getActiveId()
+    if (!projectId) return reply.code(409).send({ error: 'no active project' })
+    const refreshOpts: RefreshOptions = {
       forcePartition: true,
       force: body.force === true,
       feedback: typeof body.feedback === 'string' ? body.feedback : ''
+    }
+    const paramsKey = JSON.stringify({
+      forcePartition: true,
+      force: refreshOpts.force === true,
+      feedback: refreshOpts.feedback
     })
-    return toInsightResponse(service, insight, aiChunkStats)
+    const outcome = await runInsightTask(service, projectId, refreshOpts, paramsKey)
+    if (!outcome.ok) {
+      return reply.code(409).send({
+        error: '已有任务进行中，请等待完成或取消后重试',
+        code: 'run-in-progress',
+        runId: outcome.runId,
+        kind: outcome.kind
+      })
+    }
+    const { insight, aiChunkStats, cancelled } = outcome.bundle
+    return {
+      ...toInsightResponse(service, insight, aiChunkStats),
+      ...(cancelled ? { cancelled: true } : {})
+    }
   })
 
   /* ------------------------- 历史 AI 洞察快照（H1） ------------------------- */
@@ -882,14 +1064,44 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     if (getAiConfig() === null) {
       return reply.code(409).send({ error: '未配置 AI（DEEPSEEK_API_KEY），就地追问不可用' })
     }
+    const projectId = manager.getActiveId()
+    if (!projectId) return reply.code(409).send({ error: 'no active project' })
+    if (findActiveRun(projectId)) {
+      return reply.code(409).send({ error: '有生成任务正在进行，请稍后再问' })
+    }
+    const run = beginRun({
+      kind: 'ask',
+      projectId,
+      stages: [{ key: 'ask', label: '问一问 AI', singleCall: true }],
+      cancelable: true
+    })
     try {
-      return await askCallStep(service, {
-        functionId: body.functionId,
-        stepId: body.stepId,
-        question: body.question
-      })
+      const result = await askCallStep(
+        service,
+        {
+          functionId: body.functionId,
+          stepId: body.stepId,
+          question: body.question
+        },
+        // 取消：把 run 的 AbortSignal 透传给在途模型请求
+        { chat: (messages, opts) => deepseekChat(messages, { ...opts, signal: run.signal }) }
+      )
+      run.finish({ cancelled: run.abortRequested })
+      return result
     } catch (error) {
+      if (run.abortRequested) {
+        run.finish({ cancelled: true })
+        const cancelled: AskResponse = {
+          cancelled: true,
+          answer: '',
+          usedFunctionIds: [],
+          rounds: 0,
+          degraded: false
+        }
+        return cancelled
+      }
       const message = error instanceof Error ? error.message : String(error)
+      run.finish({ error: message })
       if (error instanceof AskInputError) return reply.code(400).send({ error: message })
       return reply.code(500).send({ error: `追问失败：${message}` })
     }
@@ -911,13 +1123,43 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     if (getAiConfig() === null) {
       return reply.code(409).send({ error: '未配置 AI（DEEPSEEK_API_KEY），函数级追问不可用' })
     }
+    const projectId = manager.getActiveId()
+    if (!projectId) return reply.code(409).send({ error: 'no active project' })
+    if (findActiveRun(projectId)) {
+      return reply.code(409).send({ error: '有生成任务正在进行，请稍后再问' })
+    }
+    const run = beginRun({
+      kind: 'ask',
+      projectId,
+      stages: [{ key: 'ask', label: '问一问 AI', singleCall: true }],
+      cancelable: true
+    })
     try {
-      return await askFunction(service, {
-        functionId: body.functionId,
-        question: body.question
-      })
+      const result = await askFunction(
+        service,
+        {
+          functionId: body.functionId,
+          question: body.question
+        },
+        // 取消：把 run 的 AbortSignal 透传给在途模型请求
+        { chat: (messages, opts) => deepseekChat(messages, { ...opts, signal: run.signal }) }
+      )
+      run.finish({ cancelled: run.abortRequested })
+      return result
     } catch (error) {
+      if (run.abortRequested) {
+        run.finish({ cancelled: true })
+        const cancelled: AskResponse = {
+          cancelled: true,
+          answer: '',
+          usedFunctionIds: [],
+          rounds: 0,
+          degraded: false
+        }
+        return cancelled
+      }
       const message = error instanceof Error ? error.message : String(error)
+      run.finish({ error: message })
       if (error instanceof AskInputError) return reply.code(400).send({ error: message })
       return reply.code(500).send({ error: `追问失败：${message}` })
     }
@@ -1107,6 +1349,35 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     }
   })
 
+  /* ------------------------- 长任务进度（旁路轮询） ------------------------- */
+
+  // 不要求活动项目：前端在首屏/切换期也能安全轮询，无项目时返回两个 null。
+  // 首次加载（add / 切到未加载项目）期间 activeId 尚未切换，必须优先用「加载中的项目」，
+  // 否则整段扫描进度不可见；加载结束（含失败）后回落到 activeId。
+  app.get('/api/progress', async () =>
+    getProjectProgress(manager.getLoadingId?.() ?? manager.getActiveId())
+  )
+
+  app.post('/api/progress/cancel', async (req, reply) => {
+    if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
+    const projectId = manager.getActiveId()
+    if (!projectId) return reply.code(409).send({ error: 'no active project' })
+    const body = (req.body ?? {}) as { runId?: unknown }
+    if (body.runId !== undefined && typeof body.runId !== 'string') {
+      return reply.code(400).send({ error: 'runId 必须为字符串' })
+    }
+    const active = findActiveRun(projectId)
+    if (!active) return reply.code(404).send({ error: '没有正在进行的任务' })
+    // 扫描任务通常不可取消；这里先按 kind 给出明确文案，registry 再做 cancelable 兜底
+    if (active.kind === 'scan') return reply.code(400).send({ error: '扫描任务不可取消' })
+    const result = requestCancel(projectId, body.runId)
+    if (!result.ok) {
+      const status = result.code === 'stale-run' ? 409 : result.code === 'not-cancelable' ? 400 : 404
+      return reply.code(status).send({ error: result.error })
+    }
+    return { ok: true, runId: active.runId }
+  })
+
   /* ------------------------- 增量重生探测（C3，纯读，不受 readOnly 拦截） ------------------------- */
 
   // 工作区相对解析缓存是否有未重生变更：只做内容哈希比对（core inspectParseCache），
@@ -1125,8 +1396,14 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.post('/api/refresh', async (req, reply) => {
     if (readOnly) return reply.code(403).send({ error: 'read-only mode' })
     const service = manager.getActive()
-    if (!service) return reply.code(409).send({ error: 'no active project' })
-    await regenerate(service, (message) => console.warn(`[autodoc] ${message}`))
+    const projectId = manager.getActiveId()
+    if (!service || !projectId) return reply.code(409).send({ error: 'no active project' })
+    const outcome = await runScanTask(projectId, (report) =>
+      regenerate(service, (message) => console.warn(`[autodoc] ${message}`), report)
+    )
+    if (!outcome.ok) {
+      return reply.code(409).send({ error: '有任务正在进行中，请稍后重试', code: 'run-in-progress' })
+    }
     // I3：附带本次解析层增量统计，前端在成功提示里展示「复用/重跑」确认增量生效
     return { ok: true, generatedAt: service.generatedAt, incremental: service.lastParseStats }
   })
