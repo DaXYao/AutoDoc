@@ -1037,7 +1037,7 @@ function changeTypeClass(type: ChangeType): string {
                      措辞与配色刻意区别于链路里的调用点角色（在此处做什么），两者语义不同源。 -->
                 <template #changed-extra="{ id }">
                   <div
-                    v-if="changeRoleOf(id)"
+                    v-if="changedIds.has(id) && changeRoleOf(id)"
                     class="mt-1 flex w-full flex-wrap items-center gap-1.5"
                   >
                     <GuaranteedBlock

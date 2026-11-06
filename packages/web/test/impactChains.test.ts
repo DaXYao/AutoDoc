@@ -48,17 +48,20 @@ describe('buildAffectedChains · 直接命中', () => {
     expect(view.hasSide).toBe(false)
   })
 
-  it('直接命中的变更节点跳过自身侧向子树（不再重复展开）', () => {
+  it('变更 path 节点仍作为侧向起点：可到达的另一个变更函数不会漏出本链路', () => {
     const chains = [chain('c1', ['a', 'b'])]
-    // b 是变更函数且自身还有 callee，但直接高亮即可，不应再作为侧向树根
+    // b 直接在 path 上变更，同时 b 侧向调用到另一个变更函数 t：
+    // b 自身不重复进侧向树，但 t 必须作为侧向分支出现，否则会被误归「未进入业务链路」
     const functions = fnMap({ a: ['b'], b: ['t', 'u'], t: [], u: [] })
 
-    const [view] = buildAffectedChains(chains, functions, new Set(['b']))
+    const [view] = buildAffectedChains(chains, functions, new Set(['b', 't']))
 
     expect(view.hasDirect).toBe(true)
-    expect(view.hasSide).toBe(false)
-    expect(view.sideBranches.size).toBe(0)
-    expect(view.changedIds).toEqual(['b'])
+    expect(view.hasSide).toBe(true)
+    expect(view.changedIds).toEqual(['b', 't'])
+    const roots = view.sideBranches.get(1) ?? []
+    expect(roots.map((n) => n.id)).toEqual(['t'])
+    expect(roots[0].changed).toBe(true)
   })
 })
 
@@ -200,6 +203,21 @@ describe('buildAffectedChains · 空输入与未关联变更', () => {
 
   it('没有受影响链路时全部变更都未关联', () => {
     expect(unassociatedChangedIds(['b', 'a', 'b'], [])).toEqual(['b', 'a'])
+  })
+})
+
+describe('buildAffectedChains · 边界输入', () => {
+  it('空 path 链路直接跳过', () => {
+    const views = buildAffectedChains([chain('empty', [])], fnMap({}), new Set(['a']))
+    expect(views).toEqual([])
+  })
+
+  it('函数索引缺失 calleeIds 时按无下游处理，不抛错', () => {
+    const chains = [chain('c1', ['a', 'b'])]
+    const views = buildAffectedChains(chains, {}, new Set(['b']))
+    expect(views).toHaveLength(1)
+    expect(views[0].hasDirect).toBe(true)
+    expect(views[0].hasSide).toBe(false)
   })
 })
 

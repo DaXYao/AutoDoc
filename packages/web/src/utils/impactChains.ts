@@ -145,7 +145,12 @@ export function buildAffectedChains(
     const directChanged = new Map<number, string[]>()
     const directOrder: string[] = []
     const directSeen = new Set<string>()
-    /** 侧向子图起点：path 上非变更函数，同一函数重复回踩只取首个下标 */
+    /**
+     * 侧向子图起点：path 上所有函数（含变更函数），同一函数重复回踩只取首个下标。
+     * 变更节点自身仍作为起点：它可能侧向调用到「另一个」变更函数，
+     * 若直接跳过，后者会漏出本链路、被误归到「未进入业务链路」。
+     * pathIds 已整体排除，所以起点自身不会出现在侧向树里。
+     */
     const startIndexes: number[] = []
     const startSeen = new Set<string>()
 
@@ -157,7 +162,6 @@ export function buildAffectedChains(
           directSeen.add(id)
           directOrder.push(id)
         }
-        continue
       }
       if (!startSeen.has(id)) {
         startSeen.add(id)

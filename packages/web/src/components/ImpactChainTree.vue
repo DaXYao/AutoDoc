@@ -51,21 +51,41 @@ const importance = computed(() =>
   chainImportance(chain.value, appState.insight?.functions ?? {})
 )
 
-/** 直接命中处数 = path 上变更位置数（同一函数回踩两个位置算两处） */
-const directCount = computed(() => {
-  let count = 0
-  for (const ids of props.view.directChanged.values()) count += ids.length
-  return count
+/** 直接命中的去重函数数（与排序/摘要的「变更点数」同口径） */
+const directUniqueCount = computed(() => {
+  const ids = new Set<string>()
+  for (const list of props.view.directChanged.values()) {
+    for (const id of list) ids.add(id)
+  }
+  return ids.size
 })
 
-/** 侧向波及函数数 = 关联变更函数 − 直接命中的去重函数（两者在 P1 里互斥，不会重复计数） */
-const sideCount = computed(() => {
-  const directIds = new Set<string>()
-  for (const ids of props.view.directChanged.values()) {
-    for (const id of ids) directIds.add(id)
+/** 侧向波及函数数 = 关联变更函数 − 直接命中的去重函数 */
+const sideCount = computed(() => props.view.changedIds.length - directUniqueCount.value)
+
+/**
+ * 每个 path 步骤的侧向变更函数数：基于完整子树统计、不随折叠变化，
+ * 与链路头「侧向 N」同为「去重变更函数数」口径。
+ */
+const sideChangedCounts = computed(() => {
+  const map = new Map<number, number>()
+  for (const [index, roots] of props.view.sideBranches) {
+    const seen = new Set<string>()
+    const walk = (nodes: SideBranchNode[]): void => {
+      for (const node of nodes) {
+        if (node.changed) seen.add(node.id)
+        walk(node.children)
+      }
+    }
+    walk(roots)
+    map.set(index, seen.size)
   }
-  return props.view.changedIds.length - directIds.size
+  return map
 })
+
+function sideChangedCountAt(index: number): number {
+  return sideChangedCounts.value.get(index) ?? 0
+}
 
 /** 侧向子树按 path 下标分组拍平成行（折叠时跳过子孙），避免组件递归与额外的隐式自引用 */
 const sideRowsByIndex = computed(() => {
@@ -166,8 +186,8 @@ function sideNodeTitle(row: SideRow): string {
           重要性 {{ importance }}
         </n-tag>
         <span class="text-[11px] text-red-600">
-          变更 {{ directCount + sideCount }} 处
-          <span class="text-[color:var(--ad-ink-3)]">（直接 {{ directCount }} · 侧向 {{ sideCount }}）</span>
+          变更 {{ view.changedIds.length }} 处
+          <span class="text-[color:var(--ad-ink-3)]">（直接 {{ directUniqueCount }} · 侧向 {{ sideCount }}）</span>
         </span>
       </div>
     </div>
@@ -220,11 +240,11 @@ function sideNodeTitle(row: SideRow): string {
               在这里：{{ roleAt(id) }}
             </span>
             <span
-              v-if="rowsAt(index).length > 0"
+              v-if="sideChangedCountAt(index) > 0"
               class="rounded-[length:var(--ad-radius-sm)] border border-dashed border-[color:var(--ad-line-strong)] px-1 text-[10px] leading-4 text-[color:var(--ad-ink-3)]"
-              title="该步骤下方有侧向调用节点会执行到变更函数（不计主干与共享/环路回踩）"
+              title="该步骤下方侧向调用命中的变更函数数（去重，不随折叠变化）"
             >
-              侧向 {{ rowsAt(index).length }}
+              侧向 {{ sideChangedCountAt(index) }}
             </span>
           </div>
 
