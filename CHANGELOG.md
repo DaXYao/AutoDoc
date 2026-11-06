@@ -47,6 +47,15 @@
 - **测试**：新增 blocks 输入变化重跑用例；回滚回归补 `rerun` 不含 categories 断言。全仓 1514 项（core 443 / server 709 / web 362），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
 - **关联 commit**：随本批次提交。
 
+## 2026-11-06 · 多 KEY 并存：按 .env 顺序选择 provider · server+docs
+
+- **选择规则**：同时保留多个 `*_API_KEY` 时，按 `.env` 中从上到下第一个有值的生效；注释/删除即自动切下一个。`AUTODOC_AI_PROVIDER` 可强制指定，但只使用该 provider 自己的 KEY（缺 key 返回 null，不偷用另一家）。外部环境变量无文件顺序时固定 MiMo > DeepSeek。
+- **provider 由 KEY 位置决定**：只有 `DEEPSEEK_API_KEY` 时不会因为 `MIMO_MODEL` 改走 MiMo；反之亦然。通用 `AUTODOC_AI_API_KEY` 仍按 base/model 提示推断。
+- **测试隔离**：Vitest 进程不读取用户仓库 `.env`，避免本机真实 KEY 让「无 AI」用例产生外部调用或依赖个人配置。
+- **配置示例**：`.env.example` 与 README 增加多 KEY 顺序说明；本机 `.env` 已写入 MiMo 示例并注释旧 DeepSeek KEY（不入库）。
+- **测试**：新增 provider 顺序选择、显式 provider 缺 key 等用例；全仓 1574 项（core 452 / server 736 / web 386），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-06 · MiMo 实跑兼容修复：链路叙事 id 简写 · server+test
 
 - **实跑发现**：用真实 Token Plan KEY 跑通 partition 与全量 9 pass；`narratives` 连续零覆盖。直接复现确认 MiMo 把链路键写成 `"0"`、函数键截成参数哈希 `"abc"`，而契约要求 `chain:0` 与完整稳定 ID。

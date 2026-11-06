@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { deepseekChat } from '../src/ai.js'
-import { getAiConfig, normalizeAiBaseUrl } from '../src/env.js'
+import {
+  getAiConfig,
+  normalizeAiBaseUrl,
+  selectProviderByKeyOrder
+} from '../src/env.js'
 
 /**
  * KEY 链路 provider 适配：DeepSeek 与小米 MiMo（含 Token Plan）。
@@ -60,6 +64,24 @@ describe('normalizeAiBaseUrl', () => {
   })
 })
 
+describe('selectProviderByKeyOrder（多 KEY 按 .env 顺序）', () => {
+  it('两个 key 都有：按文件顺序取第一个', () => {
+    expect(selectProviderByKeyOrder(['deepseek', 'mimo'], () => true)).toBe('deepseek')
+    expect(selectProviderByKeyOrder(['mimo', 'deepseek'], () => true)).toBe('mimo')
+  })
+
+  it('顺序靠前的 key 未填写 / 被注释：自动落到下一个', () => {
+    expect(selectProviderByKeyOrder(['deepseek', 'mimo'], (p) => p === 'mimo')).toBe('mimo')
+    expect(selectProviderByKeyOrder(['mimo', 'deepseek'], (p) => p === 'deepseek')).toBe('deepseek')
+  })
+
+  it('无文件顺序（纯外部环境变量）：MiMo 优先，再 DeepSeek', () => {
+    expect(selectProviderByKeyOrder([], () => true)).toBe('mimo')
+    expect(selectProviderByKeyOrder([], (p) => p === 'deepseek')).toBe('deepseek')
+    expect(selectProviderByKeyOrder([], () => false)).toBeNull()
+  })
+})
+
 describe('getAiConfig', () => {
   it('未配置任何 key → null', () => {
     expect(getAiConfig()).toBeNull()
@@ -90,23 +112,24 @@ describe('getAiConfig', () => {
     })
   })
 
-  it('沿用 DEEPSEEK_* 变量但填 MiMo 值：按模型/域名识别，旧 deepseek base 不泄漏', () => {
-    process.env.DEEPSEEK_API_KEY = 'tp-test'
-    process.env.DEEPSEEK_MODEL = 'mimo-v2.6-pro'
-    process.env.DEEPSEEK_BASE_URL = 'https://token-plan-cn.xiaomimimo.com/v1'
+  it('KEY 所在变量决定 provider：只有 DEEPSEEK_API_KEY 时不会因为 MIMO_MODEL 改走 MiMo', () => {
+    process.env.DEEPSEEK_API_KEY = 'sk-test'
+    process.env.MIMO_MODEL = 'mimo-v2.6-pro'
     const cfg = getAiConfig()
-    expect(cfg?.provider).toBe('mimo')
-    expect(cfg?.baseUrl).toBe('https://token-plan-cn.xiaomimimo.com')
-    expect(cfg?.model).toBe('mimo-v2.6-pro')
-    expect(cfg?.maxTokensField).toBe('max_completion_tokens')
+    expect(cfg?.provider).toBe('deepseek')
+    expect(cfg?.baseUrl).toBe('https://api.deepseek.com')
+    expect(cfg?.model).toBe('deepseek-flash')
+    expect(cfg?.maxTokensField).toBe('max_tokens')
   })
 
   it('显式 provider=mimo 时忽略 DeepSeek 的 base/model，默认走 Token Plan', () => {
     process.env.AUTODOC_AI_PROVIDER = 'mimo'
-    process.env.DEEPSEEK_API_KEY = 'tp-test'
+    process.env.MIMO_API_KEY = 'tp-test'
+    process.env.DEEPSEEK_API_KEY = 'sk-other'
     process.env.DEEPSEEK_BASE_URL = 'https://api.deepseek.com'
     process.env.DEEPSEEK_MODEL = 'deepseek-flash'
     const cfg = getAiConfig()
+    expect(cfg?.apiKey).toBe('tp-test')
     expect(cfg?.baseUrl).toBe('https://token-plan-cn.xiaomimimo.com')
     expect(cfg?.model).toBe('mimo-v2.6-flash')
   })
@@ -119,6 +142,12 @@ describe('getAiConfig', () => {
     const cfg = getAiConfig()
     expect(cfg?.baseUrl).toBe('https://token-plan-sgp.xiaomimimo.com')
     expect(cfg?.thinking).toBe('enabled')
+  })
+
+  it('显式 provider 缺少对应 KEY → null（不偷用另一家 key）', () => {
+    process.env.AUTODOC_AI_PROVIDER = 'deepseek'
+    process.env.MIMO_API_KEY = 'tp-test'
+    expect(getAiConfig()).toBeNull()
   })
 
   it('允许显式覆盖 max_tokens 字段名（兼容其它 OpenAI 网关）', () => {

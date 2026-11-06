@@ -139,7 +139,9 @@ cp .env.example .env
 # 小米 MiMo Token Plan：填入 MIMO_API_KEY（tp-/ttp-），默认走国内 Token Plan 端点与 mimo-v2.6-flash
 ```
 
-真实环境变量优先于 `.env`。DeepSeek 的 `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` 可选；MiMo 的 `MIMO_BASE_URL` / `MIMO_MODEL` 可选，默认 `https://token-plan-cn.xiaomimimo.com` 与 `mimo-v2.6-flash`，并默认关闭思考（可用 `AUTODOC_AI_THINKING=enabled` 开启）。Base URL 可带 `/v1`，程序会自动归一化。`.env` 已被 gitignore，密钥不会入库。
+真实环境变量优先于 `.env`。DeepSeek 的 `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` 可选；MiMo 的 `MIMO_BASE_URL` / `MIMO_MODEL` 可选，默认 `https://token-plan-cn.xiaomimimo.com` 与 `mimo-v2.6-flash`，并默认关闭思考（可用 `AUTODOC_AI_THINKING=enabled` 开启）。Base URL 可带 `/v1`，程序会自动归一化。
+
+**多个 KEY 可以同时保留**：按 `.env` 中从上到下第一个有值的 `*_API_KEY` 生效；注释或删除即自动切到下一个。`AUTODOC_AI_PROVIDER=deepseek|mimo` 可强制指定，但只使用该 provider 自己的 KEY（不会偷用另一家）。`.env` 已被 gitignore，密钥不会入库。
 
 **路径二：外部 Agent 契约供给（无需 key）**
 

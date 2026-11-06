@@ -26,6 +26,9 @@ function findEnvFile(startDir: string): string | null {
 export function loadEnv(baseDir: string = process.cwd()): void {
   if (loaded) return
   loaded = true
+  // 测试进程不读取用户仓库的 .env：否则本机真实 KEY 会让「无 AI」用例产生外部调用，
+  // 也让测试结果依赖开发者个人配置。测试需要 KEY 时显式设置 process.env。
+  if (process.env.VITEST === 'true' || process.env.NODE_ENV === 'test') return
   const path = findEnvFile(baseDir)
   if (!path) return
   let text: string
@@ -48,6 +51,15 @@ export function loadEnv(baseDir: string = process.cwd()): void {
     ) {
       value = value.slice(1, -1)
     }
+    // 记录 provider KEY 在文件中的位置顺序（非空才计入）：多 KEY 并存时按此顺序取第一个
+    if (value) {
+      const provider = (Object.keys(PROVIDER_KEY_ENV) as AiProvider[]).find(
+        (p) => PROVIDER_KEY_ENV[p] === key
+      )
+      if (provider && !envFileProviderOrder.includes(provider)) {
+        envFileProviderOrder.push(provider)
+      }
+    }
     if (process.env[key] === undefined) process.env[key] = value
   }
 }
@@ -55,6 +67,18 @@ export function loadEnv(baseDir: string = process.cwd()): void {
 export type AiProvider = 'deepseek' | 'mimo'
 export type MaxTokensField = 'max_tokens' | 'max_completion_tokens'
 export type AiThinkingMode = 'enabled' | 'disabled'
+
+/** provider → 其专用 KEY 变量名 */
+const PROVIDER_KEY_ENV: Record<AiProvider, string> = {
+  mimo: 'MIMO_API_KEY',
+  deepseek: 'DEEPSEEK_API_KEY'
+}
+
+/**
+ * `.env` 中 provider KEY 出现的顺序（只记录非空行）。
+ * 多个 KEY 同时有效时按此顺序取第一个；注释/删除即自然切到下一个。
+ */
+const envFileProviderOrder: AiProvider[] = []
 
 export interface AiConfig {
   provider: AiProvider
@@ -99,13 +123,33 @@ export function normalizeAiBaseUrl(raw: string): string {
   return url.replace(/\/+$/, '')
 }
 
-function inferProvider(base: string | undefined, model: string | undefined): AiProvider {
-  const explicit = envOf('AUTODOC_AI_PROVIDER')?.toLowerCase()
-  if (explicit === 'deepseek' || explicit === 'mimo') return explicit
-  if (envOf('MIMO_API_KEY')) return 'mimo'
+function parseProvider(value: string | undefined): AiProvider | null {
+  const v = value?.toLowerCase()
+  return v === 'deepseek' || v === 'mimo' ? v : null
+}
+
+/** 仅根据 base/model 提示推断（不读取其它 provider 的 key，避免通用 KEY 被 key 存在性带偏） */
+function inferProviderFromHints(base: string | undefined, model: string | undefined): AiProvider {
   if (model?.toLowerCase().startsWith('mimo-')) return 'mimo'
   if (base?.toLowerCase().includes('xiaomimimo.com')) return 'mimo'
   return 'deepseek'
+}
+
+/**
+ * 多 KEY 并存时的选择：严格按 `.env` 出现顺序取第一个「有 key」的 provider；
+ * 外部环境变量（无文件顺序）追加在末尾，固定 MiMo > DeepSeek。
+ */
+export function selectProviderByKeyOrder(
+  fileOrder: readonly AiProvider[],
+  present: (provider: AiProvider) => boolean
+): AiProvider | null {
+  for (const provider of fileOrder) {
+    if (present(provider)) return provider
+  }
+  for (const provider of ['mimo', 'deepseek'] as const) {
+    if (!fileOrder.includes(provider) && present(provider)) return provider
+  }
+  return null
 }
 
 /**
@@ -117,15 +161,20 @@ export function getAiConfig(): AiConfig | null {
   loadEnv()
 
   const genericKey = envOf('AUTODOC_AI_API_KEY')
-  const mimoKey = envOf('MIMO_API_KEY')
-  const legacyKey = envOf('DEEPSEEK_API_KEY')
   // 供应商判定同时看通用/供应商变量，避免只改模型名时仍走旧默认 base
   const baseHint =
     envOf('AUTODOC_AI_BASE_URL') ?? envOf('MIMO_BASE_URL') ?? envOf('DEEPSEEK_BASE_URL')
   const modelHint = envOf('AUTODOC_AI_MODEL') ?? envOf('MIMO_MODEL') ?? envOf('DEEPSEEK_MODEL')
-  const provider = inferProvider(baseHint, modelHint)
+  const explicitProvider = parseProvider(envOf('AUTODOC_AI_PROVIDER'))
+  const provider =
+    explicitProvider ??
+    (genericKey
+      ? inferProviderFromHints(baseHint, modelHint)
+      : (selectProviderByKeyOrder(envFileProviderOrder, (p) =>
+          Boolean(envOf(PROVIDER_KEY_ENV[p]))
+        ) ?? inferProviderFromHints(baseHint, modelHint)))
 
-  const apiKey = genericKey ?? (provider === 'mimo' ? mimoKey : undefined) ?? legacyKey
+  const apiKey = genericKey ?? envOf(PROVIDER_KEY_ENV[provider])
   if (!apiKey) return null
 
   // base：通用变量优先；MiMo 只接受 MIMO_* 或显式指向小米域名的 DEEPSEEK_BASE_URL，
