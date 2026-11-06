@@ -8,7 +8,7 @@ vi.mock('../src/ai.js', async (importActual) => {
   return { ...actual, deepseekChat: vi.fn() }
 })
 import { deepseekChat, type ChatReply } from '../src/ai.js'
-import { aiNarratives } from '../src/insight.js'
+import { aiNarratives, normalizeNarrativeEnvelope } from '../src/insight.js'
 
 /** 伪 chat 回复；truncated=true 模拟 finish_reason=length */
 function reply(content: string, truncated = false): ChatReply {
@@ -238,5 +238,39 @@ describe('F 初审修复：批内覆盖率语义 + 模块上限可观测', () =>
     expect(deepseekChat).toHaveBeenCalledTimes(6)
     expect(graph.chains.filter((c) => narr[c.id]?.narrative)).toHaveLength(6)
     warn.mockRestore()
+  })
+})
+
+describe('normalizeNarrativeEnvelope（模型简写 id 的容忍）', () => {
+  const fnId = 'order.ts::-::submitOrder@abc123'
+
+  it('数字链路键 + 短哈希函数键 → 归一为完整 id', () => {
+    const parsed = {
+      '0': { narrative: '提交订单', stepRoles: { abc123: '入口' } }
+    } as unknown as Parameters<typeof normalizeNarrativeEnvelope>[0]
+    expect(normalizeNarrativeEnvelope(parsed, ['chain:0'], [fnId])).toEqual({
+      'chain:0': { narrative: '提交订单', stepRoles: { [fnId]: '入口' } }
+    })
+  })
+
+  it('完整 id 原样通过', () => {
+    const parsed = {
+      'chain:0': { narrative: 'x', stepRoles: { [fnId]: 'y' } }
+    } as unknown as Parameters<typeof normalizeNarrativeEnvelope>[0]
+    expect(normalizeNarrativeEnvelope(parsed, ['chain:0'], [fnId])).toEqual(parsed)
+  })
+
+  it('后缀多候选时丢弃，不猜测', () => {
+    const parsed = {
+      '0': { narrative: 'x', stepRoles: { abc123: 'y' } }
+    } as unknown as Parameters<typeof normalizeNarrativeEnvelope>[0]
+    // 两个函数都以 @abc123 结尾 → 无法唯一定位，函数角色丢弃；链路键 chain:0 唯一仍保留
+    const out = normalizeNarrativeEnvelope(
+      parsed,
+      ['chain:0'],
+      ['a.ts::-::f@abc123', 'b.ts::-::g@abc123']
+    )
+    expect(out['chain:0']?.narrative).toBe('x')
+    expect(out['chain:0']?.stepRoles).toEqual({})
   })
 })

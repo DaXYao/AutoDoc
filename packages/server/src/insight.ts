@@ -1101,6 +1101,43 @@ async function aiCoreRoles(graph: ProjectGraph): Promise<Record<string, string>>
  * 部分覆盖则如实合并并告警输出覆盖率，便于排查「个别链路未生成」。
  * 边界：有链模块数超过 MAX_AI_MODULES 时只取链数最多的前 N 个模块，其余不参与叙事（打 warn 明示）。
  */
+/**
+ * 归一化模型返回的链路/函数键：部分模型（实测小米 MiMo）会把 `chain:0` 简写成 `0`、
+ * 把完整稳定 ID 截成参数哈希 `abc`。只接受「唯后缀匹配」：候选里恰好一个以 `:key`
+ * 或 `@key` 结尾时才改写，多候选一律丢弃（不猜测、不张冠李戴）。
+ */
+export function normalizeNarrativeEnvelope(
+  parsed: NarrativeEnvelope,
+  chainIds: string[],
+  functionIds: Iterable<string>
+): NarrativeEnvelope {
+  const fnIds = [...functionIds]
+  const resolve = (key: string, candidates: string[], allowAt: boolean): string | null => {
+    if (candidates.includes(key)) return key
+    const matches = candidates.filter(
+      (id) => id.endsWith(`:${key}`) || (allowAt && id.endsWith(`@${key}`))
+    )
+    return matches.length === 1 ? matches[0] : null
+  }
+  const out: NarrativeEnvelope = {}
+  for (const [rawKey, rawValue] of Object.entries(parsed)) {
+    if (!rawValue || typeof rawValue !== 'object') continue
+    const chainId = resolve(rawKey, chainIds, false)
+    if (!chainId) continue
+    const value = { ...rawValue }
+    if (value.stepRoles && typeof value.stepRoles === 'object') {
+      const roles: Record<string, string> = {}
+      for (const [fnKey, role] of Object.entries(value.stepRoles)) {
+        const fnId = resolve(fnKey, fnIds, true)
+        if (fnId && typeof role === 'string' && role.length > 0) roles[fnId] = role
+      }
+      value.stepRoles = roles
+    }
+    out[chainId] = value
+  }
+  return out
+}
+
 export async function aiNarratives(graph: ProjectGraph): Promise<NarrativeEnvelope> {
   const out: NarrativeEnvelope = {}
   const chainModules = graph.modules
@@ -1135,10 +1172,14 @@ export async function aiNarratives(graph: ProjectGraph): Promise<NarrativeEnvelo
       }
       if (blocks.length === 0) continue
       const scope = batches.length > 1 ? `（第 ${b + 1}/${batches.length} 批）` : ''
+      // 给模型真实 id 作示例：MiMo 看到 "<链路id>" 占位符时会擅自简写成数字/短哈希
+      const exampleChain = batchIds[0]
+      const exampleFn = [...fnInfo.keys()][0] ?? '<函数id>'
       const user =
         `模块「${mod.name}」的实现链路${scope}(入口→…→叶子)：\n${blocks.join('\n')}\n` +
         `函数信息：\n${[...fnInfo.values()].join('\n')}\n` +
-        `输出 JSON: {"<链路id>":{"narrative":"这条链路完成了什么(一句话)","stepRoles":{"<函数id>":"该函数在本链路里的职责(一句话)"}}}`
+        `输出 JSON（键必须逐字照抄上面的完整 id，禁止只写数字、序号或短哈希）：\n` +
+        `{"${exampleChain}":{"narrative":"这条链路完成了什么(一句话)","stepRoles":{"${exampleFn}":"该函数在本链路里的职责(一句话)"}}}`
       let done = false
       for (let attempt = 1; attempt <= AI_PARSE_RETRIES && !done; attempt++) {
         try {
@@ -1153,15 +1194,21 @@ export async function aiNarratives(graph: ProjectGraph): Promise<NarrativeEnvelo
             continue
           }
           const parsed = extractJson<NarrativeEnvelope>(reply.content)
+          // 容忍模型把 id 简写成 `0` / 短哈希；只做唯一后缀归一化，多候选仍判失败
+          const normalized = parsed
+            ? normalizeNarrativeEnvelope(parsed, batchIds, fnInfo.keys())
+            : null
           // extractJson 非 null 不即成功：对本批链路覆盖为 0 时视为失败（否则答非所问的 JSON 会被当成果固化进缓存）
-          const covered = parsed ? batchIds.filter((cid) => parsed[cid] !== undefined).length : 0
-          if (!parsed || covered === 0) {
+          const covered = normalized
+            ? batchIds.filter((cid) => normalized[cid] !== undefined).length
+            : 0
+          if (!normalized || covered === 0) {
             console.warn(
-              `[autodoc] AI 链路叙事(模块 ${mod.name})第 ${b + 1}/${batches.length} 批第 ${attempt} 次${parsed ? `返回对本批链路零覆盖(覆盖 0/${batchIds.length})` : '返回无法解析'}${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
+              `[autodoc] AI 链路叙事(模块 ${mod.name})第 ${b + 1}/${batches.length} 批第 ${attempt} 次${normalized ? `返回对本批链路零覆盖(覆盖 0/${batchIds.length})` : '返回无法解析'}${attempt < AI_PARSE_RETRIES ? '，重试' : '，降级该批'}`
             )
             continue
           }
-          Object.assign(out, parsed)
+          Object.assign(out, normalized)
           if (covered < batchIds.length) {
             console.warn(
               `[autodoc] AI 链路叙事(模块 ${mod.name})第 ${b + 1}/${batches.length} 批部分缺失（覆盖 ${covered}/${batchIds.length}），缺失链路将显示「叙事未生成」`

@@ -47,6 +47,16 @@
 - **测试**：新增 blocks 输入变化重跑用例；回滚回归补 `rerun` 不含 categories 断言。全仓 1514 项（core 443 / server 709 / web 362），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
 - **关联 commit**：随本批次提交。
 
+## 2026-11-06 · MiMo 实跑兼容修复：链路叙事 id 简写 · server+test
+
+- **实跑发现**：用真实 Token Plan KEY 跑通 partition 与全量 9 pass；`narratives` 连续零覆盖。直接复现确认 MiMo 把链路键写成 `"0"`、函数键截成参数哈希 `"abc"`，而契约要求 `chain:0` 与完整稳定 ID。
+- **提示词**：链路叙事改为给出本批真实 id 示例，并明确「禁止只写数字/序号/短哈希」。
+- **防御归一化**：新增 `normalizeNarrativeEnvelope`，只做唯一后缀匹配（`:key` / `@key`），多候选一律丢弃；不猜测、不张冠李戴。
+- **验证**：`mimo-v2.6-flash` 与 `mimo-v2.6-pro` 单跑 narratives 均 `ok`，叙事与步骤角色正确落位；全量 9 pass 在 3 函数 fixture 上 165s 完成（keySteps/externals/blocks 因无候选 skipped，属正常）。
+- **测试**：新增 3 项归一化用例；全仓 1570 项（core 452 / server 732 / web 386），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
+- **安全**：测试密钥仅通过进程环境变量注入，未写入 `.env`/仓库/日志；测试 fixture 已删除。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-06 · KEY 链路支持小米 MiMo（含 Token Plan）· server+web+docs
 
 - **provider 适配层**（`env.ts`）：KEY 链路不再写死 DeepSeek。支持 `MIMO_API_KEY`（`tp-`/`ttp-`，Token Plan）与旧 `DEEPSEEK_*`，并新增 `AUTODOC_AI_PROVIDER/API_KEY/BASE_URL/MODEL/MAX_TOKENS_FIELD/THINKING` 通用变量；按 key/model/base 自动识别供应商。
