@@ -2,6 +2,14 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-06 · 变更影响页链路视角（P1：纯计算层）· web
+
+- **新增纯函数 `utils/impactChains.ts`**：`buildAffectedChains(chains, functions, changedIds)` → `AffectedChainView[]`（`chain` / `directChanged` / `sideBranches` / `changedIds` / `hasDirect` / `hasSide`）与 `unassociatedChangedIds(changedIds, affected)`。判定口径：链路 path 直接包含变更函数（直接命中），或 path 节点沿 `calleeIds` 直接/间接调用到达变更函数（侧向调用，不限深度）。
+- **侧向子图**：从 path 节点的直接 callee 收集去重子图，排除全部 path 节点；用「从变更节点沿反向边 BFS」求可达性剪掉无关分支（等价自底向上 memo，且对互环严格正确）；变更节点为 `changed:true` 叶子；同一链路内共享节点只展开一次、环/重复出现降级为 `repeated:true` 叶子；变更点自身的侧向子树跳过；`changedIds` 先 path 序直接命中、再 DFS 发现序侧向命中并去重；只返回有命中/侧向分支的链路，不修改入参。
+- **测试**：新增 `test/impactChains.test.ts` 15 项（直接命中、直接命中不展开子树、一跳/多跳侧向、环路、互环共享子图、共享节点、path 节点侧向调用不重复、无关剪枝、changedIds 顺序、空链路/无命中、未关联变更、入参不变）。
+- **边界**：未改 `ImpactView.vue` / 组件 / 后端 / shared-types；未引入依赖。web 386 项全绿，`pnpm --filter @autodoc/web test`、`pnpm lint`、`pnpm build` 通过。
+- **关联 commit**：随本批次提交（`feat(web): 受影响链路计算（直接命中+侧向调用子图）`）。
+
 ## 2026-11-06 · 变更影响页工作区变更标注 Git/生成批次来源（P3）· web+docs
 
 - **纯函数（`utils/impact.ts`）**：新增 `workspaceModeOf(changeset)` → `{ source, label, description, emptyText }`（`workspaceSource` 缺省按 git；snapshot 时标签「最近生成批次」、说明回退原因、空态「该生成批次没有函数级变更」）与 `workspaceNoticesOf(changeset)` → `string[]`（近似在前、截断在后，上限常量 `WORKSPACE_CHANGE_FILE_LIMIT=2000` 仅用于文案）。
