@@ -2,6 +2,16 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-06 · 变更影响页链路视角（P2+P3：链路树 UI 与实机验收）· web+docs
+
+- **新组件 `components/ImpactChainTree.vue`**：链路头（叙事 / 模块名 / 重要性 / 变更处数，可折叠）+ 主干 path（序号、函数、`stepRoles` 角色、直接命中红色徽标）+ 步骤下的侧向调用子树（`SideBranchNode` 拍平为行，祖先竖线与肘线纯 CSS，无新依赖；`changed` 红色、`repeated` 叶子带「共享/环路」title）。链路与侧向默认展开，逐链路/逐分支折叠状态只放组件内 ref（不写 localStorage）；侧向节点同样可聚焦、可点击跳函数。Agent 供给的链路影响解释与「本次变更角色」经 `impact` / `changed-extra` 插槽注入，组件不感知供给来源。
+- **ImpactView 改为链路视角**：`buildAffectedChains` 取代旧 `affectedChains`；删除「上游波及」「下游依赖」两个区块及对应摘要卡/图例，并移除全仓已无消费者的 `upstreamRipple` / `downstreamOf` / `RIPPLE_COLOR` / `RIPPLE_TAG`。摘要卡改为「变更函数 / 受影响链路 / 直接命中链路 / 侧向波及链路」；排序沿用重要性 / 变更点数（直接+侧向合计，`sortAffectedChains`）；未进入任何链路者进默认折叠的「未进入业务链路（N）」兜底区（名称 / 文件 / 变更类型 / 可跳转）；`chains` 为空时给「还没有业务脉络」空态与洞察页入口，有链路但无命中时给提示 + 兜底区。
+- **叠加图数据源改为受影响链路 + 侧向分支**：`impactOverlayModel(views, changedIds)` 主干边实线、侧向边虚线（`GraphEdge.dashed` → `GraphView` 既有 `strokeDasharray`），节点/边按 id 去重、同一对边实线优先，变更节点红色；移除琥珀波及色与图例项。G6 三层 Agent 语义（提交叙事 / 链路影响解释 / 变更函数角色）、scope 选择、自动重生、静态导出逻辑全部保留。
+- **测试**：`test/impact.test.ts` 重写为链路口径——新增 `sortAffectedChains`、`impactSummaryOf`、`directChangedCount` 用例；叠加图新增侧向边虚线、节点去重、实线优先、repeated 叶子断言；删除上下游旧用例。web 384 项全绿，`pnpm --filter @autodoc/web test`、`pnpm lint`、`pnpm build` 通过。
+- **实机验收（7795 隔离服务，AutoDoc 自分析）**：提交 `d17f55a` → 变更函数 12 / 受影响链路 58（直接命中 5 / 侧向 53），链路树显示 path 主干 + 侧向分支 + 红色变更高亮；叠加图 17 条边中侧向边渲染为 `stroke-dasharray: 6, 4`；链路折叠/展开、分支折叠/展开、节点点击跳转（`#/file/...?fn=<稳定 ID>`）均通过。为验证深度 ≥2 的侧向分支，临时在 `core/src/generate.ts` 的 `stripCommentSyntax` 内加注释制造工作区改动（验收后 `git checkout` 还原）；工作区口径回到 21 个变更、0 条命中时，提示语与「未进入业务链路（21）」兜底区（名称/文件/类型）按预期出现。
+- **边界**：未改后端 / shared-types / 依赖；未改 AGENTS.md；未提交 `.autodoc` 运行时数据。
+- **关联 commit**：`feat(web): 变更影响改为链路树与侧向调用`。
+
 ## 2026-11-06 · 变更影响页链路视角（P1：纯计算层）· web
 
 - **新增纯函数 `utils/impactChains.ts`**：`buildAffectedChains(chains, functions, changedIds)` → `AffectedChainView[]`（`chain` / `directChanged` / `sideBranches` / `changedIds` / `hasDirect` / `hasSide`）与 `unassociatedChangedIds(changedIds, affected)`。判定口径：链路 path 直接包含变更函数（直接命中），或 path 节点沿 `calleeIds` 直接/间接调用到达变更函数（侧向调用，不限深度）。

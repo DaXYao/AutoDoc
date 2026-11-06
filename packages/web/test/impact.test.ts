@@ -1,19 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import type { ImpactCommit, InsightChain } from '@autodoc/shared-types'
-import { IMPACT_COLOR, RIPPLE_COLOR } from '../src/utils/graphModel'
+import type { FunctionInsight, ImpactCommit, InsightChain } from '@autodoc/shared-types'
+import { IMPACT_COLOR } from '../src/utils/graphModel'
 import {
-  affectedChains,
+  affectedChangeCount,
   changePointsOf,
-  downstreamOf,
+  directChangedCount,
   impactOverlayModel,
+  impactSummaryOf,
   IMPACT_TAG,
   resolveImpactLanding,
-  RIPPLE_TAG,
-  upstreamRipple,
+  sortAffectedChains,
   WORKSPACE_CHANGE_FILE_LIMIT,
   workspaceModeOf,
   workspaceNoticesOf
 } from '../src/utils/impact'
+import { buildAffectedChains } from '../src/utils/impactChains'
 
 function chain(
   id: string,
@@ -26,23 +27,111 @@ function chain(
 
 const set = (...ids: string[]): Set<string> => new Set(ids)
 
-describe('affectedChains', () => {
-  const chains = [chain('c1', ['a', 'b']), chain('c2', ['x', 'y']), chain('c3', ['b', 'z'])]
+/** 只带 calleeIds 的函数索引（buildAffectedChains 的最小入参形状） */
+function fnMap(
+  entries: Record<string, string[]>
+): Record<string, Pick<FunctionInsight, 'calleeIds'>> {
+  const map: Record<string, Pick<FunctionInsight, 'calleeIds'>> = {}
+  for (const [id, calleeIds] of Object.entries(entries)) map[id] = { calleeIds }
+  return map
+}
 
-  it('筛出 path 含变更函数的链路，保持入参顺序', () => {
-    const result = affectedChains(chains, set('b'))
-    expect(result.map((c) => c.id)).toEqual(['c1', 'c3'])
+describe('affectedChangeCount / directChangedCount', () => {
+  it('变更点数按直接 + 侧向合计；直接按 path 位置计（回踩两处算两处）', () => {
+    const chains = [chain('c1', ['a', 'b', 'a', 'c'])]
+    // a 回踩两个位置（都算直接命中处），c 侧向调用 t
+    const functions = fnMap({ a: [], b: [], c: ['t'], t: [] })
+    const [view] = buildAffectedChains(chains, functions, set('a', 't'))
+
+    expect(directChangedCount(view)).toBe(2)
+    expect(affectedChangeCount(view)).toBe(2)
   })
 
-  it('命中多个变更函数的链路只出现一次', () => {
-    const result = affectedChains(chains, set('a', 'b'))
-    expect(result.map((c) => c.id)).toEqual(['c1', 'c3'])
+  it('纯侧向链路：直接 0、合计 1', () => {
+    const chains = [chain('c1', ['p'])]
+    const [view] = buildAffectedChains(chains, fnMap({ p: ['t'], t: [] }), set('t'))
+
+    expect(directChangedCount(view)).toBe(0)
+    expect(affectedChangeCount(view)).toBe(1)
+  })
+})
+
+describe('sortAffectedChains', () => {
+  const functions = { core1: { isCore: true }, core2: { isCore: true } }
+  const chains = [
+    chain('short', ['a', 'b']),
+    chain('long', ['core1', 'core2', 'a', 'b'], '有叙事'),
+    chain('side', ['p'])
+  ]
+  // short/long：a 直接变更；side：侧向命中 t
+  const views = buildAffectedChains(
+    chains,
+    fnMap({ a: [], b: [], p: ['t'], t: [] }),
+    set('a', 't')
+  )
+
+  it('importance 模式：重要性降序，同分按 chain.id 升序', () => {
+    const sorted = sortAffectedChains(views, functions, 'importance')
+    // long 有 core + 长 path + 叙事，最重要；short(2) 与 side(1) 直接比分数
+    expect(sorted.map((v) => v.chain.id)).toEqual(['long', 'short', 'side'])
+    const tie = sortAffectedChains(
+      buildAffectedChains(
+        [chain('cB', ['x', 'y']), chain('cA', ['x', 'z'])],
+        fnMap({ x: [], y: [], z: [] }),
+        set('y', 'z')
+      ),
+      functions,
+      'importance'
+    )
+    // 同分（同长度、无 core、无叙事）按 chain.id 升序
+    expect(tie.map((v) => v.chain.id)).toEqual(['cA', 'cB'])
   })
 
-  it('空变更集 → 空结果；且不修改入参数组', () => {
-    const input = [...chains]
-    expect(affectedChains(input, set())).toEqual([])
-    expect(input.map((c) => c.id)).toEqual(['c1', 'c2', 'c3'])
+  it('changes 模式：变更点数（直接+侧向）降序，同分回退重要性', () => {
+    const more = buildAffectedChains(
+      [chain('two', ['a', 't2']), chain('one', ['core1', 'core2', 'a'])],
+      fnMap({ a: [], core1: [], core2: [], t2: [] }),
+      set('a', 't2')
+    )
+    const sorted = sortAffectedChains(more, functions, 'changes')
+    expect(sorted.map((v) => v.chain.id)).toEqual(['two', 'one'])
+  })
+
+  it('不修改入参数组', () => {
+    const input = [...views]
+    sortAffectedChains(input, functions, 'changes')
+    expect(input.map((v) => v.chain.id)).toEqual(views.map((v) => v.chain.id))
+  })
+})
+
+describe('impactSummaryOf', () => {
+  it('统计变更函数 / 受影响链路 / 直接命中链路 / 侧向波及链路', () => {
+    const chains = [
+      chain('direct', ['a', 'b']),
+      chain('side', ['p']),
+      chain('both', ['c', 'd'])
+    ]
+    // direct：b 直接；side：侧向 t；both：c 直接 + d 侧向 t2
+    const views = buildAffectedChains(
+      chains,
+      fnMap({ a: [], b: [], p: ['t'], t: [], c: [], d: ['t2'], t2: [] }),
+      set('b', 't', 't2', 'c')
+    )
+    expect(impactSummaryOf(views, 4)).toEqual({
+      changedFunctions: 4,
+      affectedChains: 3,
+      directChains: 2,
+      sideChains: 2
+    })
+  })
+
+  it('无受影响链路时各计数为 0（变更函数仍如实计数）', () => {
+    expect(impactSummaryOf([], 4)).toEqual({
+      changedFunctions: 4,
+      affectedChains: 0,
+      directChains: 0,
+      sideChains: 0
+    })
   })
 })
 
@@ -65,163 +154,126 @@ describe('changePointsOf', () => {
   })
 })
 
-describe('upstreamRipple', () => {
-  it('多源 BFS：直接调用者 depth=1 在前，间接调用者 depth=2 在后', () => {
-    // d 调用 c1、c2 是变更函数的直接调用者；a 经 c1 间接波及
-    const functions = {
-      changed1: { callerIds: ['c1'] },
-      changed2: { callerIds: ['c2'] },
-      c1: { callerIds: ['a'] },
-      c2: { callerIds: [] },
-      a: { callerIds: [] }
-    }
-    const result = upstreamRipple(functions, set('changed1', 'changed2'))
-    expect(result).toEqual([
-      { functionId: 'c1', depth: 1 },
-      { functionId: 'c2', depth: 1 },
-      { functionId: 'a', depth: 2 }
-    ])
-  })
-
-  it('环守卫：调用环不死循环，每个函数只出现在最小深度一次', () => {
-    // x ↔ y 互相调用，x 是变更函数的调用者
-    const functions = {
-      changed: { callerIds: ['x'] },
-      x: { callerIds: ['y'] },
-      y: { callerIds: ['x'] }
-    }
-    const result = upstreamRipple(functions, set('changed'))
-    expect(result).toEqual([
-      { functionId: 'x', depth: 1 },
-      { functionId: 'y', depth: 2 }
-    ])
-  })
-
-  it('变更函数自身不入结果（波源不算波及，即使被其它变更函数调用）', () => {
-    const functions = {
-      changedA: { callerIds: ['changedB'] },
-      changedB: { callerIds: [] }
-    }
-    expect(upstreamRipple(functions, set('changedA', 'changedB'))).toEqual([])
-  })
-
-  it('洞察数据缺失的 id（脏数据/外部函数）静默跳过不抛', () => {
-    const functions = { changed: { callerIds: ['ghost'] } }
-    expect(upstreamRipple(functions, set('changed'))).toEqual([
-      { functionId: 'ghost', depth: 1 }
-    ])
-    // ghost 无洞察条目：BFS 到它即止，不再向上
-    expect(upstreamRipple(functions, set('ghost-not-exist'))).toEqual([])
-  })
-
-  it('diamond 依赖：共同调用者取最小深度且只出现一次', () => {
-    // 菱形：c 是 changed1/changed2 的共同调用者（深度 1）；同时 d 也是 changed2 的
-    // 直接调用者（深度 1），而 c 又是 d 的调用者——经 d 构成 c 的深度 2 第二条路径。
-    // BFS 按层推进 + visited 守卫 → c 应记最小深度 1 且只出现一次
-    const functions = {
-      changed1: { callerIds: ['c'] },
-      changed2: { callerIds: ['c', 'd'] },
-      d: { callerIds: ['c'] },
-      c: { callerIds: [] }
-    }
-    const result = upstreamRipple(functions, set('changed1', 'changed2'))
-    expect(result).toEqual([
-      { functionId: 'c', depth: 1 },
-      { functionId: 'd', depth: 1 }
-    ])
-    expect(result.filter((r) => r.functionId === 'c')).toHaveLength(1)
-  })
-
-  it('无 callerIds 字段的条目按空数组处理（最小形状防御）', () => {
-    // { changed: {} } 是故意的最小形状：web tsconfig 不含 test/（vue-tsc 不检查本文件），
-    // 依赖运行时 `?? []` 防御脏数据/缺字段，而非类型层面的完整 FunctionInsight
-    expect(upstreamRipple({ changed: {} }, set('changed'))).toEqual([])
-  })
-})
-
-describe('downstreamOf', () => {
-  it('按 changedIds 迭代序分组，calleeIds 保持原序', () => {
-    const functions = {
-      b: { calleeIds: ['y', 'x'] },
-      a: { calleeIds: ['x', 'z'] }
-    }
-    expect(downstreamOf(functions, set('a', 'b'))).toEqual([
-      { functionId: 'a', calleeIds: ['x', 'z'] },
-      { functionId: 'b', calleeIds: ['y', 'x'] }
-    ])
-  })
-
-  it('同组内重复 callee 去重', () => {
-    const functions = { a: { calleeIds: ['x', 'x', 'y'] } }
-    expect(downstreamOf(functions, set('a'))).toEqual([
-      { functionId: 'a', calleeIds: ['x', 'y'] }
-    ])
-  })
-
-  it('洞察数据缺失的变更函数给空组（如实呈现，不丢分组）', () => {
-    expect(downstreamOf({}, set('ghost'))).toEqual([{ functionId: 'ghost', calleeIds: [] }])
-  })
-})
-
 describe('impactOverlayModel', () => {
   const changed = set('b')
-  const ripple = set('a')
 
-  it('多链 path 合并：共享节点/边去重，边 = 路径相邻对', () => {
-    const model = impactOverlayModel(
+  it('多链主干合并：共享节点去重，边 = 路径相邻对且为实线', () => {
+    const views = buildAffectedChains(
       [chain('c1', ['a', 'b', 'c']), chain('c2', ['b', 'c', 'd'])],
-      changed,
-      ripple
+      fnMap({ a: [], b: [], c: [], d: [] }),
+      changed
     )
+    const model = impactOverlayModel(views, changed)
     expect(model.nodes.map((n) => n.id)).toEqual(['a', 'b', 'c', 'd'])
     expect(model.edges.map((e) => e.id)).toEqual(['a->b', 'b->c', 'c->d'])
+    expect(model.edges.every((e) => e.dashed !== true)).toBe(true)
   })
 
-  it('着色：变更=红+tag，上游波及=琥珀+tag，其余默认无色无 tag', () => {
-    const model = impactOverlayModel([chain('c1', ['a', 'b', 'c'])], changed, ripple)
+  it('侧向调用边为虚线（path → 侧向子树 → 变更叶子），主干边保持实线', () => {
+    const views = buildAffectedChains(
+      [chain('c1', ['p', 'q'])],
+      fnMap({ p: ['q', 'x'], q: [], x: ['t'], t: [] }),
+      set('t')
+    )
+    const model = impactOverlayModel(views, set('t'))
+    const byId = new Map(model.edges.map((e) => [e.id, e]))
+    expect(byId.get('p->q')?.dashed).toBeUndefined()
+    expect(byId.get('p->x')?.dashed).toBe(true)
+    expect(byId.get('x->t')?.dashed).toBe(true)
+    // 侧向节点同样进图（否则边指向不存在的节点）
+    expect(model.nodes.map((n) => n.id)).toEqual(['p', 'q', 'x', 't'])
+  })
+
+  it('节点按 id 去重：同一函数是某链主干、另一链侧向时只出现一次', () => {
+    const views = buildAffectedChains(
+      [chain('c1', ['a', 'b']), chain('c2', ['p'])],
+      fnMap({ a: [], b: [], p: ['a'] }),
+      set('a')
+    )
+    const model = impactOverlayModel(views, set('a'))
+    // a 在 c1 主干上、在 c2 的 sideBranches 里；b 只是 c1 主干上下文
+    expect(model.nodes.filter((n) => n.id === 'a')).toHaveLength(1)
+    expect(model.nodes.map((n) => n.id)).toEqual(['a', 'b', 'p'])
+  })
+
+  it('同一对节点既是主干又是侧向边时实线优先', () => {
+    const views = buildAffectedChains(
+      [chain('c1', ['a', 'b']), chain('c2', ['a', 'c'])],
+      fnMap({ a: ['b', 'c'], b: [], c: [] }),
+      set('b')
+    )
+    // c1 主干边 a->b；c2 里 b 是 a 的侧向 callee 且为变更函数 → 侧向边 a->b
+    const model = impactOverlayModel(views, set('b'))
+    const ab = model.edges.filter((e) => e.id === 'a->b')
+    expect(ab).toHaveLength(1)
+    expect(ab[0].dashed).toBeUndefined()
+  })
+
+  it('repeated 叶子仍画节点与虚线边（不重复展开）', () => {
+    const views = buildAffectedChains(
+      [chain('c1', ['p'])],
+      fnMap({ p: ['a'], a: ['b'], b: ['a', 't'], t: [] }),
+      set('t')
+    )
+    const model = impactOverlayModel(views, set('t'))
+    const byId = new Map(model.edges.map((e) => [e.id, e]))
+    expect(byId.get('b->a')?.dashed).toBe(true)
+    expect(byId.get('b->t')?.dashed).toBe(true)
+    // 环路回踩不产生重复边
+    expect(model.edges.filter((e) => e.id === 'b->a')).toHaveLength(1)
+  })
+
+  it('着色：变更函数红 + tag，其余无色无 tag', () => {
+    const views = buildAffectedChains(
+      [chain('c1', ['a', 'b', 'c'])],
+      fnMap({ a: [], b: [], c: [] }),
+      changed
+    )
+    const model = impactOverlayModel(views, changed)
     const byId = new Map(model.nodes.map((n) => [n.id, n]))
     expect(byId.get('b')?.color).toBe(IMPACT_COLOR)
     expect(byId.get('b')?.tags).toEqual([IMPACT_TAG])
-    expect(byId.get('a')?.color).toBe(RIPPLE_COLOR)
-    expect(byId.get('a')?.tags).toEqual([RIPPLE_TAG])
-    expect(byId.get('c')?.color).toBeUndefined()
-    expect(byId.get('c')?.tags).toBeUndefined()
-  })
-
-  it('同时在变更集与波及集（数据异常）时变更红优先——波源语义强于波及', () => {
-    const model = impactOverlayModel([chain('c1', ['a', 'b'])], set('a', 'b'), set('a'))
-    const a = model.nodes.find((n) => n.id === 'a')
-    expect(a?.color).toBe(IMPACT_COLOR)
-    expect(a?.tags).toEqual([IMPACT_TAG])
+    expect(byId.get('a')?.color).toBeUndefined()
+    expect(byId.get('a')?.tags).toBeUndefined()
   })
 
   it('节点带 fnId（可跳转）与可读 label；自环边不画', () => {
-    const model = impactOverlayModel([chain('c1', ['p::Cls::foo@h1', 'p::Cls::foo@h1'])], set(), set())
+    const selfId = 'p::Cls::foo@h1'
+    const views = buildAffectedChains(
+      [chain('c1', [selfId, selfId])],
+      fnMap({ [selfId]: [] }),
+      set(selfId)
+    )
+    const model = impactOverlayModel(views, set(selfId))
     expect(model.nodes).toHaveLength(1)
-    expect(model.nodes[0].fnId).toBe('p::Cls::foo@h1')
+    expect(model.nodes[0].fnId).toBe(selfId)
     expect(model.nodes[0].label).toBe('Cls.foo')
     expect(model.edges).toEqual([])
   })
 
   it('节点 sub 取链上角色；首见链无角色时由后续链补上（只填空不覆盖）', () => {
-    const model = impactOverlayModel(
-      [chain('c1', ['a', 'b'], '', { b: 'b 在 c1 的角色' }), chain('c2', ['b', 'z'], '', { b: 'b 在 c2 的角色' })],
-      set(),
-      set()
+    const views = buildAffectedChains(
+      [
+        chain('c1', ['a', 'b'], '', { b: 'b 在 c1 的角色' }),
+        chain('c2', ['b', 'z'], '', { b: 'b 在 c2 的角色' })
+      ],
+      fnMap({ a: [], b: [], z: [] }),
+      set('b')
     )
-    const byId = new Map(model.nodes.map((n) => [n.id, n]))
+    const byId = new Map(impactOverlayModel(views, set('b')).nodes.map((n) => [n.id, n]))
     expect(byId.get('b')?.sub).toBe('b 在 c1 的角色')
-    const model2 = impactOverlayModel(
+
+    const views2 = buildAffectedChains(
       [chain('c1', ['a', 'b']), chain('c2', ['b', 'z'], '', { b: 'b 在 c2 的角色' })],
-      set(),
-      set()
+      fnMap({ a: [], b: [], z: [] }),
+      set('b')
     )
-    const b2 = model2.nodes.find((n) => n.id === 'b')
+    const b2 = impactOverlayModel(views2, set('b')).nodes.find((n) => n.id === 'b')
     expect(b2?.sub).toBe('b 在 c2 的角色')
   })
 
   it('空输入 → 空模型（视图据此不渲染空图）', () => {
-    expect(impactOverlayModel([], changed, ripple)).toEqual({ nodes: [], edges: [] })
+    expect(impactOverlayModel([], changed)).toEqual({ nodes: [], edges: [] })
   })
 })
 

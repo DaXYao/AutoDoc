@@ -162,7 +162,7 @@ function onNodeClick(event: NodeMouseEvent): void {
 function miniNodeColor(node: Node): string {
   const data = node.data as GraphNode | undefined
   // phase 蓝对齐 --ad-accent（FlowNodeCard 的 phase 色条同值，minimap 圆点与节点卡不再双色）；
-  // 默认中性灰对齐 LEGEND_NEUTRAL（=ink-3），与 ImpactView 图例「未波及节点」同屏同色温
+  // 默认中性灰对齐 LEGEND_NEUTRAL（=ink-3），与 ImpactView 图例「未变更节点」同屏同色温
   return data?.color ?? (data?.kind === 'phase' ? '#4C6FFF' : LEGEND_NEUTRAL)
 }
 

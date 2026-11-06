@@ -1,21 +1,17 @@
-import type {
-  FunctionInsight,
-  ImpactChangeset,
-  ImpactCommit,
-  InsightChain
-} from '@autodoc/shared-types'
+import type { ImpactChangeset, ImpactCommit, InsightChain } from '@autodoc/shared-types'
 import type { GraphEdge, GraphModel, GraphNode } from './graphModel'
-import { fnLabelFromId, firstSentence, IMPACT_COLOR, RIPPLE_COLOR } from './graphModel'
+import { fnLabelFromId, firstSentence, IMPACT_COLOR } from './graphModel'
+import type { AffectedChainView, SideBranchNode } from './impactChains'
+import { chainImportance } from './chains'
 
 /**
- * C2 变更影响分析的纯计算层：以变更集（函数稳定 ID 集合）为输入，
- * 在既有洞察数据（链路 / callerIds / calleeIds）上推导受影响链路、上游波及与下游依赖。
+ * C2 变更影响分析的视图支撑层：以变更集（函数稳定 ID 集合）为输入，
+ * 在 P1 的链路视图（utils/impactChains）之上做排序、摘要与叠加图建模。
  * 全部为纯函数（不碰网络/localStorage），便于单测；视图只做取数与组装。
  */
 
-/** 图上变更节点 / 上游波及节点的标签（FlowNodeCard tags 与图例共用同一文案来源） */
+/** 图上变更节点的标签（FlowNodeCard tags 与图例共用同一文案来源） */
 export const IMPACT_TAG = '变更'
-export const RIPPLE_TAG = '上游'
 
 /** 影响叠加图合并的链路上限（top5，超出部分不进图，防止大图不可读） */
 export const IMPACT_OVERLAY_TOP_N = 5
@@ -106,20 +102,6 @@ export function resolveImpactLanding(
   return { mode: 'workspace', commitHash: null, automatic: false }
 }
 
-/**
- * 受影响链路 = path 中含至少一个变更函数的链路。
- * 保持入参顺序（调用方自行排序），不修改入参数组。
- */
-export function affectedChains(
-  chains: InsightChain[],
-  changedIds: ReadonlySet<string>
-): InsightChain[] {
-  return chains.filter((chain) => {
-    const path = Array.isArray(chain.path) ? chain.path : []
-    return path.some((id) => changedIds.has(id))
-  })
-}
-
 /** 一条链路上的变更点：链上位置序号（0 起）+ 函数稳定 ID（同一函数在环中重复出现只记首个位置） */
 export interface ChainChangePoint {
   index: number
@@ -146,105 +128,130 @@ export function changePointsOf(
   return points
 }
 
-/** 上游波及条目：functionId + BFS 深度（直接调用者 depth=1） */
-export interface RippleEntry {
-  functionId: string
-  depth: number
+/** 链路排序口径：重要性 / 变更点数（直接 + 侧向合计） */
+export type ImpactSortMode = 'importance' | 'changes'
+
+/** 链路变更点数 = 该链路关联的变更函数数（直接命中 + 侧向波及，已去重） */
+export function affectedChangeCount(view: AffectedChainView): number {
+  return view.changedIds.length
+}
+
+/** 直接命中点数：path 上变更函数的位置数（同一函数在环中回踩两个位置算两处） */
+export function directChangedCount(view: AffectedChainView): number {
+  let count = 0
+  for (const ids of view.directChanged.values()) count += ids.length
+  return count
 }
 
 /**
- * 变更函数的传递调用者（上游波及）：多源 BFS callerIds，深度序返回（直接调用者在前）。
- * - 环守卫：visited 集合防循环调用死循环；每个函数只出现在最小深度一次；
- * - 变更函数自身不入结果（它们是波源，图上另有红色高亮，混入会被着色为波及色）；
- * - 同深度按发现顺序（callerIds 数组序 + 变更集迭代序）稳定排序。
+ * 受影响链路排序（返回新数组，不改入参；排序稳定）：
+ * - changes 模式：变更点数降序，同分回退重要性；
+ * - importance 模式（以及 changes 同分平手）：链路重要性降序；
+ * - 最后按 chain.id 升序，保证 AI 重生成/数据顺序变化不打乱展示。
  */
-export function upstreamRipple(
-  insightFunctions: Record<string, Pick<FunctionInsight, 'callerIds'>>,
-  changedIds: ReadonlySet<string>
-): RippleEntry[] {
-  const result: RippleEntry[] = []
-  const visited = new Set<string>(changedIds)
-  let frontier: string[] = [...changedIds]
-  let depth = 0
-  while (frontier.length > 0) {
-    depth++
-    const next: string[] = []
-    for (const id of frontier) {
-      for (const caller of insightFunctions[id]?.callerIds ?? []) {
-        if (visited.has(caller)) continue
-        visited.add(caller)
-        next.push(caller)
-        result.push({ functionId: caller, depth })
-      }
+export function sortAffectedChains(
+  views: AffectedChainView[],
+  functions: Record<string, { isCore?: boolean }>,
+  mode: ImpactSortMode
+): AffectedChainView[] {
+  const list = [...views]
+  list.sort((a, b) => {
+    if (mode === 'changes') {
+      const diff = affectedChangeCount(b) - affectedChangeCount(a)
+      if (diff !== 0) return diff
     }
-    frontier = next
-  }
-  return result
+    const imp = chainImportance(b.chain, functions) - chainImportance(a.chain, functions)
+    if (imp !== 0) return imp
+    return a.chain.id < b.chain.id ? -1 : a.chain.id > b.chain.id ? 1 : 0
+  })
+  return list
 }
 
-/** 下游依赖分组：一个变更函数 + 它的直接 calleeIds（保持洞察数据原序、去重） */
-export interface DownstreamGroup {
-  functionId: string
-  calleeIds: string[]
+/** 摘要卡口径：变更函数 / 受影响链路 / 直接命中链路 / 侧向波及链路 */
+export interface ImpactSummary {
+  changedFunctions: number
+  affectedChains: number
+  directChains: number
+  sideChains: number
+}
+
+export function impactSummaryOf(
+  views: AffectedChainView[],
+  changedFunctionCount: number
+): ImpactSummary {
+  let directChains = 0
+  let sideChains = 0
+  for (const view of views) {
+    if (view.hasDirect) directChains++
+    if (view.hasSide) sideChains++
+  }
+  return {
+    changedFunctions: changedFunctionCount,
+    affectedChains: views.length,
+    directChains,
+    sideChains
+  }
 }
 
 /**
- * 每个变更函数的直接下游（calleeIds，不递归——递归下游即上游波及的镜像，信息重复且爆炸）。
- * 分组顺序 = changedIds 迭代序（调用方传 Set 前已按需排序）；洞察数据缺失的函数给空组（如实呈现）。
- */
-export function downstreamOf(
-  insightFunctions: Record<string, Pick<FunctionInsight, 'calleeIds'>>,
-  changedIds: ReadonlySet<string>
-): DownstreamGroup[] {
-  const groups: DownstreamGroup[] = []
-  for (const id of changedIds) {
-    const callees = insightFunctions[id]?.calleeIds ?? []
-    groups.push({ functionId: id, calleeIds: [...new Set(callees)] })
-  }
-  return groups
-}
-
-/**
- * 影响叠加图：受影响链路（调用方已截 top5）的 path 合并成一张 DAG。
- * - 边 = 路径相邻对（顺序语义，与 chainsOverlayModel 同构，去重合并）；
- * - 着色优先级：变更（红）> 上游波及（琥珀 + tag）> 默认——变更函数同时出现在
- *   rippleIds（数据异常）时红色优先，波源语义强于波及；
- * - 节点 sub = 该函数在首次出现链路中的角色（stepRoles），无角色留空；
- * - 不带链路调色板 chainColors：本图语义是「影响范围」而非「哪条链」，双色高亮已足够。
+ * 影响叠加图：受影响链路（调用方已截 top5）的主干 + 侧向调用子图合并成一张图。
+ * - 主干边 = path 相邻对（实线，顺序语义）；
+ * - 侧向边 = path 节点 → 侧向子树（虚线，调用语义），逐层递归 SideBranchNode；
+ * - 节点按 id 去重（同一函数可同时是某链主干与另一链侧向），边按 (source,target) 去重，
+ *   同一对同时出现主干与侧向时实线优先（主干语义强于侧向）；
+ * - 环/重复引用的 repeated 叶子仍画节点与边，children 恒空（P1 已剪枝，不重复展开）；
+ * - 着色：变更函数红 + tag；其余无色（不引入琥珀波及色，语义已由侧向虚线表达）；
+ * - 节点 sub = 该函数在首次出现链路中的角色（stepRoles），只填空不覆盖。
  */
 export function impactOverlayModel(
-  affectedTop: InsightChain[],
-  changedIds: ReadonlySet<string>,
-  rippleIds: ReadonlySet<string>
+  views: AffectedChainView[],
+  changedIds: ReadonlySet<string>
 ): GraphModel {
   const nodeMap = new Map<string, GraphNode>()
   const edgeMap = new Map<string, GraphEdge>()
 
-  for (const chain of affectedTop) {
-    const path = Array.isArray(chain.path) ? chain.path : []
-    for (const id of path) {
-      const existing = nodeMap.get(id)
-      if (existing) {
-        // 首见链无角色、后续链有角色时补上（sub 只填空不覆盖，保持首见优先的确定性）
-        if (!existing.sub && chain.stepRoles?.[id]) {
-          existing.sub = firstSentence(chain.stepRoles[id]) || undefined
-        }
-        continue
-      }
-      nodeMap.set(id, {
-        id,
-        kind: 'fn',
-        label: fnLabelFromId(id),
-        sub: firstSentence(chain.stepRoles?.[id]) || undefined,
-        fnId: id
-      })
+  const addNode = (id: string, sub?: string): void => {
+    const existing = nodeMap.get(id)
+    if (existing) {
+      if (!existing.sub && sub) existing.sub = sub
+      return
     }
-    for (let i = 0; i + 1 < path.length; i++) {
-      const source = path[i]
-      const target = path[i + 1]
-      if (source === target) continue // 环路自踩不画自环
-      const edgeId = `${source}->${target}`
-      if (!edgeMap.has(edgeId)) edgeMap.set(edgeId, { id: edgeId, source, target })
+    nodeMap.set(id, { id, kind: 'fn', label: fnLabelFromId(id), sub, fnId: id })
+  }
+
+  const addEdge = (source: string, target: string, dashed: boolean): void => {
+    if (source === target) return // 环路自踩不画自环
+    const edgeId = `${source}->${target}`
+    const existing = edgeMap.get(edgeId)
+    if (!existing) {
+      edgeMap.set(edgeId, dashed ? { id: edgeId, source, target, dashed: true } : { id: edgeId, source, target })
+      return
+    }
+    // 主干（实线）优先于侧向（虚线）：先侧向后主干时升级为实线
+    if (existing.dashed && !dashed) {
+      edgeMap.set(edgeId, { id: edgeId, source, target })
+    }
+  }
+
+  for (const view of views) {
+    const path = Array.isArray(view.chain.path) ? view.chain.path : []
+    const roleOf = (id: string): string | undefined =>
+      firstSentence(view.chain.stepRoles?.[id]) || undefined
+
+    for (const id of path) addNode(id, roleOf(id))
+    for (let i = 0; i + 1 < path.length; i++) addEdge(path[i], path[i + 1], false)
+
+    for (const [index, roots] of view.sideBranches) {
+      const parentId = path[index]
+      if (parentId === undefined) continue
+      const walk = (parent: string, nodes: SideBranchNode[]): void => {
+        for (const node of nodes) {
+          addNode(node.id)
+          addEdge(parent, node.id, true)
+          if (node.children.length > 0) walk(node.id, node.children)
+        }
+      }
+      walk(parentId, roots)
     }
   }
 
@@ -252,9 +259,6 @@ export function impactOverlayModel(
     if (changedIds.has(node.id)) {
       node.color = IMPACT_COLOR
       node.tags = [IMPACT_TAG]
-    } else if (rippleIds.has(node.id)) {
-      node.color = RIPPLE_COLOR
-      node.tags = [RIPPLE_TAG]
     }
   }
 

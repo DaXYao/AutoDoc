@@ -2,35 +2,37 @@
 import { computed, ref, watch, watchEffect } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import type { ImpactChangeset, ImpactCommit, IncrementalParseStats, InsightChain } from '@autodoc/shared-types'
+import type { ChangeType, ImpactChangeset, ImpactCommit, IncrementalParseStats, InsightChain } from '@autodoc/shared-types'
 import { appReady, appState, findFunctionEntry, reloadAll } from '../store/app'
 import { checkRefresh, fetchChangeset, fetchImpactCommits, getMode, refreshDocs } from '../data/api'
-import { chainImportance } from '../utils/chains'
-import { fnLabelFromId, IMPACT_COLOR, LEGEND_NEUTRAL, RIPPLE_COLOR } from '../utils/graphModel'
+import { fnLabelFromId, IMPACT_COLOR, LEGEND_NEUTRAL } from '../utils/graphModel'
 import { safeLocalStorage } from '../utils/graphPersist'
 import { adSelectLabel as vAdSelectLabel } from '../utils/a11y'
+import { CHANGE_LABELS } from '../utils/format'
 import {
-  affectedChains,
-  changePointsOf,
-  downstreamOf,
   impactOverlayModel,
+  impactSummaryOf,
   IMPACT_OVERLAY_TOP_N,
   resolveImpactLanding,
-  upstreamRipple,
+  sortAffectedChains,
   workspaceModeOf,
   workspaceNoticesOf,
+  type ImpactSortMode,
   type WorkspaceSource
 } from '../utils/impact'
+import { buildAffectedChains, unassociatedChangedIds } from '../utils/impactChains'
 import { fnJumpQuery } from '../utils/nav'
 import { indexChangesSemantics } from '../utils/agentSupply'
 import GraphView from '../components/graph/GraphView.vue'
+import ImpactChainTree from '../components/ImpactChainTree.vue'
 import ChangesSourceBadge from '../components/ChangesSourceBadge.vue'
 import GuaranteedBlock from '../components/GuaranteedBlock.vue'
 
 /**
- * C2：变更影响分析独立视图。
- * 数据流：变更集（后端 /api/impact/*，C1）+ 洞察图谱（appState.insight 的 chains/callerIds/calleeIds）
- * → utils/impact 纯函数推导受影响链路 / 上游波及 / 下游依赖 → 列表 + GraphView 叠加图。
+ * C2：变更影响分析独立视图（P2 链路视角）。
+ * 数据流：变更集（后端 /api/impact/*，C1）+ 洞察图谱（appState.insight 的 chains/calleeIds）
+ * → utils/impactChains 纯函数推导「受影响链路（直接命中 + 侧向调用）」→ 链路树 + 叠加图。
+ * 不再分别展示上游波及 / 下游依赖：一条链路是否受影响的语义统一由链路树与侧向分支表达。
  * 本视图不做任何 AI 请求与写操作，切换变更集只重取 changeset（纯读、毫秒级）。
  * G6：changeset.agentSemantics（变更侧 Agent 供给，读时合并）挂进既有区块——层二按
  * chainId + entryId 锚点双条件匹配（chain:N 是位置化 id，回滚快照下可能指向另一条链路），
@@ -484,65 +486,55 @@ const changesScopeId = computed(
   () => changesGuarantee.value?.objectId ?? changeset.value?.scope ?? 'changes'
 )
 
-const affected = computed(() => affectedChains(chains.value, changedIds.value))
-const ripple = computed(() => upstreamRipple(insightFunctions.value, changedIds.value))
-const rippleIds = computed(() => new Set(ripple.value.map((r) => r.functionId)))
-const downstream = computed(() => downstreamOf(insightFunctions.value, changedIds.value))
-/** 下游依赖总数 = 跨变更函数去重后的直接 callee 数（摘要卡口径，与分组列表一致） */
-const downstreamCount = computed(
-  () => new Set(downstream.value.flatMap((g) => g.calleeIds)).size
-)
 /**
- * 下游依赖行视图模型：每行一个变更函数（changedFunctions 的 functionId 口径 = 稳定 ID），
- * 附 G6 层三的「本次变更角色」——按 functionId 匹配，匹配不到不显示。
+ * 受影响链路（P1 纯函数）：直接命中 = path 上有变更函数；侧向 = path 节点沿 calleeIds
+ * 直接/间接调用到变更函数。只返回至少一处命中的链路，未进入任何链路的变更函数由
+ * unassociated 兜底区呈现（不再有「上游波及 / 下游依赖」两个平行区块）。
  */
-const downstreamCards = computed(() =>
-  downstream.value.map((group) => ({
-    ...group,
-    changeRole: semantics.value?.changeRoles.get(group.functionId) ?? null
-  }))
+const affected = computed(() =>
+  buildAffectedChains(chains.value, insightFunctions.value, changedIds.value)
 )
-/** 有任一行真挂到变更角色时才解释口径（size>0 但全未命中时会指向不存在的内容） */
-const hasChangeRoles = computed(() => downstreamCards.value.some((c) => c.changeRole))
+const summary = computed(() => impactSummaryOf(affected.value, changedFunctions.value.length))
+/**
+ * 未进入任何受影响链路的变更函数（保持变更集顺序）：兜底区默认折叠，
+ * 保证「工具函数/新增函数」不会被误读成「没有影响」而静默消失。
+ */
+const unassociated = computed(() => {
+  const ids = new Set(unassociatedChangedIds(changedIds.value, affected.value))
+  return changedFunctions.value.filter((fn) => ids.has(fn.functionId))
+})
+const showUnassociated = ref(false)
 
 /* ------------------------- 受影响链路排序 ------------------------- */
 
-type SortMode = 'importance' | 'changes'
+type SortMode = ImpactSortMode
 const sortMode = ref<SortMode>('importance')
 
-const sortedAffected = computed(() => {
-  const ids = changedIds.value
-  const fns = insightFunctions.value
-  const list = [...affected.value]
-  list.sort((a, b) => {
-    if (sortMode.value === 'changes') {
-      const diff = changePointsOf(b, ids).length - changePointsOf(a, ids).length
-      if (diff !== 0) return diff
-    }
-    // 重要性主序（changes 模式的同分平手也回退重要性），同分按 id 保证稳定
-    const imp = chainImportance(b, fns) - chainImportance(a, fns)
-    if (imp !== 0) return imp
-    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
-  })
-  return list
-})
+/** 排序口径：重要性 / 变更点数（直接命中 + 侧向波及合计，见 sortAffectedChains） */
+const sortedAffected = computed(() =>
+  sortAffectedChains(affected.value, insightFunctions.value, sortMode.value)
+)
 
 /**
- * 链路卡片视图模型：叙事 + 变更点标号 + 重要性分（排序与展示同源，避免两处各算一遍）。
+ * 链路卡片视图模型：链路树视图 + G6 层二影响解释（排序与展示同源，避免两处各算一遍）。
  * G6 层二匹配条件：chainId 命中 **且** 供给的 entryId 与 chain.entryId 锚点一致——
  * chain:N 是位置化 id，回滚到历史快照时同一下标可能指向另一条链路，无锚点相符不得渲染。
  */
 const chainCards = computed(() =>
-  sortedAffected.value.map((chain) => {
-    const supplied = semantics.value?.chainImpacts.get(chain.id)
+  sortedAffected.value.map((view) => {
+    const supplied = semantics.value?.chainImpacts.get(view.chain.id)
     return {
-      chain,
-      importance: chainImportance(chain, insightFunctions.value),
-      points: changePointsOf(chain, changedIds.value),
-      impact: supplied && supplied.entryId === chain.entryId ? supplied.impact : null
+      view,
+      chain: view.chain,
+      impact: supplied && supplied.entryId === view.chain.entryId ? supplied.impact : null
     }
   })
 )
+
+/** G6 层三：按 functionId 取「本次变更角色」（模板里多处使用，抽 function 便于插槽内调用） */
+function changeRoleOf(functionId: string): string | null {
+  return semantics.value?.changeRoles.get(functionId) ?? null
+}
 
 /* ------------------------- G6：供给已生效但未落在当前 scope 的显式提示 ------------------------- */
 
@@ -587,21 +579,16 @@ const rolesUnmatchedHint = computed(() =>
 /* ------------------------- 影响叠加图 ------------------------- */
 
 const overlayModel = computed(() =>
-  impactOverlayModel(
-    sortedAffected.value.slice(0, IMPACT_OVERLAY_TOP_N),
-    changedIds.value,
-    rippleIds.value
-  )
+  impactOverlayModel(sortedAffected.value.slice(0, IMPACT_OVERLAY_TOP_N), changedIds.value)
 )
 
 /** 图作用域按变更集隔离：不同 scope 的布局记忆互不覆盖 */
 const graphScopeKey = computed(() => `impact:${scopeString.value ?? 'none'}`)
 
-/** 图例三色与 impactOverlayModel 着色单一来源（IMPACT_COLOR/RIPPLE_COLOR/LEGEND_NEUTRAL 常量共用） */
+/** 图例与 impactOverlayModel 着色单一来源（IMPACT_COLOR / LEGEND_NEUTRAL 常量共用） */
 const overlayLegend = [
   { color: IMPACT_COLOR, label: '变更函数' },
-  { color: RIPPLE_COLOR, label: '上游波及' },
-  { color: LEGEND_NEUTRAL, label: '未波及节点' }
+  { color: LEGEND_NEUTRAL, label: '未变更节点' }
 ]
 
 /* ------------------------- 展示辅助 ------------------------- */
@@ -670,6 +657,16 @@ function goFunction(id: string): void {
   }
   void router.push({ name: 'file', params: { fileId: entry.fileId }, query: fnJumpQuery(id) })
 }
+
+/** 兜底区变更类型徽标配色：新增绿 / 删除红 / 重命名靛蓝 / 修改中性 */
+function changeTypeClass(type: ChangeType): string {
+  if (type === 'added') return 'border-green-300 bg-green-50 text-green-700'
+  if (type === 'deleted') return 'border-red-300 bg-red-50 text-red-600'
+  if (type === 'renamed') {
+    return 'border-[color:var(--ad-accent)] bg-[color:var(--ad-accent-soft)] text-[color:var(--ad-accent-ink)]'
+  }
+  return 'border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] text-[color:var(--ad-ink-2)]'
+}
 </script>
 
 <template>
@@ -678,7 +675,7 @@ function goFunction(id: string): void {
       <div>
         <h2 class="text-xl font-semibold text-[color:var(--ad-ink)]">变更影响</h2>
         <p class="mt-1 text-sm text-[color:var(--ad-ink-2)]">
-          查看这次改动会影响哪些业务链路，以及需要回归的上下游函数。
+          这次改动落在哪些业务链路上：主干按链路顺序展开，缩进分支为侧向调用到变更函数的路径。
         </p>
       </div>
       <n-button size="small" quaternary @click="router.push({ name: 'insight' })">
@@ -920,29 +917,29 @@ function goFunction(id: string): void {
             <p v-for="notice in workspaceNotices" :key="notice">{{ notice }}</p>
           </div>
 
-          <!-- ============ 摘要卡 ============ -->
+          <!-- ============ 摘要卡（链路视角口径） ============ -->
           <section class="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
             <div class="ad-card px-4 py-3">
-              <n-statistic label="变更函数" :value="changedFunctions.length" />
+              <n-statistic label="变更函数" :value="summary.changedFunctions" />
             </div>
             <div class="ad-card px-4 py-3">
-              <n-statistic label="受影响链路" :value="affected.length" />
+              <n-statistic label="受影响链路" :value="summary.affectedChains" />
             </div>
             <div class="ad-card px-4 py-3">
-              <n-statistic label="上游波及" :value="ripple.length" />
+              <n-statistic label="直接命中链路" :value="summary.directChains" />
             </div>
             <div class="ad-card px-4 py-3">
-              <n-statistic label="下游依赖" :value="downstreamCount" />
+              <n-statistic label="侧向波及链路" :value="summary.sideChains" />
             </div>
           </section>
 
-          <!-- ============ 影响叠加图（top5 受影响链路合并 DAG） ============ -->
+          <!-- ============ 影响叠加图（top5 受影响链路主干 + 侧向调用） ============ -->
           <section v-if="overlayModel.nodes.length > 0" class="mb-5">
             <div class="mb-2 flex items-center justify-between">
               <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">
                 影响叠加图
                 <span class="text-xs font-normal text-[color:var(--ad-ink-3)]">
-                  （受影响链路前 {{ Math.min(sortedAffected.length, IMPACT_OVERLAY_TOP_N) }} 条合并；点击节点跳转函数）
+                  （受影响链路前 {{ Math.min(sortedAffected.length, IMPACT_OVERLAY_TOP_N) }} 条：主干实线、侧向调用虚线；点击节点跳转函数）
                 </span>
               </h3>
             </div>
@@ -959,11 +956,14 @@ function goFunction(id: string): void {
             </div>
           </section>
 
-          <!-- ============ 受影响链路列表 ============ -->
+          <!-- ============ 受影响链路（链路树：主干 + 侧向调用） ============ -->
           <section class="mb-5">
             <div class="mb-2 flex items-center justify-between">
               <h3 class="text-sm font-semibold text-[color:var(--ad-ink-2)]">
                 受影响链路（{{ affected.length }}）
+                <span class="text-xs font-normal text-[color:var(--ad-ink-3)]">
+                  主干按链路顺序展开，缩进分支为该步骤侧向调用到变更函数的路径
+                </span>
               </h3>
               <n-radio-group v-model:value="sortMode" size="small">
                 <n-radio-button value="importance">重要性</n-radio-button>
@@ -974,142 +974,142 @@ function goFunction(id: string): void {
             <p v-if="chainUnmatchedHint" class="mb-2 text-xs text-[color:var(--ad-ink-3)]">
               {{ chainUnmatchedHint }}
             </p>
-            <p v-if="affected.length === 0" class="text-xs text-[color:var(--ad-ink-3)]">
-              没有链路的调用路径包含该变更集的函数：新增函数可能尚未进入任何链路，
-              或链路数据未生成（可在洞察页生成 AI 洞察后回来看）。
+            <p v-if="rolesUnmatchedHint" class="mb-2 text-xs text-[color:var(--ad-ink-3)]">
+              {{ rolesUnmatchedHint }}
+            </p>
+
+            <!-- 无业务脉络：没有链路可映射，给出通往洞察页的出口 -->
+            <div v-if="chains.length === 0" class="ad-card px-4 py-6">
+              <n-empty
+                description="当前项目还没有业务脉络，变更函数无法映射到链路"
+                class="my-2"
+              >
+                <template #extra>
+                  <n-button size="small" @click="router.push({ name: 'insight' })">
+                    去洞察页生成/供给业务脉络
+                  </n-button>
+                </template>
+              </n-empty>
+            </div>
+            <!-- 有链路但无命中：多半是工具函数/新增函数，指向下方兜底区 -->
+            <p v-else-if="affected.length === 0" class="text-xs text-[color:var(--ad-ink-3)]">
+              现有业务链路都不会执行到本次变更的函数（含直接调用与侧向调用）：
+              新增函数尚未被调用，或变更集中在工具函数上——见下方「未进入业务链路」。
             </p>
             <div v-else class="grid gap-2">
-              <div
+              <ImpactChainTree
                 v-for="card in chainCards"
                 :key="card.chain.id"
-                class="ad-card px-4 py-3"
+                :view="card.view"
+                :project-id="appState.activeProjectId ?? undefined"
+                @jump="goFunction"
               >
-                <p v-if="card.chain.narrative" class="text-sm text-[color:var(--ad-ink-2)]">
-                  {{ card.chain.narrative }}
-                </p>
-                <p v-else class="text-sm text-[color:var(--ad-ink-3)]">叙事未生成</p>
-                <div class="mt-2 flex flex-wrap items-center gap-1.5">
-                  <span class="mr-1 text-xs text-[color:var(--ad-ink-3)]">变更点：</span>
-                  <button
-                    v-for="point in card.points"
-                    :key="`${card.chain.id}:${point.functionId}`"
-                    class="rounded-[length:var(--ad-radius-sm)] border border-red-300 bg-red-50 px-1.5 py-0.5 text-[11px] font-mono text-red-600 hover:underline"
-                    :title="point.functionId"
-                    @click="goFunction(point.functionId)"
-                  >
-                    #{{ point.index + 1 }} {{ fnName(point.functionId) }}
-                  </button>
-                  <n-tag size="tiny" :bordered="false" class="ml-auto">
-                    重要性 {{ card.importance }}
-                  </n-tag>
-                </div>
-                <!-- G6 层二：Agent 给的这条链路受此变更的业务解释（按 chainId 匹配，未供给则整块不出现）。
+                <!-- G6 层二：Agent 给的这条链路受此变更的业务解释（按 chainId + entryId 锚点匹配）。
                      SG3：解释正文随 scope 担保折叠；来源徽标常显，未证实时仍能看清 Agent 归属 -->
-                <div
-                  v-if="card.impact"
-                  class="mt-2 flex flex-wrap items-start gap-1.5 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-2 py-1.5"
-                >
-                  <span class="shrink-0 text-xs font-semibold text-[color:var(--ad-accent-ink)]">
-                    变更影响解释
-                  </span>
-                  <div class="min-w-0 flex-1">
+                <template #impact>
+                  <div
+                    v-if="card.impact"
+                    class="mt-2 flex flex-wrap items-start gap-1.5 rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-2 py-1.5"
+                  >
+                    <span class="shrink-0 text-xs font-semibold text-[color:var(--ad-accent-ink)]">
+                      变更影响解释
+                    </span>
+                    <div class="min-w-0 flex-1">
+                      <GuaranteedBlock
+                        pass="changes"
+                        :object-id="changesScopeId"
+                        :guarantee="changesGuarantee"
+                        :show-missing="true"
+                      >
+                        <span class="text-xs text-[color:var(--ad-ink-2)]">
+                          {{ card.impact }}
+                        </span>
+                      </GuaranteedBlock>
+                    </div>
+                    <ChangesSourceBadge
+                      label="链路影响解释"
+                      :agent="semanticsAgent"
+                      :written-at="semanticsWrittenAt"
+                    />
+                  </div>
+                </template>
+                <!-- G6 层三：变更函数的「本次变更角色」（按 functionId 匹配，未供给则无内容）。
+                     措辞与配色刻意区别于链路里的调用点角色（在此处做什么），两者语义不同源。 -->
+                <template #changed-extra="{ id }">
+                  <div
+                    v-if="changeRoleOf(id)"
+                    class="mt-1 flex w-full flex-wrap items-center gap-1.5"
+                  >
                     <GuaranteedBlock
                       pass="changes"
                       :object-id="changesScopeId"
                       :guarantee="changesGuarantee"
                       :show-missing="true"
                     >
-                      <span class="text-xs text-[color:var(--ad-ink-2)]">
-                        {{ card.impact }}
+                      <span
+                        class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-accent-soft)] px-1.5 py-0.5 text-[11px] text-[color:var(--ad-accent-ink)]"
+                        title="Agent 供给的变更上下文角色：该函数在这次变更里承担什么；与文件页调用链里的调用点角色（核心实现 / 参数/状态校验 / 异常处理）不是同一个东西"
+                      >
+                        本次变更角色 · {{ changeRoleOf(id) }}
                       </span>
                     </GuaranteedBlock>
+                    <ChangesSourceBadge
+                      label="变更函数角色"
+                      :agent="semanticsAgent"
+                      :written-at="semanticsWrittenAt"
+                    />
                   </div>
-                  <ChangesSourceBadge
-                    label="链路影响解释"
-                    :agent="semanticsAgent"
-                    :written-at="semanticsWrittenAt"
-                  />
-                </div>
-              </div>
+                </template>
+              </ImpactChainTree>
             </div>
           </section>
 
-          <!-- ============ 上游波及区（传递调用者，BFS 深度序） ============ -->
-          <section class="mb-5">
-            <h3 class="mb-2 text-sm font-semibold text-[color:var(--ad-ink-2)]">
-              上游波及（{{ ripple.length }}）
-              <span class="text-xs font-normal text-[color:var(--ad-ink-3)]">
-                谁（间接）调用了变更函数——直接调用者在前
+          <!-- ============ 未进入业务链路（兜底，默认折叠） ============ -->
+          <section v-if="unassociated.length > 0" class="mb-5">
+            <button
+              type="button"
+              class="ad-card flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left focus-visible:outline-2 focus-visible:outline-[color:var(--ad-accent)]"
+              :aria-expanded="showUnassociated"
+              @click="showUnassociated = !showUnassociated"
+            >
+              <span class="text-sm font-semibold text-[color:var(--ad-ink-2)]">
+                未进入业务链路（{{ unassociated.length }}）
               </span>
-            </h3>
-            <p v-if="ripple.length === 0" class="text-xs text-[color:var(--ad-ink-3)]">
-              变更函数没有项目内调用者（入口函数或洞察数据未覆盖）
-            </p>
-            <div v-else class="flex flex-wrap gap-2">
-              <button
-                v-for="entry in ripple"
-                :key="entry.functionId"
-                class="flex items-center gap-1 rounded-[length:var(--ad-radius-sm)] border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-mono text-amber-700 hover:underline"
-                :title="entry.functionId"
-                @click="goFunction(entry.functionId)"
-              >
-                <span
-                  class="rounded-full bg-amber-500 px-1.5 text-[10px] font-medium leading-4 text-white"
-                >深度 {{ entry.depth }}</span>
-                {{ fnName(entry.functionId) }}
-              </button>
-            </div>
-          </section>
-
-          <!-- ============ 下游依赖区（按变更函数分组的直接 callees） ============ -->
-          <section class="mb-5">
-            <h3 class="mb-2 text-sm font-semibold text-[color:var(--ad-ink-2)]">
-              下游依赖
-              <span class="text-xs font-normal text-[color:var(--ad-ink-3)]">
-                每个变更函数直接调用的项目内函数
+              <span class="flex items-center gap-1 text-xs text-[color:var(--ad-ink-3)]">
+                {{ showUnassociated ? '收起' : '展开' }}
+                <span class="text-[10px]" :class="showUnassociated ? 'rotate-90' : ''">▶</span>
               </span>
-            </h3>
-            <p v-if="hasChangeRoles" class="mb-2 text-xs text-[color:var(--ad-ink-3)]">
-              下方「本次变更角色」由 Agent 供给，说的是该函数在这次变更里承担什么，
-              与文件页调用链里的调用点角色（核心实现 / 参数/状态校验 / 异常处理）不是同一个东西
+            </button>
+            <p class="mt-2 text-xs text-[color:var(--ad-ink-3)]">
+              这些变更函数不在任何受影响链路的主干或侧向分支上：多为工具函数、新增但尚未被调用的函数，
+              或调用关系未被解析——不代表改动没有风险。
             </p>
-            <!-- G6：角色供给生效但未落在当前变更集时显式说明，杜绝静默失效 -->
-            <p v-if="rolesUnmatchedHint" class="mb-2 text-xs text-[color:var(--ad-ink-3)]">
-              {{ rolesUnmatchedHint }}
-            </p>
-            <div class="grid gap-2">
+            <div v-if="showUnassociated" class="mt-2 grid gap-2">
               <div
-                v-for="group in downstreamCards"
-                :key="group.functionId"
-                class="ad-card px-4 py-2.5"
+                v-for="fn in unassociated"
+                :key="fn.functionId"
+                class="ad-card flex flex-wrap items-center gap-2 px-4 py-2"
               >
-                <div class="flex flex-wrap items-center gap-2">
-                  <button
-                    class="rounded-[length:var(--ad-radius-sm)] border border-red-300 bg-red-50 px-1.5 py-0.5 text-xs font-mono text-red-600 hover:underline"
-                    :title="group.functionId"
-                    @click="goFunction(group.functionId)"
-                  >
-                    {{ fnName(group.functionId) }}
-                  </button>
-                  <!-- 装饰性箭头统一 line-strong（与 FunctionCard/FlowTree 同字形同色） -->
-                  <span class="text-xs text-[color:var(--ad-line-strong)]">→</span>
-                  <template v-if="group.calleeIds.length > 0">
-                    <button
-                      v-for="callee in group.calleeIds"
-                      :key="callee"
-                      class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-canvas)] px-1.5 py-0.5 text-[11px] font-mono text-[color:var(--ad-ink-2)] hover:underline"
-                      :title="callee"
-                      @click="goFunction(callee)"
-                    >
-                      {{ fnName(callee) }}
-                    </button>
-                  </template>
-                  <span v-else class="text-xs text-[color:var(--ad-ink-3)]">无项目内下游</span>
-                </div>
-                <!-- G6 层三：本次变更角色（按 functionId 匹配）。措辞与配色都刻意区别于
-                     链路里的「调用点角色」（核心实现/参数校验/异常处理，绿/灰/红圆点）——两者语义不同源。
-                     SG3：角色文本随 scope 担保折叠；来源徽标在折叠块外常显 -->
-                <div v-if="group.changeRole" class="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  class="rounded-[length:var(--ad-radius-sm)] border border-red-300 bg-red-50 px-1.5 py-0.5 font-mono text-xs text-red-600 hover:underline focus-visible:outline-2 focus-visible:outline-[color:var(--ad-accent)]"
+                  :title="fn.functionId"
+                  @click="goFunction(fn.functionId)"
+                >
+                  {{ fn.name || fnName(fn.functionId) }}
+                </button>
+                <span
+                  class="min-w-0 truncate font-mono text-[11px] text-[color:var(--ad-ink-3)]"
+                  :title="fn.filePath"
+                >{{ fn.filePath }}</span>
+                <span
+                  class="rounded-[length:var(--ad-radius-sm)] border px-1 text-[10px] leading-4"
+                  :class="changeTypeClass(fn.type)"
+                >{{ CHANGE_LABELS[fn.type] }}</span>
+                <div
+                  v-if="changeRoleOf(fn.functionId)"
+                  class="ml-auto flex flex-wrap items-center gap-1.5"
+                >
                   <GuaranteedBlock
                     pass="changes"
                     :object-id="changesScopeId"
@@ -1120,7 +1120,7 @@ function goFunction(id: string): void {
                       class="rounded-[length:var(--ad-radius-sm)] border border-[color:var(--ad-line)] bg-[color:var(--ad-accent-soft)] px-1.5 py-0.5 text-[11px] text-[color:var(--ad-accent-ink)]"
                       title="Agent 供给的变更上下文角色：该函数在这次变更里承担什么；与文件页调用链里的调用点角色（核心实现 / 参数/状态校验 / 异常处理）不是同一个东西"
                     >
-                      本次变更角色 · {{ group.changeRole }}
+                      本次变更角色 · {{ changeRoleOf(fn.functionId) }}
                     </span>
                   </GuaranteedBlock>
                   <ChangesSourceBadge
