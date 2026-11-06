@@ -1,3 +1,6 @@
+import { fingerprint, makeStableId } from '../identity.js'
+import type { ParsedFunction } from './types.js'
+
 /**
  * C++ 重载限定符（cv / ref / noexcept / override / final）提取。
  *
@@ -71,4 +74,36 @@ export function overloadQualifier(signature: string): string {
     .map((token) => (token.startsWith('noexcept') ? 'noexcept' : token))
     .filter((token) => OVERLOAD_QUALIFIERS.has(token))
     .join(' ')
+}
+
+const CPP_EXTENSIONS = new Set(['hpp', 'h', 'hh', 'hxx', 'cpp', 'cc', 'cxx', 'inl'])
+
+function isCppPath(relPath: string): boolean {
+  const match = /\.([^./\\]+)$/.exec(relPath)
+  return match !== null && CPP_EXTENSIONS.has(match[1].toLowerCase())
+}
+
+/**
+ * 与 generateDocs 完全一致的稳定 ID：C++ 需要把 cv/ref/noexcept/override/final
+ * 并入参数签名哈希，否则 `value() const` 与 `value()` 会共用 ID，在
+ * Git HEAD 快照对比中被误判为 rename/delete+add。
+ */
+export function stableFunctionId(
+  relPath: string,
+  fn: Pick<ParsedFunction, 'className' | 'name' | 'params' | 'signature'>
+): string {
+  const qualifier = isCppPath(relPath) ? overloadQualifier(fn.signature) : ''
+  return makeStableId(relPath, fn.className, fn.name, fn.params, qualifier || undefined)
+}
+
+/** 解析结果 → 指纹快照条目（HEAD/工作区临时解析与 git 历史回填共用） */
+export function parsedFunctionEntries(
+  relPath: string,
+  functions: ParsedFunction[]
+): { id: string; name: string; fingerprint: string }[] {
+  return functions.map((fn) => ({
+    id: stableFunctionId(relPath, fn),
+    name: fn.name,
+    fingerprint: fingerprint(fn.bodyText)
+  }))
 }

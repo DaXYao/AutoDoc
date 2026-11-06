@@ -1,8 +1,10 @@
+import { readFile } from 'node:fs/promises'
+import { resolve, sep } from 'node:path'
+import picomatch from 'picomatch'
 import {
   diffFileSnapshots,
   ensureDefaultParsers,
-  fingerprint,
-  makeStableId,
+  parsedFunctionEntries,
   parserRegistry,
   repoPrefixOf,
   SimpleGitClient,
@@ -22,7 +24,7 @@ import { parseFunctionRef, snapshotWorkspaceChangeset } from './impact.js'
  *
  * 对比基线：
  * - HEAD 侧：readFileAtCommit('HEAD') → 解析器重新解析 → 稳定 ID + 函数体指纹；
- * - 当前侧：最近一次 generateDocs 的 service.files（id / name / fingerprint）。
+ * - 当前侧：直接解析工作区源码（与是否 regenerate 解耦）；解析失败才回退最近生成结果。
  *
  * 回退：非 Git 仓库 / unborn HEAD / 工作区读取失败 → 最近一次 regenerate 的 snapshot 批次，
  * 并在响应上标注 workspaceSource='snapshot'。任何失败都不抛错，页面始终有可用数据。
@@ -70,15 +72,31 @@ async function headSnapshot(
   const source = await git.readFileAtCommit(rootDir, 'HEAD', repoRel)
   if (source === null) return null
   const parsed = await parser.parse(source)
-  return {
-    fileId: projectRel,
-    functions: parsed.functions.map((fn) => ({
-      // 与 generateDocs 的 buildFunctionDoc 同口径（C++ 重载限定符在本特性中不含，
-      // 与 git 历史回填的 parseSnapshot 保持一致）。
-      id: makeStableId(projectRel, fn.className, fn.name, fn.params),
-      name: fn.name,
-      fingerprint: fingerprint(fn.bodyText)
-    }))
+  return { fileId: projectRel, functions: parsedFunctionEntries(projectRel, parsed.functions) }
+}
+
+/**
+ * 当前侧快照：直接只读解析工作区源码，而不是复用「上次生成」的 service.files。
+ * 否则未 regenerate 的修改/新增文件会被当成“无变更”或“全量近似”，与工作区语义不符。
+ * 返回 null 表示读不到/不支持/解析失败，由调用方决定回退文档快照或跳过。
+ */
+async function workingSnapshot(
+  rootDir: string,
+  projectRel: string
+): Promise<FileSnapshot | null> {
+  const parser = parserRegistry.forFile(projectRel)
+  if (!parser) return null
+  const root = resolve(rootDir)
+  const abs = resolve(root, projectRel)
+  // 只读项目根内文件：git 路径理论上已过滤，这里再做一次 containment 防御
+  if (abs !== root && !abs.startsWith(root + sep)) return null
+  try {
+    const source = await readFile(abs, 'utf8')
+    if (source.includes('\u0000')) return null
+    const parsed = await parser.parse(source)
+    return { fileId: projectRel, functions: parsedFunctionEntries(projectRel, parsed.functions) }
+  } catch {
+    return null
   }
 }
 
@@ -99,14 +117,31 @@ async function processChangedFile(
   git: GitClient,
   rootDir: string,
   prefix: string,
-  docs: Map<string, FileDoc>
+  docs: Map<string, FileDoc>,
+  inScope: (projectRel: string) => boolean
 ): Promise<FileOutcome> {
   const projectRel = toProjectPath(prefix, changed.path)
+
+  // 重命名的新路径落到项目根外：旧文件在项目内时，应按删除上报，不能静默消失
+  if (changed.status === 'R' && (projectRel === null || projectRel === '')) {
+    const oldProject = changed.oldPath ? toProjectPath(prefix, changed.oldPath) : null
+    if (!oldProject || !inScope(oldProject) || !parserRegistry.forFile(oldProject)) {
+      return { changes: [], approximate: false }
+    }
+    try {
+      const head = await headSnapshot(git, rootDir, oldProject, toRepoPath(prefix, oldProject))
+      if (!head) return { changes: [], approximate: true }
+      return { changes: diffFileSnapshots(head, emptySnapshot(oldProject)), approximate: false }
+    } catch {
+      return { changes: [], approximate: true }
+    }
+  }
   if (projectRel === null || projectRel === '') return { changes: [], approximate: false }
+  if (!inScope(projectRel)) return { changes: [], approximate: false }
   const repoRel = toRepoPath(prefix, projectRel)
 
   if (changed.status === 'D') {
-    // 未被文档收录的文件（不支持语言 / 被 include-exclude 过滤）不会产生可见函数，跳过
+    // 不支持语言的文件不会产生可见函数，跳过
     if (!parserRegistry.forFile(projectRel)) return { changes: [], approximate: false }
     try {
       const head = await headSnapshot(git, rootDir, projectRel, repoRel)
@@ -117,9 +152,10 @@ async function processChangedFile(
     }
   }
 
-  const file = docs.get(projectRel)
-  const current = documentedSnapshot(file)
-  if (!file || !current) return { changes: [], approximate: false }
+  const documented = docs.get(projectRel)
+  // 当前侧优先解析工作区源码：与是否 regenerate 解耦；解析失败才回退最近生成结果
+  const current = (await workingSnapshot(rootDir, projectRel)) ?? documentedSnapshot(documented)
+  if (!current) return { changes: [], approximate: false }
 
   if (changed.status === 'A') {
     return { changes: diffFileSnapshots(null, current), approximate: false }
@@ -130,17 +166,21 @@ async function processChangedFile(
   let headRepo = repoRel
   if (changed.status === 'R') {
     const oldProject = changed.oldPath ? toProjectPath(prefix, changed.oldPath) : null
-    // 旧路径在项目根外 / 缺失：无法建立 HEAD 基线，按近似处理
-    if (oldProject === null || oldProject === '') return approximateOutcome(file)
+    // 旧路径在项目根外 / 缺失：无法建立 HEAD 基线，回退文件级近似（有文档时）
+    if (oldProject === null || oldProject === '') {
+      return documented ? approximateOutcome(documented) : { changes: [], approximate: false }
+    }
     headProject = oldProject
     headRepo = toRepoPath(prefix, oldProject)
   }
   try {
     const head = await headSnapshot(git, rootDir, headProject, headRepo)
-    if (!head) return approximateOutcome(file)
+    if (!head) {
+      return documented ? approximateOutcome(documented) : { changes: [], approximate: false }
+    }
     return { changes: diffFileSnapshots(head, current), approximate: false }
   } catch {
-    return approximateOutcome(file)
+    return documented ? approximateOutcome(documented) : { changes: [], approximate: false }
   }
 }
 
@@ -180,12 +220,24 @@ export async function buildWorkspaceChangeset(
 
     if (files.length > 0) await ensureDefaultParsers()
     const docs = new Map(service.files.map((file) => [file.fileId, file]))
+    // 与 generateDocs 的文件范围一致：删除/重命名也要吃 include/exclude，
+    // 否则 dist/、自定义 exclude 下的文件会产生“幽灵删除”
+    const includeM = picomatch(service.normalized.config.include ?? [], { dot: true })
+    const excludeM = picomatch(service.normalized.config.exclude ?? [], { dot: true })
+    const inScope = (projectRel: string): boolean => includeM(projectRel) && !excludeM(projectRel)
 
     let approximate = false
     const seen = new Set<string>()
     const changedFunctions: ChangedFunctionRef[] = []
     for (const changed of files) {
-      const outcome = await processChangedFile(changed, git, service.rootDir, prefix, docs)
+      const outcome = await processChangedFile(
+        changed,
+        git,
+        service.rootDir,
+        prefix,
+        docs,
+        inScope
+      )
       if (outcome.approximate) approximate = true
       for (const change of outcome.changes) {
         // 按 functionId 去重（同一函数不因多处触发重复展示）

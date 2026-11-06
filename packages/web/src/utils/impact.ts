@@ -22,7 +22,7 @@ export const IMPACT_OVERLAY_TOP_N = 5
 
 /**
  * workspace 变更集单次处理的变更文件上限，仅用于文案（与服务端
- * workspaceChanges.ts 的 WORKSPACE_CHANGED_FILE_LIMIT 同口径，截断标记由后端给出）。
+ * workspaceChanges.ts 的 WORKSPACE_MAX_FILES 同口径，截断标记由后端给出）。
  */
 export const WORKSPACE_CHANGE_FILE_LIMIT = 2000
 

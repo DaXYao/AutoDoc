@@ -155,6 +155,8 @@ function resetLandingForProject(): void {
     mode.value = 'workspace'
     commitHash.value = null
   }
+  // 来源口径属于项目：切换后先回到 Git 缺省，等新项目的 workspace 响应再确认
+  lastWorkspaceSource.value = 'git'
   shouldResolveLanding = mode.value === 'workspace'
 }
 
@@ -455,8 +457,10 @@ const workspaceMode = computed(() => workspaceModeOf({ workspaceSource: workspac
 const workspaceHintVisible = computed(
   () => mode.value === 'workspace' && changeset.value?.scope === 'workspace'
 )
-/** 近似 / 截断提示（后端可选字段，缺省为空数组） */
-const workspaceNotices = computed(() => workspaceNoticesOf(changeset.value))
+/** 近似 / 截断提示（仅 workspace 模式；切到单提交/范围的加载期不误显） */
+const workspaceNotices = computed(() =>
+  mode.value === 'workspace' ? workspaceNoticesOf(changeset.value) : []
+)
 
 /* ------------------------- G6：变更侧 Agent 语义（读时合并，随 changeset 一起到） ------------------------- */
 

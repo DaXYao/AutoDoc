@@ -1,7 +1,7 @@
 import picomatch from 'picomatch'
 import { diffFileSnapshots, type FileSnapshot, type FunctionSnapshotEntry } from '../changes.js'
 import type { NormalizedConfig } from '../config.js'
-import { fingerprint, makeStableId } from '../identity.js'
+import { parsedFunctionEntries } from '../parser/identity.js'
 import { ensureDefaultParsers, type ParserRegistry } from '../parser/registry.js'
 import type { LanguageParser } from '../parser/types.js'
 import type { NewChangeInput, StorageAdapter } from '../storage/StorageAdapter.js'
@@ -68,11 +68,7 @@ async function parseSnapshot(
   const parsed = await parser.parse(source)
   return {
     fileId: projectRel,
-    functions: parsed.functions.map((fn) => ({
-      id: makeStableId(projectRel, fn.className, fn.name, fn.params),
-      name: fn.name,
-      fingerprint: fingerprint(fn.bodyText)
-    }))
+    functions: parsedFunctionEntries(projectRel, parsed.functions)
   }
 }
 

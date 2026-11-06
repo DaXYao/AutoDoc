@@ -55,9 +55,9 @@ function write(dir: string, relPath: string, content: string | Buffer): void {
 }
 
 /** 最小 DocService：impact/workspace 读写路径只需要 storage / files / generatedAt */
-async function makeService(dir: string): Promise<DocService> {
+async function makeService(dir: string, include: string[] = ['**/*.ts']): Promise<DocService> {
   const configPath = join(dir, 'autodoc.config.json')
-  writeFileSync(configPath, JSON.stringify({ include: ['**/*.ts'] }), 'utf-8')
+  writeFileSync(configPath, JSON.stringify({ include }), 'utf-8')
   const normalized = await loadConfig(dir, configPath)
   const storage = createStorage({ type: 'json', path: join(dir, 'autodoc.json') }, dir)
   storage.init()
@@ -128,6 +128,15 @@ describe('buildWorkspaceChangeset（Git 工作区相对 HEAD）', () => {
       { path: 'a.ts', name: 'bar', body: '{\n  return 2\n}' }
     ])
 
+    // 反例基线：库里明明有旧的 snapshot 批次，Git 干净时也不得回显它
+    service.storage.appendChange({
+      targetId: idOf('a.ts', 'foo'),
+      type: 'modified',
+      description: '上一代生成批次',
+      date: '2026-11-04T00:00:00.000Z',
+      source: 'snapshot'
+    })
+
     const changeset = await buildWorkspaceChangeset(service, client)
     expect(changeset.workspaceSource).toBe('git')
     expect(changeset.commits).toEqual([])
@@ -143,8 +152,10 @@ describe('buildWorkspaceChangeset（Git 工作区相对 HEAD）', () => {
     initRepo(dir)
 
     write(dir, 'a.ts', FOO_CHANGED_BAR_SAME)
+    // 故意让文档停留在 HEAD 版本（模拟「改了代码但还没 regenerate」）：
+    // 当前侧必须直接解析工作区源码，不能因为文档陈旧而漏报
     service.files = makeDocs([
-      { path: 'a.ts', name: 'foo', body: '{\n  return 9\n}' },
+      { path: 'a.ts', name: 'foo', body: '{\n  return 1\n}' },
       { path: 'a.ts', name: 'bar', body: '{\n  return 2\n}' }
     ])
 
@@ -162,10 +173,10 @@ describe('buildWorkspaceChangeset（Git 工作区相对 HEAD）', () => {
     initRepo(dir)
 
     write(dir, 'b.ts', 'export function baz(): number {\n  return 3\n}\n')
+    // 新文件尚未进入文档：当前侧仍应直接从工作区解析出 baz（无需先 regenerate）
     service.files = makeDocs([
       { path: 'a.ts', name: 'foo', body: '{\n  return 1\n}' },
-      { path: 'a.ts', name: 'bar', body: '{\n  return 2\n}' },
-      { path: 'b.ts', name: 'baz', body: '{\n  return 3\n}' }
+      { path: 'a.ts', name: 'bar', body: '{\n  return 2\n}' }
     ])
 
     const changeset = await buildWorkspaceChangeset(service, client)
@@ -200,6 +211,26 @@ describe('buildWorkspaceChangeset（Git 工作区相对 HEAD）', () => {
     expect(changeset.changedFunctions).toEqual([
       { functionId: idOf('b.ts', 'foo'), type: 'renamed', filePath: 'b.ts', name: 'foo' }
     ])
+  })
+
+  it('C++ const 限定符：HEAD 与工作区稳定 ID 同口径，不误报 renamed/deleted', async () => {
+    const dir = freshDir()
+    const cppBefore =
+      'class A {\npublic:\n  int value() const { return 1; }\n  int value() { return 2; }\n};\n'
+    const cppAfter =
+      'class A {\npublic:\n  int value() const { return 9; }\n  int value() { return 2; }\n};\n'
+    write(dir, 'a.cpp', cppBefore)
+    const service = await makeService(dir, ['**/*.cpp'])
+    initRepo(dir)
+
+    write(dir, 'a.cpp', cppAfter)
+    // 文档为空：当前侧直接解析工作区，HEAD 侧解析同口径 ID
+    service.files = []
+
+    const changeset = await buildWorkspaceChangeset(service, client)
+    expect(refsByType(changeset, 'renamed')).toEqual([])
+    expect(refsByType(changeset, 'deleted')).toEqual([])
+    expect(refsByType(changeset, 'modified')).toHaveLength(1)
   })
 
   it('非 Git 目录：回退最近一次 snapshot 批次并标注 workspaceSource=snapshot', async () => {

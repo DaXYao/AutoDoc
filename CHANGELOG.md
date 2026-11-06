@@ -29,6 +29,16 @@
 - **测试**：新增 blocks 输入变化重跑用例；回滚回归补 `rerun` 不含 categories 断言。全仓 1514 项（core 443 / server 709 / web 362），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
 - **关联 commit**：随本批次提交。
 
+## 2026-11-06 · workspace Git 口径终审：工作区实时解析与 C++ ID 统一 · core+server+web
+
+- **当前侧改为直接解析工作区源码**：`workspaceChanges.ts` 不再依赖「上次生成」的 `service.files`，未 regenerate 的修改/新增未跟踪文件也能立即出现在 workspace 变更集；解析失败才回退文档快照。
+- **稳定 ID 统一**：新增 core `parser/identity.stableFunctionId` / `parsedFunctionEntries`，generate、Git 提交回填、HEAD/工作区快照共用同一口径（含 C++ cv/ref/noexcept/override/final 限定符），修复 const 方法被误报 renamed/deleted。
+- **范围与重命名边界**：workspace 变更按项目 include/exclude 过滤（避免 dist/自定义 exclude 产生幽灵删除）；重命名新路径落到项目根外时旧文件按删除上报。
+- **前端**：切项目复位 workspace 来源；近似/截断提示仅在 workspace 模式显示。
+- **测试**：干净用例预置旧 snapshot 批次证明不回显；修改用例使用陈旧文档证明确实解析工作区；新增未跟踪文件与 C++ 限定符用例。全仓 1542 项（core 452 / server 719 / web 371），`pnpm test`、`pnpm lint`、`pnpm build` 全绿。
+- **实机**：最新构建 7795 验证——未提交改动 12 条正确列出、Git 文案正确；临时未跟踪文件即时显示 added、删除后消失；提交后 workspace 为空。
+- **关联 commit**：随本批次提交。
+
 ## 2026-11-06 · per-pass 版本常规刷新、列表上限与回滚透明化 · server+core+shared-types+web+test
 
 - **常规刷新尊重激活版本（`insight.ts`）**：categories/keySteps/blocks 三个 chunk 型 pass 把 `pickPassVersion` 提升为常规路径第一步（原仅点名复用路径读取）；selected=null 的普通刷新不再走 chunk 增量并 `commitPass` 覆盖用户回滚后的激活版本。未就绪且非只复用场景仍按原 chunk 增量生成，非 chunk pass 未改。

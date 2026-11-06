@@ -5,13 +5,13 @@ import { classifyFunction } from './classify.js'
 import { diffFileSnapshots, type DetectedChange, type FileSnapshot } from './changes.js'
 import type { NormalizedConfig } from './config.js'
 import { collectFiles } from './files.js'
-import { fingerprint, makeStableId, sha256 } from './identity.js'
+import { fingerprint, sha256 } from './identity.js'
 import {
   GO_PACKAGE_IMPORT_LOCAL,
   GO_PACKAGE_NAME_CANDIDATE,
   GO_UNKNOWN_RECEIVER
 } from './parser/go.js'
-import { overloadQualifier } from './parser/identity.js'
+import { stableFunctionId } from './parser/identity.js'
 import { JAVA_PACKAGE_IMPORT_LOCAL, JAVA_UNKNOWN_RECEIVER } from './parser/java.js'
 import { ensureDefaultParsers, PARSER_VERSION, parserRegistry } from './parser/registry.js'
 import type { ParsedFile, ParsedFunction, ParsedImport } from './parser/types.js'
@@ -190,7 +190,6 @@ function isParsedFileShape(value: unknown): value is ParsedFile {
 
 /** C++ 模块扩展名（include 目标与稳定 ID 判定共用；只含 C++ 源/头） */
 const CPP_MODULE_EXTENSIONS = ['hpp', 'h', 'hh', 'hxx', 'cpp', 'cc', 'cxx', 'inl']
-const CPP_EXTENSION_SET = new Set(CPP_MODULE_EXTENSIONS)
 
 /** 去除 JS/TS/Vue 模块说明符扩展名（C++ include 走独立的 resolveCppModule） */
 const MODULE_EXTENSION_PATTERN = /\.(ts|tsx|js|jsx|mjs|cjs|vue)$/
@@ -201,28 +200,14 @@ const CPP_EXTENSION_PATTERN = /\.(hpp|h|hh|hxx|cpp|cc|cxx|inl)$/
 /** C++ quoted include 合成的 ParsedImport localName 前缀（与 C1a 解析器约定） */
 const CPP_INCLUDE_LOCAL_PREFIX = '__cpp_include__:'
 
-/** 当前文件是否 C++ 源/头（决定稳定 ID 是否并入重载限定符） */
-function isCppSource(relPath: string): boolean {
-  const match = /\.([^./\\]+)$/.exec(relPath)
-  return match !== null && CPP_EXTENSION_SET.has(match[1].toLowerCase())
-}
-
 /** 由解析中间结构构建 FunctionDoc（调用边留空，阶段二回填） */
 function buildFunctionDoc(
   relPath: string,
   parsed: ParsedFunction,
   normalized: NormalizedConfig
 ): FunctionDoc {
-  // C++ 的 const/非 const 重载参数签名相同：把 cv/ref/noexcept/override/final 并入 ID 哈希。
-  // 非 C++ 与无限定符的 C++ 函数 qualifier 为空，既有稳定 ID 不变。
-  const qualifier = isCppSource(relPath) ? overloadQualifier(parsed.signature) : ''
-  const id = makeStableId(
-    relPath,
-    parsed.className,
-    parsed.name,
-    parsed.params,
-    qualifier || undefined
-  )
+  // 稳定 ID 统一由 parser/identity 生成：C++ 限定符口径与 Git HEAD/工作区快照共用
+  const id = stableFunctionId(relPath, parsed)
   const category = classifyFunction(
     {
       relPath,
