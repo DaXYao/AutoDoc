@@ -17,5 +17,6 @@ export { GoParser, GO_PACKAGE_IMPORT_LOCAL, GO_UNKNOWN_RECEIVER } from './parser
 export { JavaParser } from './parser/java.js'
 export { PythonParser } from './parser/python.js'
 export { VueParser } from './parser/vue.js'
+export { WxmlParser } from './parser/wxml.js'
 export { createParser, initTreeSitter, loadLanguage, wasmDir } from './parser/wasm.js'
 export * from './storage/index.js'

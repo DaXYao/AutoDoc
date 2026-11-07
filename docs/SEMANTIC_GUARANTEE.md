@@ -38,7 +38,7 @@ Agent 供给与洞察合并目前只校验**结构、字段与引用**：id 存�
 ## 4. 验证流程
 
 - **时机**：扫描 / 合并时验证，结果随洞察与快照持久化；历史版本也能回答「当时是否已担保」。读取时不再调用 LLM。
-- **已接入语言**：TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）、C#（`.cs`）、Vue SFC（`.vue`）、C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`）与 Python（`.py`）。C# 不新增证据提取器，直接复用通用证据包：`[Attribute]` → `decorators`、可见性、调用边、注释块、签名/参数/返回类型都来自现有 `FunctionDoc`；`using` 不映射源文件，`import` claim 在所有已接入语言中仍一律未证实。Vue SFC 同样复用通用证据包：`.vue` 的 script 函数（`<script setup>` 与 Options API methods）使用签名/参数/返回类型/可见性/装饰器/调用边/注释块；合成的 `[template]` 入口没有真实函数体，其 `call` 证据来自模板事件调用边（`stepId` 或调用行），`block` claim 不适用。C++ 也复用通用证据包（见下）。Python 同样复用通用证据包（见下），跨文件 import 可解析为内部调用边。`.java` / `.go` 等未接入语言、以及包含未接入语言文件的项目级对象（partition / flows / 混合模块 / 混合链路）仍为 `unverified`。
+- **已接入语言**：TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）、C#（`.cs`）、Vue SFC（`.vue`）、C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`）、Python（`.py`）、Java（`.java`）、Go（`.go`）、WXML（`.wxml`）与 WXS（`.wxs`）。C# 不新增证据提取器，直接复用通用证据包：`[Attribute]` → `decorators`、可见性、调用边、注释块、签名/参数/返回类型都来自现有 `FunctionDoc`；`using` 不映射源文件，`import` claim 在所有已接入语言中仍一律未证实。Vue SFC 同样复用通用证据包：`.vue` 的 script 函数（`<script setup>` 与 Options API methods）使用签名/参数/返回类型/可见性/装饰器/调用边/注释块；合成的 `[template]` 入口没有真实函数体，其 `call` 证据来自模板事件调用边（`stepId` 或调用行），`block` claim 不适用。WXML 的 `[wxml]` 入口与 Vue 模板同口径（call 证据来自 `bind*/catch*/capture-*` 事件与 mustache 中的 WXS 调用边，block 不适用）；WXS 与内联 `[wxs:module]` 函数复用 JS 证据包。C++ / Python / Java / Go 也复用通用证据包（见下）。未列出的语言、以及包含未接入语言文件的项目级对象（partition / flows / 混合模块 / 混合链路）仍为 `unverified`。
 - **C# 口径细节**：
   - `type` 只对「参数类型 / 返回类型」整体或完整类型 token 生效：`int page` → `int`、`out string reason` → `string`、`List<User> users` → `List<User>`、`[FromBody] User user` → `User`；参数名、完整参数声明与整个签名都不是类型。
   - `decorator` 的 `[Obsolete]`、`ObsoleteAttribute`、`Obsolete` 归一为同一名称后再精确比较（类级 attribute 不会落到方法上）。
@@ -124,7 +124,7 @@ Agent 供给与洞察合并目前只校验**结构、字段与引用**：id 存�
 5. **Python**（decorators→decorators、类/嵌套作用域编码进 className、docstring/注释块、import 跨文件调用、Python 注解参数类型提取）— 已落地
 6. **Java**（annotations→decorators、包+类路径进 className、import 跨文件调用、Java 参数类型提取）— 已落地
 7. **Go**（包/类型进 className、导出性、import 跨文件调用、Go `name type` 参数类型提取）— 已落地
-7. **Go**
+8. **微信小程序**（WXML 合成 `[wxml]` 用事件/WXS 调用边；WXS 与内联 `[wxs:module]` 复用 JS 证据）— 已落地
 
 每一轮「完成」需同时具备：
 

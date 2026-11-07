@@ -2578,7 +2578,7 @@ function buildRulesText(
   L.push(
     '- **语言范围（本轮）**：TypeScript / JavaScript 家族（`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs`）' +
       '+ C#（`.cs`）+ Vue SFC（`.vue`）+ C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`）' +
-      '+ Python（`.py`）+ Java（`.java`）+ Go（`.go`）。' +
+      '+ Python（`.py`）+ Java（`.java`）+ Go（`.go`）+ WXML（`.wxml`）+ WXS（`.wxs`）。' +
       '其它语言、以及包含未接入语言文件的项目级对象（partition / flows / 混合模块 / 混合链路）' +
       '一律 `unverified`，原因「该语言尚未接入语义担保」。'
   )
@@ -2630,12 +2630,20 @@ function buildRulesText(
       '模板节点没有真实源码函数体，`block` claim 不适用（会因无注释块判未证实）；Vue 的 `import` 静态校验同样尚未接入。'
   )
   L.push(
+    '- **微信小程序证据口径**：`.wxml` 的合成 `[wxml]` 入口与 Vue 模板同口径——`call` 证据来自' +
+      '`bind*` / `catch*` / `capture-*` 事件绑定与 mustache 中 WXS 调用产生的调用边，' +
+      '用该边的 `stepId`（或调用行号）担保；模板节点没有函数体，`block` claim 不适用。' +
+      '`.wxs` 文件整体复用 JS 证据包（签名/参数/返回类型/可见性/调用边/注释块）；内联 `<wxs>` 函数按 `[wxs:模块名]` 类名并入 `.wxml` 文件。' +
+      '页面/组件方法（`Page` / `Component` / `Behavior` / `App` 成员）复用 JS/TS 证据包，`className` 为文件路径去扩展名（如 `pages/order/order`）。' +
+      'WXML 之间的 `template` / `import` / `include` 不建边；WXSS / JSON 无函数产物，不参与担保。'
+  )
+  L.push(
     '- **对象覆盖**：`guarantees` 的键必须同时出现在同文件 `values` 中；claims 至少要引用该对象本身（subject / object / evidence 锚点任一），' +
       '否则担保无法挂载、判未证实。'
   )
   L.push(
     '- **subject 解析**：所有 claim 的 `subject` 必须解析到当前图谱/洞察里真实存在的对象（函数 / 链路 / 模块 / 文件 / 外部符号；' +
-      'partition / flows 额外允许 `root` 与本轮划分/树内对象），且引用到的函数必须全部属于已接入语义担保的语言（TypeScript / JavaScript 家族、C#、Vue SFC、C++ 或 Python）；' +
+      'partition / flows 额外允许 `root` 与本轮划分/树内对象），且引用到的函数必须全部属于已接入语义担保的语言（TypeScript / JavaScript 家族、C#、Vue SFC、C++、Python、Java、Go、WXML 或 WXS）；' +
       '不存在的 subject、未接入语言的 subject 一律 `unverified`，不能进入 `declared`。'
   )
   L.push(

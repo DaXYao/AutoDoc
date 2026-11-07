@@ -71,7 +71,8 @@ async function headSnapshot(
   if (!parser) return null
   const source = await git.readFileAtCommit(rootDir, 'HEAD', repoRel)
   if (source === null) return null
-  const parsed = await parser.parse(source)
+  // 与 generateDocs 同口径：className 可能依赖 filePath，缺失会让 HEAD 侧稳定 ID 分叉
+  const parsed = await parser.parse(source, { filePath: projectRel })
   return { fileId: projectRel, functions: parsedFunctionEntries(projectRel, parsed.functions) }
 }
 
@@ -93,7 +94,7 @@ async function workingSnapshot(
   try {
     const source = await readFile(abs, 'utf8')
     if (source.includes('\u0000')) return null
-    const parsed = await parser.parse(source)
+    const parsed = await parser.parse(source, { filePath: projectRel })
     return { fileId: projectRel, functions: parsedFunctionEntries(projectRel, parsed.functions) }
   } catch {
     return null

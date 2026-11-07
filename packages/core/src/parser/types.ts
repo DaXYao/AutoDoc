@@ -36,11 +36,19 @@ export interface ParsedFunction {
   callSites: ParsedCallSite[]
   /** 是否为 `export default …` 声明的默认导出（供默认导入解析用；缺省 false） */
   isDefaultExport?: boolean
+  /** CommonJS 别名导出名（`module.exports = { bar: baz }` 的 bar；ESM 不产出） */
+  exportNames?: string[]
   /** 方法体内「注释 + 紧随代码块」提取结果（functionId 在主流程回填） */
   codeBlocks: Omit<CodeBlock, 'functionId'>[]
   /** 1 基行号 */
   startLine: number
   endLine: number
+}
+
+/** 解析上下文：需要路径信息做归属的解析器（如小程序 Page 成员）使用 */
+export interface ParseContext {
+  /** POSIX 项目相对路径 */
+  filePath?: string
 }
 
 /** 语言解析器插件接口：新增语言只需实现该接口并注册 */
@@ -49,7 +57,7 @@ export interface LanguageParser {
   id: string
   /** 处理的文件扩展名（不含点） */
   extensions: string[]
-  parse(source: string): Promise<ParsedFile>
+  parse(source: string, context?: ParseContext): Promise<ParsedFile>
 }
 
 /** 单条 import：导入后在本文件使用的局部名 → 源模块 */

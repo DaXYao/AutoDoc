@@ -47,10 +47,11 @@ AutoDoc 把函数级变更映射回业务图谱：
 
 ## 当前支持与边界
 
-- **语言**：目前注册 TypeScript（`.ts`）、TSX（`.tsx`）、JavaScript（`.js` / `.jsx` / `.mjs` / `.cjs`）、C#（`.cs`）、Vue 单文件组件（`.vue`，解析 `<script>` / `<script setup>` 与模板事件引用）、C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`，只解析有函数体的定义）、Python（`.py`，函数/async/类方法/装饰器/类型注解/docstring/嵌套函数与类/lambda）、Java（`.java`，类/接口/枚举/记录/嵌套类型，方法/构造器/抽象与接口方法，类型推断与 lambda）与 Go（`.go`，包级函数/方法/接口/结构体/泛型/类型推断/lambda）。Pug 等尚未接入；新增语言需要实现 `LanguageParser` 接口并在 `packages/core/src/parser/registry.ts` 注册。
+- **语言**：目前注册 TypeScript（`.ts`）、TSX（`.tsx`）、JavaScript（`.js` / `.jsx` / `.mjs` / `.cjs`）、C#（`.cs`）、Vue 单文件组件（`.vue`，解析 `<script>` / `<script setup>` 与模板事件引用）、C++（`.cpp` / `.cc` / `.cxx` / `.h` / `.hpp` / `.hh` / `.hxx` / `.inl`，只解析有函数体的定义）、Python（`.py`，函数/async/类方法/装饰器/类型注解/docstring/嵌套函数与类/lambda）、Java（`.java`，类/接口/枚举/记录/嵌套类型，方法/构造器/抽象与接口方法，类型推断与 lambda）、Go（`.go`，包级函数/方法/接口/结构体/泛型/类型推断/lambda）与原生微信小程序：WXML（`.wxml`，`bind*` / `catch*` / `capture-*` 事件绑定与合成 `[wxml]` 入口）、WXS（`.wxs`）、WXSS（`.wxss`）与 JSON（仅 `app.json` / `project.config.json` / `sitemap.json`，以及与页面/组件同名的 `.json`）。小程序脚本支持 `Page` / `Component` / `Behavior` / `App` 成员识别与 `require()` / `module.exports`；只面向原生微信小程序，不含 uni-app / Taro 等跨端框架。Pug 等尚未接入；新增语言需要实现 `LanguageParser` 接口并在 `packages/core/src/parser/registry.ts` 注册。
 - **AI 与追问**：KEY 链路读取 `DEEPSEEK_API_KEY`（DeepSeek）或 `MIMO_API_KEY`（小米 MiMo / Token Plan），也支持 `AUTODOC_AI_*` 通用变量；未配置 key 时仍可做静态分析与外部 Agent 供给，但就地追问/函数级追问不可用（服务端按「未配置 AI」拒绝）。
 - **Agent 供给范围**：只覆盖语义层（十个洞察侧 pass + 变更侧 `changes`），不写批注、不写变更记录、不修改代码；AutoDoc 校验结构、字段、引用与静态证据，未接入语义担保的语言仍不对语义正确性背书（见下文）。
 - **Vue SFC**：每个 `.vue` 生成一个合成 `[template]` 入口节点；模板事件里的函数调用/成员调用接入调用图，裸引用只接脚本函数或 import 名。模板表达式为轻量词法扫描，不支持 Pug 等非 HTML 模板；`<script>` 字符串中出现 `</script>` 会提前截断。
+- **WXML**：每个 `.wxml` 生成一个合成 `[wxml]` 入口节点；事件绑定（`bind*` / `catch*` / `capture-*` / `mut-bind:*`）的处理器连到同目录同名脚本（`.ts` / `.tsx` / `.js` / `.jsx`）的页面/组件方法，mustache 里只连函数调用（含内联 `<wxs>` 与外链 `.wxs`），`{{price}}` 这类数据引用不建边；同名多候选不猜。WXML 之间的 `template` / `import` / `include` 不建边，`usingComponents` 的组件事件转发也不解析。
 - **C++**：只解析有函数体的定义（纯声明跳过）；命名空间通过 `className` 编码（如 `demo::Widget`），不单独进入稳定 ID；lambda 合成 `[lambda#N]` 条目。跨文件优先直接 quoted `#include`，其次唯一 basename，同名多候选不猜；不做传递 include、编译参数、宏展开与模板实例化；函数指针返回类型不产条目，转换运算符 `operator bool` 目前跳过。
 - **Python**：只解析 `.py`；类/嵌套作用域通过 `className` 编码，嵌套函数与函数体内 lambda 合成条目；支持相对/绝对 import（直接命中 → 唯一后缀 → 多候选不猜），`self/cls` 只按当前类解析。不做 `.pyi`/Python 2、动态 import、`sys.path`、re-export/`__all__`、继承与类型推断；类/模块级 lambda 暂不入库。
 - **Java**：只解析 `.java`；包+类路径写入 `className`（如 `com.example.Widget`），类型推断结果用 `::Type` 接收者；支持普通/static/嵌套类 import、同包类与全限定名调用；无 receiver 时先本类方法、再 static import。不做 `::super`/继承、method reference、`this()`/`super()`、空类（无 FunctionDoc）与匿名类方法的独立条目；重载/多构造器/外部 JDK 类型保持未解析，不做简单类名全局兜底。
@@ -62,13 +63,13 @@ AutoDoc 把函数级变更映射回业务图谱：
 
 ## 语义担保（按语言逐轮落地）
 
-**TypeScript / JavaScript / TSX 与 C#、Vue SFC、C++、Python、Java、Go 已落地（SG1/SG2/SG3）。** 在此之前，Agent 供给只校验结构、字段与引用：一条链路叙事可能所有 id 都存在、字段完全合规，却与代码实际行为不符，形成「听着很像但完全错误」的结论。语义担保把每条语义断言拆成最小可核验的 **claim**，并如实标注可信等级：
+**TypeScript / JavaScript / TSX 与 C#、Vue SFC、C++、Python、Java、Go、WXML / WXS 已落地（SG1/SG2/SG3）。** 在此之前，Agent 供给只校验结构、字段与引用：一条链路叙事可能所有 id 都存在、字段完全合规，却与代码实际行为不符，形成「听着很像但完全错误」的结论。语义担保把每条语义断言拆成最小可核验的 **claim**，并如实标注可信等级：
 
-- 硬事实（调用/顺序/包含/import/类型/装饰器/可见性/外部调用点/代码块）走静态证据；意图类（叙事、角色、模块职责、节点文本、分类/核心判定、关键步骤/内部步骤、外部符号用途）由服务端逐片段拆解后复核。C# 复用通用证据包：`[Attribute]` 作为 decorators（`[Obsolete]` / `ObsoleteAttribute` 归一），可见性、调用边、注释块、签名/参数/返回类型均取自现有解析结果；`type` 只认参数类型/返回类型，参数名与完整签名不算类型。C# 当前仅覆盖文件内可解析的内部调用，`external` claim 与跨文件调用尚未接入。Vue SFC 同样复用通用证据包：`.vue` 的 script 函数（`<script setup>` 与 Options API methods，后者 `className=[component]`）使用签名/参数/返回类型/可见性/装饰器/调用边/注释块；合成的 `[template]` 入口用模板事件产生的调用边（`stepId` 或调用行）担保，模板节点没有函数体，`block` claim 不适用。C++ 复用通用证据包：attributes 作为 decorators（`[[nodiscard]]` / `nodiscard` 归一）、命名空间与类作用域编码在 `className`、quoted include 只连项目内文件；`type` 按 C++ 声明提取参数类型（`const std::string& name` → `const std::string&`、`char *name` → `char*`、`int x = 0` → `int`），参数名与完整声明不算类型；未解析调用没有 `externalModule`，`external` claim 与外部库补全暂不生成（跨文件内部调用仍走 quoted include 解析）。Python 复用通用证据包：装饰器（`@app.route(...)` / `@staticmethod`，系统去 `@` 与参数后归一）、类与嵌套作用域编码在 `className`、docstring 进 `docComment`、函数体内「`#` 注释 + 紧随语句」进注释块；`type` 只认参数注解/返回注解（`page: int` → `int`、`name: Optional[str]` → `Optional[str]`、`x: list[int] = []` → `list[int]`），默认值与前导 `*` / `**` 先去掉，无注解的 `self` / `cls` / `*args` / `**kwargs` 没有类型文本，参数名与默认值不算类型；跨文件 import 可解析为内部调用边，未解析调用按 import 源记录 `externalModule`，但 `import` claim 仍一律未证实。Java 复用通用证据包：注解作为 decorators（`@Deprecated` / `@GetMapping("/x")` 去 `@` 与参数后归一）、包+类路径编码在 `className`、`type` 只认参数/返回类型（`String name` → `String`、`final int page` → `int`、`String... args` → `String...`、`Map<String, Integer> map` → `Map<String, Integer>`、`int[] values` → `int[]`），参数名与完整声明不算类型；import 可解析内部调用，`import` claim 仍未证实。Go 复用通用证据包：包/类型编码在 `className`、导出性按首字母大写、`type` 只认 `name type` 右侧的类型（`page int` → `int`、`ctx context.Context` → `context.Context`、`args ...string` → `...string`、`ch chan int` → `chan int`、`fn func(int) error` → `func(int) error`、`values map[string]int` → `map[string]int`），参数名不算类型；import 可解析内部调用，`import` claim 仍未证实。
+- 硬事实（调用/顺序/包含/import/类型/装饰器/可见性/外部调用点/代码块）走静态证据；意图类（叙事、角色、模块职责、节点文本、分类/核心判定、关键步骤/内部步骤、外部符号用途）由服务端逐片段拆解后复核。C# 复用通用证据包：`[Attribute]` 作为 decorators（`[Obsolete]` / `ObsoleteAttribute` 归一），可见性、调用边、注释块、签名/参数/返回类型均取自现有解析结果；`type` 只认参数类型/返回类型，参数名与完整签名不算类型。C# 当前仅覆盖文件内可解析的内部调用，`external` claim 与跨文件调用尚未接入。Vue SFC 同样复用通用证据包：`.vue` 的 script 函数（`<script setup>` 与 Options API methods，后者 `className=[component]`）使用签名/参数/返回类型/可见性/装饰器/调用边/注释块；合成的 `[template]` 入口用模板事件产生的调用边（`stepId` 或调用行）担保，模板节点没有函数体，`block` claim 不适用。C++ 复用通用证据包：attributes 作为 decorators（`[[nodiscard]]` / `nodiscard` 归一）、命名空间与类作用域编码在 `className`、quoted include 只连项目内文件；`type` 按 C++ 声明提取参数类型（`const std::string& name` → `const std::string&`、`char *name` → `char*`、`int x = 0` → `int`），参数名与完整声明不算类型；未解析调用没有 `externalModule`，`external` claim 与外部库补全暂不生成（跨文件内部调用仍走 quoted include 解析）。Python 复用通用证据包：装饰器（`@app.route(...)` / `@staticmethod`，系统去 `@` 与参数后归一）、类与嵌套作用域编码在 `className`、docstring 进 `docComment`、函数体内「`#` 注释 + 紧随语句」进注释块；`type` 只认参数注解/返回注解（`page: int` → `int`、`name: Optional[str]` → `Optional[str]`、`x: list[int] = []` → `list[int]`），默认值与前导 `*` / `**` 先去掉，无注解的 `self` / `cls` / `*args` / `**kwargs` 没有类型文本，参数名与默认值不算类型；跨文件 import 可解析为内部调用边，未解析调用按 import 源记录 `externalModule`，但 `import` claim 仍一律未证实。Java 复用通用证据包：注解作为 decorators（`@Deprecated` / `@GetMapping("/x")` 去 `@` 与参数后归一）、包+类路径编码在 `className`、`type` 只认参数/返回类型（`String name` → `String`、`final int page` → `int`、`String... args` → `String...`、`Map<String, Integer> map` → `Map<String, Integer>`、`int[] values` → `int[]`），参数名与完整声明不算类型；import 可解析内部调用，`import` claim 仍未证实。Go 复用通用证据包：包/类型编码在 `className`、导出性按首字母大写、`type` 只认 `name type` 右侧的类型（`page int` → `int`、`ctx context.Context` → `context.Context`、`args ...string` → `...string`、`ch chan int` → `chan int`、`fn func(int) error` → `func(int) error`、`values map[string]int` → `map[string]int`），参数名不算类型；import 可解析内部调用，`import` claim 仍未证实。WXML / WXS 复用同一套证据包：`.wxml` 的合成 `[wxml]` 入口与 Vue 模板同口径（`call` 证据来自事件绑定与 mustache 中的 WXS 调用，`block` 不适用），`.wxs` 文件与内联 `<wxs>` 函数（`className=[wxs:模块名]`）走 JS 证据，页面/组件方法的 `className` 为文件路径去扩展名；WXSS / JSON 只收录文件、没有函数产物，不在担保范围。
 - 担保等级：`verified`（系统静态证据 + KEY 第二遍 LLM 逐片段复核）/ `declared`（Agent 自带证据 + 自审，系统验证证据结构与范围）/ `unverified`（缺证据、校验失败、复核否定、低置信或历史遗留）。Agent 自审最高只到 `declared`。
 - 主叙事只展示 `verified` / `declared`；未证实正文默认收进「未证实（N）」折叠区，可展开看 claim、证据锚点与原因，并支持跳转函数/链路/行。分类、核心判定与结构导航保留可见但打「未证实」徽标，避免整页无法导航。
 - 担保随各自管线的洞察与快照持久化，互不覆盖：KEY 担保在刷新时生成并写入复核缓存，页面读取只回放缓存，不重新调用 LLM；Agent 管线不使用 KEY 复核，供给信封与变更侧 `changes` 文件可携带可选 `guarantees`（Agent 自审最高 `declared`；变更侧 scope 证据必须落在其声明的 `affectedChains` / `changeRoles` 内）。历史版本保留当时的担保等级；缺少证据的存量供给照常合并但标为未证实。
-- 数据模型只做**新增可选字段/独立映射**。语言顺序：TypeScript / JavaScript / TSX（已落地）→ C#（已落地）→ Vue SFC（已落地）→ C++（已落地）→ Python（已落地）→ Java（已落地）→ Go（已落地）。当前所有已接入语言均支持语义担保；未接入的新语言沿用结构校验，语义内容统一视为未证实。
+- 数据模型只做**新增可选字段/独立映射**。语言顺序：TypeScript / JavaScript / TSX（已落地）→ C#（已落地）→ Vue SFC（已落地）→ C++（已落地）→ Python（已落地）→ Java（已落地）→ Go（已落地）→ WXML / WXS（已落地）。当前所有已接入语言均支持语义担保（WXSS / JSON 无函数产物，不参与）；未接入的新语言沿用结构校验，语义内容统一视为未证实。
 
 详版设计、claim/证据结构、供给契约与每轮完成标准见 [`docs/SEMANTIC_GUARANTEE.md`](docs/SEMANTIC_GUARANTEE.md)。
 
@@ -179,7 +180,7 @@ cp .env.example .env
 | 领域 | 选型 |
 | --- | --- |
 | 语言与仓库 | TypeScript（ESM、strict）、Node >= 22.13、pnpm workspace（11.24.0） |
-| 代码解析 | web-tree-sitter 0.25 + @vscode/tree-sitter-wasm 0.0.5；内置 TypeScript / TSX / JavaScript / C# / C++ / Python / Java / Go grammar；Vue SFC 由内置 VueParser 复用 JS/TS 解析器并扫描模板事件 |
+| 代码解析 | web-tree-sitter 0.25 + @vscode/tree-sitter-wasm 0.0.5；内置 TypeScript / TSX / JavaScript / C# / C++ / Python / Java / Go grammar；Vue SFC 由内置 VueParser 复用 JS/TS 解析器并扫描模板事件；微信小程序由内置 WxmlParser（事件绑定 + 合成 `[wxml]` 入口，内联 WXS 复用 JS 解析器）+ WXS（复用 JS 解析器）+ WXSS/JSON 空解析器（只收录文件、不产函数）覆盖 |
 | 核心引擎 | `@autodoc/core`：分类、稳定 ID/指纹、调用图、注释块、变更 diff、存储适配 |
 | 本地服务 | Fastify 5 + @fastify/static、commander 13、chokidar 4 |
 | 存储 | `node:sqlite` 的 `DatabaseSync`（默认）；JSON 侧车适配器（`storage.type` = `sqlite` / `json`） |
@@ -197,7 +198,7 @@ cp .env.example .env
 AutoDoc/
 ├── packages/
 │   ├── core/
-│   │   ├── src/parser/          # ParserRegistry 与 JS/TS/TSX/C#/Vue/C++/Python/Java/Go 解析器
+│   │   ├── src/parser/          # ParserRegistry 与 JS/TS/TSX/C#/Vue/C++/Python/Java/Go/小程序（WXML/WXS）解析器
 │   │   ├── src/storage/         # SqliteStorage / JsonStorage
 │   │   ├── src/git/             # simple-git 变更回填
 │   │   ├── src/identity.ts      # 稳定 ID、参数签名哈希、函数体指纹

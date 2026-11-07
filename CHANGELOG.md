@@ -2,6 +2,26 @@
 
 > 最近变更置顶。历史只归档、不删除。
 
+## 2026-11-07 · 原生微信小程序支持（P1-P4）：脚本成员 + WXML/WXS + 文件收录 + 语义担保 · core+server+web+docs
+
+- **动机**：此前解析层只覆盖 Web 技术栈；原生小程序的页面/组件方法、事件绑定与 WXS 调用在调用图和语义担保里都是空白。
+- **类型/接口变化**：`LanguageParser.parse` 新增可选 `ParseContext { filePath }`，`ParsedFunction` 新增 `exportNames`；`JsFamilyParser` 选项改为 `ParseOptions = ParseContext & { includeOptionsApiMethods }`，`VueParser` 把 filePath 透传给 script parser；`generateDocs` 以及 `core/git/gitChanges.ts`、`server/workspaceChanges.ts`（含 HEAD 侧）统一以 `filePath: relPath` 解析——小程序 className 依赖路径，缺 filePath 会让稳定 ID 分叉。`PARSER_VERSION` 升到 9。
+- **脚本层成员**：仅顶层 `Page/Component/Behavior/App({...})`（含 TS 泛型）生效；Page/App 取顶层函数成员并跳过 data/globalData/properties/options；Component/Behavior 额外取 methods/lifetimes/pageLifetimes（全函数成员）与 observers（仅函数值、键去引号）；输出 `kind:'method'`、public、exported=false，`className` = filePath 去扩展名（无路径回退 `[mini]`），节点去重。
+- **CommonJS**：`collectImports` 支持 `const x=require('m')`（namespace）、解构（named，含别名）、`require('m').foo`（named）；导出标记支持 `module.exports = {a, b: c}`、`exports.x = y`、`module.exports.x = y`、`module.exports = fn`（isDefaultExport），只标记能对上模块级函数名的标识符；建图 exportNames 登记（已存在不覆盖），`MODULE_EXTENSION_PATTERN` 与 `resolveModule` 补 `.wxs` / `/index.wxs`。
+- **WXML 解析器**（`parser/wxml.ts`）：合成 `[wxml]` 入口（整份 WXML 作 bodyText、1..文件行数、无 params/codeBlocks）；事件属性按 `bind*` / `bind:*` / `catch*` / `catch:*` / `capture-bind:*` / `capture-catch:*` / `mut-bind:*` 前缀识别，纯标识符值直接成调用点，`{{…}}` 与非标识符值走表达式扫描；mustache 全量扫描只收函数调用（`{{price}}` / `{{item.name}}` 不产边），事件与 mustache 按 name+receiver+行号去重；`<wxs module src>` 产 namespace import（单双引号），内联 `<wxs>` 交 JS 解析器、行号回填并按 `[wxs:模块名]` 类名 + `kind:'method'` 并入。标签扫描按引号与 mustache 深度找 `>`（`wx:if="{{a > b}}"` 不截断，`{{a<b}}` 整段跳过），注释内标签/mustache 全部跳过；模板工具从 `vue.ts` 抽到 `parser/templateExpr.ts`（`includeBareRefs` 缺省 true 保持 Vue 口径，Vue 模板行为未变）。
+- **跨文件解析**（`generate.ts`）：阶段二前 `buildWxmlCallContexts` 为每个 wxml unit 收集 `siblingByName`（同目录同名 `.ts`/`.tsx`/`.js`/`.jsx` 按序取第一个存在者，只收 `className === 兄弟路径去扩展名` 的页面/组件方法，不收顶层工具函数）与 `inlineModules`（`[wxs:m]` 按 module → 名称分组）。`language==='wxml' && className===null && name==='[wxml]'` 时跳过文件内 byName（事件名与 wxml 内函数无词法关系，否则会误连内联 wxs 同名函数），再按 import/namespace → 内联 wxs 唯一候选 → 兄弟脚本同名唯一候选，多候选一律 null；解析不到归「外部/未解析」。
+- **文件收录**（`files.ts` + `parser/noop.ts`）：`DEFAULT_INCLUDE` 追加 `**/*.wxml`、`**/*.wxss`、`**/*.wxs`、`**/app.json`、`**/project.config.json`、`**/sitemap.json`；JSON 不放宽为 `**/*.json`。`collectFiles` 对已收集 `.wxml` 补同目录同名 `.json`（存在且未收集才补，仍过 exclude），只补同名 JSON。`NoopParser` 让 wxss/json 进入文件列表与 fileCount 但不产函数/调用/变更；FilePage 对 0 函数文件显示一行轻提示（WXML 等有合成入口的文件不显示）。
+- **语义担保**（`server/src/semanticGuarantee.ts` + Agent 契约）：语言闸门加入 `wxml` / `wxs`，与 Vue `[template]` 同口径——`[wxml]` 的 `call` 证据来自事件绑定与 mustache 中的 WXS 调用边，`block` 不适用；`.wxs` 与内联 `<wxs>`（`[wxs:模块名]`）复用 JS 证据包；WXSS/JSON 无函数产物、不参与担保。契约 4.10 新增「微信小程序证据口径」，语言范围补 WXML/WXS，`subject 解析` 补 Java / Go / WXML / WXS。
+- **解析口径（使用者边界）**：只面向原生微信小程序（不含 uni-app / Taro）；WXML 之间的 `template` / `import` / `include` 不建边，`usingComponents` 的组件事件转发不解析；WXS 按 JS 子集解析；JSON 只收 `app.json` / `project.config.json` / `sitemap.json` 与同名页面组件 JSON。
+- **测试**：新增 `core/test/miniProgram.test.ts`（12 项）、`wxmlParser.test.ts`（12 项）、`miniProgramCallGraph.test.ts`（5 项）、`miniProgramFiles.test.ts`（5 项）；`server/test/semanticGuarantee.test.ts` 语言判定补 wxml/wxs 正例与 wxss/json 反例，新增「微信小程序担保」3 项（[wxml] 事件/WXS 调用边可 declared、WXS 与内联 WXS 复用 JS 证据、[wxml] 无 block）。
+- **验证**：`pnpm lint`（ESLint + 四包 typecheck）、`pnpm test`（core 29 文件 491 项 / server 36 文件 779 项 / web 26 文件 435 项，共 91 文件 1705 项）、`pnpm build` 全绿。
+- **初审修复（本轮）**：`parser/wxml.ts` 的 mustache 扫描只保留带接收者的调用（`{{m.fn(x)}}` 是 WXS 调用的唯一合法形态）——原实现把裸调用 `{{fn(x)}}` 也记成调用点，建图会按同名误连到兄弟脚本的页面方法（WXML 的 mustache 不能调用页内方法），已补「裸调用不产边」的解析层与端到端用例。`agentSupplyChanges.ts` 变更侧契约的「语言范围与洞察侧一致」补 WXML/WXS（此前与洞察侧契约、实际语言闸门不一致）。补测：内联 WXS 同名多候选不猜（保持未解析）、多行标签事件/mustache 行号、WXML 合成入口参与变更检测而 WXSS/JSON 编辑不产生函数级变更。未改解析口径之外的建图/存储行为，Vue 模板路径未变。
+- **实机验收（P3 阶段，serve 7791 / 静态导出 7792）**：临时小程序项目（9 文件）确认 wxss/json 文件页显示语言 + `函数 0` + 空函数提示，wxml 页 `函数 1` 且无提示；静态站文件列表含 wxml/wxss/wxs/order.json，不含 package.json 与普通数据 JSON。
+- **实机验收（主代理，serve 7798，不触发任何 AI 生成）**：临时原生小程序 fixture（14 个收录文件，package.json 与 mock/data.json 被排除）确认 `order.wxml` 的 `[wxml]` 三条边分别命中页面方法 `onInput`/`onSubmit` 与 WXS `utils/fmt.wxs::money`，`{{price}}` 与注释内事件不产边；`card.wxml → onTap`、`order.js` 的 CommonJS `require` 调用均命中；工作区改动 `order.wxml` 产生 1 条 `[wxml]` modified，改动 `order.wxss` 不产生函数级变更；文件列表与函数详情 UI 截图确认。同步修正 `docs/SEMANTIC_GUARANTEE.md` 的已接入语言列表（补 Java/Go/WXML/WXS 并删除重复条目）。
+- **影响范围**：新增小程序文件类型与合成节点；普通 JS/TS/Vue 与其它语言路径未改，服务端仅扩担保语言闸门与契约文案；未改接口协议、存储与依赖。
+- **未修复/已知风险**：`module.exports` 别名只标记模块级函数；WXML→自定义组件事件、WXS 中 `getApp()` / `getCurrentPages()` 等动态调用不解析；`.wxs` 的模块解析沿用现有相对路径口径，不区分小程序构建别名。
+- **关联 commit**：待提交（随本轮小程序批次提交）。
+
 ## 2026-11-07 · 长任务进度初审修复：首次加载扫描进度可见性 / add id 口径 / 取消中途段状态 · server+docs
 
 - **首次加载（添加并分析 / 切到未加载项目）扫描进度整段不可见**：`GET /api/progress` 只按 `manager.getActiveId()` 取数，而 activeId 要等 `createDocService` 全量生成结束才切换，加载期间 current 恒为 null（只有 `/api/refresh` 可见）。`ProjectManager` 新增 `loadingId` / `getLoadingId()`（activate 首次加载期间设置、finally 清理），路由优先按它取数；加载结束或失败自动回落 activeId，不改变其它路由的激活语义。

@@ -49,11 +49,25 @@
 - [ ] **Java 零模型扩展**：包+类路径进 `className`、类型推断结果写 `::Type` receiver、类索引 + 普通/static/嵌套 import、无 receiver 先本类后 static import、去掉简单类名全局兜底（见 2026-10-21 J1 条）。
 - [ ] **Go 零模型扩展**：包+类型进 `className`、`::pkg`/`::pkg?`/`::Type`/`::?` receiver、词法作用域类型推断、包目录/go.mod import 解析、按 calleeId 去重、重复 init 合成名（见 2026-10-21 G1 条）。
 - [ ] **契约示例可执行**：从代码生成的契约文本里反抽示例 JSON，直接喂给同一校验器断言最高档状态，防止「照抄示例必失败」（见 2026-10-21 SG2 条）。
-- [ ] **语义担保接入新语言**：只扩语言闸门 + 复用 FunctionDoc 证据包，不改 parser；合成节点（Vue `[template]`）只担保对象级 claim，调用走模板事件 stepId；用真实解析夹具覆盖（见 2026-10-21 Vue 担保条）。
+- [ ] **语义担保接入新语言**：只扩语言闸门 + 复用 FunctionDoc 证据包，不改 parser；合成节点（Vue `[template]` / WXML `[wxml]`）只担保对象级 claim，调用走模板事件 stepId，`block` 不适用；用真实解析夹具覆盖（见 2026-10-21 Vue 担保条）。
+- [ ] **新增小程序类模板语言**：脚本成员识别（框架入口对象 + className=路径去扩展名）+ 模板合成入口（事件/mustache 调用点、只连函数不连数据）+ 跨文件阶段按兄弟脚本与内联模块唯一候选解析；样式/JSON 用空解析器只收录（见 2026-11-07 小程序条）。
 
 ---
 
 ## 成功经验条目
+
+### 2026-11-07 · 新增小程序类模板语言：脚本成员识别 + 模板事件合成入口 + 跨文件兄弟脚本解析
+- **适用条件**：要为「脚本 + 模板分离」的框架（微信小程序 WXML/WXS，同类还有支付宝/百度小程序）接入解析与调用图，且不希望改动既有语言解析器与图谱模型。
+- **做法**：
+  1. **脚本层复用现有 JS 解析器**，只加「框架入口成员」后处理：仅顶层 `Page/Component/Behavior/App({...})`（含泛型）生效；Page/App 取顶层函数成员并排除 data/globalData/properties/options，Component/Behavior 额外取 methods/lifetimes/pageLifetimes 与 observers（只认函数值，且 tree-sitter 的属性函数是 `function_expression`）。输出 `kind:'method'`、`className`=文件路径去扩展名，方法的稳定 ID 才能与模板事件按路径对齐。
+  2. **合成入口承担模板调用点**：每个模板文件产一个 `[wxml]` 节点（bodyText=整份模板、无 params/codeBlocks），事件属性按前缀族（`bind*` / `catch*` / `capture-*` / `mut-*`）识别；纯标识符 handler 直接成调用点，mustache 全量扫描时只收函数调用（`includeBareRefs:false`），数据引用不建边；事件与 mustache 按 name+receiver+行号去重。
+  3. **扫描器要同时处理引号、mustache 与注释**：找 `>` 时跟踪引号和 `{{}}` 深度（`wx:if="{{a > b}}"` 不截断），文本里的 `{{a<b}}` 整段跳过（否则 `<` 被当标签起点），注释内的标签/mustache 全部跳过；内联脚本块（`<wxs>`）整段交给 JS 解析器并回填行号。
+  4. **跨文件解析放在建图阶段**，不要塞进单文件解析器：先在阶段二前按目录建「兄弟脚本（同目录同名，按 `.ts/.tsx/.js/.jsx` 固定顺序只取第一个存在者）+ 内联模块」上下文；合成入口必须先跳过「文件内同名」（模板里的名字与模板文件内定义无词法关系，否则会误连内联脚本同名函数），再按 import/namespace → 内联模块唯一候选 → 兄弟脚本唯一候选，多候选一律 null。
+  5. **样式/配置只收录不产函数**：空解析器 + 默认 include 固定文件名（不要放宽到 `**/*.json`）+ 只补同名伴生 JSON；文件页对 0 函数文件给一行提示，不伪造条目。
+  6. **解析上下文（filePath）必须全链路贯通**：className 依赖路径的解析器，在 generate、Git 快照、工作区 HEAD 侧都要传同一个相对路径，否则同一函数在两套快照里算出不同稳定 ID，变更记录会凭空新增/删除。
+  7. **语义担保只扩语言闸门**：模板合成入口与 Vue `[template]` 同口径（`call` 走事件边 stepId、`block` 不适用），`.wxs` 与内联脚本复用 JS 证据包；样式/配置无函数产物，不纳入。
+- **验证**：core 新增 4 个测试文件（脚本成员/模板解析/跨文件调用图/文件收录），server 补语言闸门 + `[wxml]` 担保 3 项；真实临时小程序项目在 serve 与静态导出下均确认文件列表、函数计数与提示。
+- **关联**：`core/src/parser/wxml.ts`、`parser/templateExpr.ts`、`parser/noop.ts`、`core/src/generate.ts`、`core/src/files.ts`、`server/src/semanticGuarantee.ts`、`server/src/agentSupply.ts`。
 
 ### 2026-11-07 · 长任务实时进度：旁路 registry + 常驻轮询 + 取消全链路
 - **适用条件**：已有串行/分批的长任务（AI 多 pass、项目扫描、就地追问），需要在不改主流程、不落存储的前提下提供实时进度、停滞提醒、可取消与 F5 重连。

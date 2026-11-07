@@ -1,7 +1,7 @@
 import type { Parser, Node as SyntaxNode } from 'web-tree-sitter'
 import type { CodeBlock, Visibility } from '@autodoc/shared-types'
 import { detectCallRole } from './role.js'
-import type { LanguageParser, ParsedCallSite, ParsedFile, ParsedFunction, ParsedImport } from './types.js'
+import type { LanguageParser, ParseContext, ParsedCallSite, ParsedFile, ParsedFunction, ParsedImport } from './types.js'
 
 /**
  * JavaScript / TypeScript 系解析器（tree-sitter WASM）。
@@ -19,13 +19,28 @@ const FUNCTION_LIKE = new Set([
 const FUNCTION_EXPRESSION = new Set([...FUNCTION_LIKE, 'function_expression'])
 
 /**
- * Vue SFC 专用解析选项（仅 VueParser 传入；默认 parse 输出口径不变）。
- * Options API 的事件处理器声明在 `export default { methods: { ... } }` 对象内，
- * 顶层遍历无法产出函数条目；开启后额外把这些成员方法纳入输出。
+ * JS 系解析选项：Vue SFC 的 Options API 扩展 + 需要路径归属的小程序成员提取。
+ * 默认 parse 输出口径不变。
  */
-export interface JsParseOptions {
+export type ParseOptions = ParseContext & {
   includeOptionsApiMethods?: boolean
 }
+
+/** 小程序入口调用 → 成员提取口径；只认顶层语句里的这些调用 */
+type MiniProgramApi = 'page' | 'component' | 'behavior' | 'app'
+
+const MINI_PROGRAM_APIS = new Map<string, MiniProgramApi>([
+  ['Page', 'page'],
+  ['Component', 'component'],
+  ['Behavior', 'behavior'],
+  ['App', 'app']
+])
+
+/** Page / App 里不是方法的配置块（即使值是函数也不当方法） */
+const MINI_PROGRAM_SKIPPED_KEYS = new Set(['data', 'globalData', 'properties', 'options'])
+
+/** 小程序合成类名的兜底：无 filePath 时避免与普通函数混淆 */
+const MINI_PROGRAM_FALLBACK_CLASS = '[mini]'
 
 /** web-tree-sitter 0.25 的子节点类型允许 null，统一过滤 */
 function namedKids(node: SyntaxNode): SyntaxNode[] {
@@ -186,10 +201,80 @@ export function extractCodeBlocks(body: SyntaxNode | null): Omit<CodeBlock, 'fun
   return out
 }
 
-/** 提取 import 声明：named / default / namespace → 局部名与源模块（跨文件调用解析用） */
+/** 去掉对象键/字符串字面量的包裹引号（observers 的 `'a, b'` 键名等） */
+function stripWrappingQuotes(text: string): string {
+  return text.replace(/^['"`]|['"`]$/g, '')
+}
+
+/** `require('m')` 调用 → 模块说明符；非该形态返回 null */
+function requireSource(node: SyntaxNode | null): string | null {
+  if (!node || node.type !== 'call_expression') return null
+  const callee = node.childForFieldName('function')
+  if (!callee || callee.type !== 'identifier' || callee.text !== 'require') return null
+  const args = node.childForFieldName('arguments')
+  const first = args ? namedKids(args)[0] : undefined
+  if (!first || first.type !== 'string') return null
+  return stripWrappingQuotes(first.text)
+}
+
+/** 解构 require：`const {a, b: c} = require('m')` → 逐项 named import */
+function collectRequirePattern(pattern: SyntaxNode, source: string, out: ParsedImport[]): void {
+  for (const part of namedKids(pattern)) {
+    if (part.type === 'shorthand_property_identifier_pattern') {
+      out.push({ localName: part.text, importedName: part.text, source, kind: 'named' })
+    } else if (part.type === 'pair_pattern') {
+      const key = part.childForFieldName('key')
+      const value = part.childForFieldName('value')
+      if (!key || !value || value.type !== 'identifier') continue
+      out.push({
+        localName: value.text,
+        importedName: stripWrappingQuotes(key.text),
+        source,
+        kind: 'named'
+      })
+    }
+  }
+}
+
+/** CommonJS require 绑定：namespace / 解构 named / 成员 named */
+function collectRequireDeclarator(declarator: SyntaxNode, out: ParsedImport[]): void {
+  const name = declarator.childForFieldName('name')
+  const value = declarator.childForFieldName('value')
+  if (!name || !value) return
+
+  const direct = requireSource(value)
+  if (direct !== null) {
+    if (name.type === 'identifier') {
+      out.push({ localName: name.text, importedName: '*', source: direct, kind: 'namespace' })
+    } else if (name.type === 'object_pattern') {
+      collectRequirePattern(name, direct, out)
+    }
+    return
+  }
+
+  // `const x = require('m').foo`
+  if (name.type !== 'identifier' || value.type !== 'member_expression') return
+  const source = requireSource(value.childForFieldName('object'))
+  const property = value.childForFieldName('property')
+  if (source === null || !property) return
+  out.push({
+    localName: name.text,
+    importedName: stripWrappingQuotes(property.text),
+    source,
+    kind: 'named'
+  })
+}
+
+/** 提取 import 声明：named / default / namespace + CommonJS require（跨文件调用解析用） */
 function collectImports(root: SyntaxNode): ParsedImport[] {
   const out: ParsedImport[] = []
   for (const stmt of namedKids(root)) {
+    if (stmt.type === 'lexical_declaration' || stmt.type === 'variable_declaration') {
+      for (const declarator of namedKids(stmt)) {
+        if (declarator.type === 'variable_declarator') collectRequireDeclarator(declarator, out)
+      }
+      continue
+    }
     if (stmt.type !== 'import_statement') continue
     const sourceNode = stmt.childForFieldName('source')
     if (!sourceNode) continue
@@ -224,6 +309,8 @@ interface BuildOptions {
   /** 文档注释与行号的锚点（最外层包装节点，如 export_statement） */
   anchor: SyntaxNode
   nameNode: SyntaxNode | null
+  /** 覆盖函数名（字符串键去引号等 nameNode 文本不符合口径的场景） */
+  nameOverride?: string
   paramsNode: SyntaxNode | null
   bodyNode: SyntaxNode | null
   returnTypeNode: SyntaxNode | null
@@ -243,7 +330,7 @@ export class JsFamilyParser implements LanguageParser {
     private readonly parser: Parser
   ) {}
 
-  async parse(source: string, options?: JsParseOptions): Promise<ParsedFile> {
+  async parse(source: string, options?: ParseOptions): Promise<ParsedFile> {
     const tree = this.parser.parse(source)
     const out: ParsedFunction[] = []
     if (!tree) return { functions: out, imports: [] }
@@ -253,6 +340,8 @@ export class JsFamilyParser implements LanguageParser {
     if (options?.includeOptionsApiMethods) {
       this.collectOptionsApiMethods(tree.rootNode, out)
     }
+    this.collectMiniProgramMembers(tree.rootNode, options?.filePath, out)
+    this.applyCommonJsExports(tree.rootNode, out)
     return { functions: out, imports: collectImports(tree.rootNode) }
   }
 
@@ -277,7 +366,7 @@ export class JsFamilyParser implements LanguageParser {
       const methodsObject = methods?.childForFieldName('value')
       if (!methodsObject) continue
       for (const member of namedKids(methodsObject)) {
-        this.collectOptionsApiMember(member, out)
+        this.collectObjectFunctionMember(member, '[component]', out)
       }
     }
   }
@@ -298,7 +387,12 @@ export class JsFamilyParser implements LanguageParser {
     return null
   }
 
-  private collectOptionsApiMember(member: SyntaxNode, out: ParsedFunction[]): void {
+  /** 对象字面量中的函数成员（methods / 小程序配置对象共用）：方法或函数值属性 */
+  private collectObjectFunctionMember(
+    member: SyntaxNode,
+    className: string,
+    out: ParsedFunction[]
+  ): void {
     if (member.type === 'method_definition') {
       out.push(
         this.buildEntry({
@@ -308,8 +402,7 @@ export class JsFamilyParser implements LanguageParser {
           paramsNode: member.childForFieldName('parameters'),
           bodyNode: member.childForFieldName('body'),
           returnTypeNode: member.childForFieldName('return_type'),
-          // 合成组件类名：避免与顶层同名同参函数生成相同稳定 ID（批注/变更历史错位）
-          className: '[component]',
+          className,
           kind: 'method',
           exported: false,
           visibility: 'public',
@@ -327,10 +420,11 @@ export class JsFamilyParser implements LanguageParser {
         node: member,
         anchor: member,
         nameNode: key,
+        nameOverride: stripWrappingQuotes(key.text),
         paramsNode: value.childForFieldName('parameters'),
         bodyNode: value.childForFieldName('body'),
         returnTypeNode: value.childForFieldName('return_type'),
-        className: '[component]',
+        className,
         kind: 'method',
         exported: false,
         visibility: 'public',
@@ -339,12 +433,205 @@ export class JsFamilyParser implements LanguageParser {
     )
   }
 
+  /**
+   * 原生小程序入口成员提取（仅顶层 `Page/Component/Behavior/App({...})` 生效）：
+   * 方法体归属用「文件路径去扩展名」合成类名，避免跨文件同名方法稳定 ID 冲突。
+   * 输入口径是对象字面量约定，不做运行期推断（非函数值与不认识的配置块一律跳过）。
+   */
+  private collectMiniProgramMembers(
+    root: SyntaxNode,
+    filePath: string | undefined,
+    out: ParsedFunction[]
+  ): void {
+    const className = filePath
+      ? filePath.replace(/\.[^./]+$/, '')
+      : MINI_PROGRAM_FALLBACK_CLASS
+    const seen = new Set<number>()
+    for (const stmt of namedKids(root)) {
+      if (stmt.type !== 'expression_statement') continue
+      const call = namedKids(stmt)[0]
+      if (!call || call.type !== 'call_expression') continue
+      const callee = call.childForFieldName('function')
+      if (!callee || callee.type !== 'identifier') continue
+      const api = MINI_PROGRAM_APIS.get(callee.text)
+      if (!api) continue
+      const args = call.childForFieldName('arguments')
+      // 只取第一个对象参数（泛型实参不影响 arguments 节点形态）
+      const options = args ? namedKids(args).find((c) => c.type === 'object') : undefined
+      if (!options) continue
+      for (const member of namedKids(options)) {
+        if (api === 'component' || api === 'behavior') {
+          this.collectMiniComponentMember(member, className, seen, out)
+        } else {
+          this.collectMiniEntryMember(member, className, seen, out)
+        }
+      }
+    }
+  }
+
+  /** Page / App：对象顶层函数成员，跳过 data/globalData 等非方法配置块 */
+  private collectMiniEntryMember(
+    member: SyntaxNode,
+    className: string,
+    seen: Set<number>,
+    out: ParsedFunction[]
+  ): void {
+    const key = this.miniMemberKey(member)
+    if (key !== null && MINI_PROGRAM_SKIPPED_KEYS.has(key)) return
+    this.pushMiniFunction(member, className, seen, out)
+  }
+
+  /** Component / Behavior：methods/lifetimes/pageLifetimes/observers + 顶层函数成员 */
+  private collectMiniComponentMember(
+    member: SyntaxNode,
+    className: string,
+    seen: Set<number>,
+    out: ParsedFunction[]
+  ): void {
+    const key = this.miniMemberKey(member)
+    const value = member.type === 'pair' ? member.childForFieldName('value') : null
+    if (key !== null && value && value.type === 'object') {
+      if (key === 'methods' || key === 'lifetimes' || key === 'pageLifetimes') {
+        for (const child of namedKids(value)) this.pushMiniFunction(child, className, seen, out)
+        return
+      }
+      if (key === 'observers') {
+        for (const child of namedKids(value)) {
+          // observers 只认 value 为函数（key 是观察字段表达式，不是方法声明）
+          const observerValue = child.type === 'pair' ? child.childForFieldName('value') : null
+          if (child.type === 'pair' && observerValue && FUNCTION_EXPRESSION.has(observerValue.type)) {
+            this.pushMiniFunction(child, className, seen, out)
+          }
+        }
+        return
+      }
+    }
+    this.pushMiniFunction(member, className, seen, out)
+  }
+
+  /** 配置对象成员的键名（去引号）；非 pair/method_definition 返回 null */
+  private miniMemberKey(member: SyntaxNode): string | null {
+    if (member.type === 'pair') {
+      const key = member.childForFieldName('key')
+      return key ? stripWrappingQuotes(key.text) : null
+    }
+    if (member.type === 'method_definition') {
+      const name = member.childForFieldName('name')
+      return name ? stripWrappingQuotes(name.text) : null
+    }
+    return null
+  }
+
+  private pushMiniFunction(
+    member: SyntaxNode,
+    className: string,
+    seen: Set<number>,
+    out: ParsedFunction[]
+  ): void {
+    if (seen.has(member.id)) return
+    seen.add(member.id)
+    this.collectObjectFunctionMember(member, className, out)
+  }
+
+  /**
+   * CommonJS 导出标记（作用于已提取函数）：只认能对上模块级函数名的标识符，
+   * 内联函数/计算属性等对不上的一律跳过（不猜测）。
+   */
+  private applyCommonJsExports(root: SyntaxNode, out: ParsedFunction[]): void {
+    if (out.length === 0) return
+    for (const stmt of namedKids(root)) {
+      if (stmt.type !== 'expression_statement') continue
+      const expr = namedKids(stmt)[0]
+      if (!expr || expr.type !== 'assignment_expression') continue
+      const left = expr.childForFieldName('left')
+      const right = expr.childForFieldName('right')
+      if (!left || !right || left.type !== 'member_expression') continue
+      if (this.isModuleExports(left)) {
+        this.markModuleExports(right, out)
+        continue
+      }
+      const exportName = this.commonJsExportName(left)
+      if (exportName !== null) this.markNamedExport(exportName, right, out)
+    }
+  }
+
+  private isModuleExports(node: SyntaxNode): boolean {
+    if (node.type !== 'member_expression') return false
+    const object = node.childForFieldName('object')
+    const property = node.childForFieldName('property')
+    return (
+      object !== null &&
+      object.type === 'identifier' &&
+      object.text === 'module' &&
+      property !== null &&
+      property.text === 'exports'
+    )
+  }
+
+  /** `exports.foo = …` / `module.exports.foo = …` 的导出名 */
+  private commonJsExportName(left: SyntaxNode): string | null {
+    const object = left.childForFieldName('object')
+    const property = left.childForFieldName('property')
+    if (!object || !property) return null
+    if (object.type === 'identifier' && object.text === 'exports') {
+      return stripWrappingQuotes(property.text)
+    }
+    if (this.isModuleExports(object)) return stripWrappingQuotes(property.text)
+    return null
+  }
+
+  private markModuleExports(right: SyntaxNode, out: ParsedFunction[]): void {
+    if (right.type === 'identifier') {
+      const fn = this.moduleScopeFunction(right.text, out)
+      if (!fn) return
+      fn.exported = true
+      fn.isDefaultExport = true
+      return
+    }
+    if (right.type !== 'object') return
+    for (const member of namedKids(right)) {
+      if (member.type === 'shorthand_property_identifier') {
+        const fn = this.moduleScopeFunction(member.text, out)
+        if (fn) fn.exported = true
+        continue
+      }
+      if (member.type !== 'pair') continue
+      const key = member.childForFieldName('key')
+      const value = member.childForFieldName('value')
+      if (!key || !value || value.type !== 'identifier') continue
+      const fn = this.moduleScopeFunction(value.text, out)
+      if (!fn) continue
+      fn.exported = true
+      const exportName = stripWrappingQuotes(key.text)
+      if (exportName !== fn.name) this.addExportName(fn, exportName)
+    }
+  }
+
+  private markNamedExport(exportName: string, right: SyntaxNode, out: ParsedFunction[]): void {
+    if (right.type !== 'identifier') return
+    const fn = this.moduleScopeFunction(right.text, out)
+    if (!fn) return
+    fn.exported = true
+    if (exportName !== fn.name) this.addExportName(fn, exportName)
+  }
+
+  /** 模块级同名函数（className 为 null）；对象方法不参与 CommonJS 绑定 */
+  private moduleScopeFunction(name: string, out: ParsedFunction[]): ParsedFunction | null {
+    return out.find((fn) => fn.name === name && fn.className === null) ?? null
+  }
+
+  private addExportName(fn: ParsedFunction, exportName: string): void {
+    const names = fn.exportNames ?? []
+    if (!names.includes(exportName)) names.push(exportName)
+    fn.exportNames = names
+  }
+
   private buildEntry(opts: BuildOptions): ParsedFunction {
     const params = extractParams(opts.paramsNode)
     const returnType = opts.returnTypeNode
       ? opts.returnTypeNode.text.replace(/^:\s*/, '')
       : null
-    const name = opts.nameNode ? opts.nameNode.text : 'anonymous'
+    const name = opts.nameOverride ?? (opts.nameNode ? opts.nameNode.text : 'anonymous')
     const startRow = Math.min(opts.anchor.startPosition.row, opts.node.startPosition.row)
     return {
       name,

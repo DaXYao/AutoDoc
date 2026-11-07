@@ -7,6 +7,8 @@ import { GoParser } from './go.js'
 import { JavaParser } from './java.js'
 import { PythonParser } from './python.js'
 import { VueParser } from './vue.js'
+import { WxmlParser } from './wxml.js'
+import { NoopParser } from './noop.js'
 import { createParser } from './wasm.js'
 
 /**
@@ -45,15 +47,16 @@ export class ParserRegistry {
  * v6：新增 GoParser（.go 的 package/函数/方法/接口/类型推断/lambda/import 提取）。
  * v7：GoParser 词法作用域、`::pkg?` 候选、函数值 `::?`、重复 init/_ 合成名与 calleeId 去重。
  * v8：C# 接口成员无显式可见性修饰符时输出 `public`（原为 `private`）。
+ * v9：小程序 Page/Component/Behavior/App 成员 + CommonJS require/module.exports；.wxs 扩展名解析。
  * 仅改注释、重命名内部变量等不影响输出的变更无需 bump。
  */
-export const PARSER_VERSION = 8
+export const PARSER_VERSION = 9
 
 export const parserRegistry = new ParserRegistry()
 
 let defaultsRegistered = false
 
-/** 注册内置语言解析器（TypeScript / TSX / JavaScript / C# / Vue SFC / C++ / Python / Java / Go），幂等 */
+/** 注册内置语言解析器（TypeScript / TSX / JavaScript / WXS / C# / Vue SFC / WXML / WXSS / JSON / C++ / Python / Java / Go），幂等 */
 export async function ensureDefaultParsers(): Promise<void> {
   if (defaultsRegistered) return
   defaultsRegistered = true
@@ -69,14 +72,22 @@ export async function ensureDefaultParsers(): Promise<void> {
   const tsParser = new JsFamilyParser('typescript', ['ts'], typescript)
   const tsxParser = new JsFamilyParser('tsx', ['tsx'], tsx)
   const jsParser = new JsFamilyParser('javascript', ['js', 'jsx', 'mjs', 'cjs'], javascript)
+  const wxsParser = new JsFamilyParser('wxs', ['wxs'], javascript)
   parserRegistry.register(tsParser)
   parserRegistry.register(tsxParser)
   parserRegistry.register(jsParser)
+  parserRegistry.register(wxsParser)
   parserRegistry.register(new CSharpParser('csharp', ['cs'], csharp))
   // Vue SFC 依赖 JS/TS 解析器解析 script 块，必须在其后注册
   parserRegistry.register(
     new VueParser({ ts: tsParser, tsx: tsxParser, js: jsParser, jsx: jsParser })
   )
+  // WXML 依赖 JS 解析器解析内联 wxs，必须在 js/ts 之后注册
+  parserRegistry.register(new WxmlParser({ js: jsParser, ts: tsParser }))
+  // 样式/配置资源：收录进文件列表但不产出函数
+  parserRegistry.register(new NoopParser('wxss', ['wxss']))
+  // JSON 收录范围由 DEFAULT_INCLUDE 的三个固定文件名 + 同名 wxml 补收决定，此处只负责认领扩展名
+  parserRegistry.register(new NoopParser('json', ['json']))
   parserRegistry.register(
     new CppParser(
       'cpp',

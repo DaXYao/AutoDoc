@@ -987,7 +987,7 @@ function validate(
 /* ------------------------- 基础语言判定 ------------------------- */
 
 describe('语言判定', () => {
-  it('按扩展名识别已接入语言（TS/JS/TSX、C#、Vue SFC、C++、Python、Java）与未接入语言', () => {
+  it('按扩展名识别已接入语言（TS/JS/TSX、C#、Vue SFC、C++、Python、Java、Go、WXML/WXS）与未接入语言', () => {
     for (const f of [
       'a.ts',
       'a.tsx',
@@ -1009,11 +1009,13 @@ describe('语言判定', () => {
       'app/service.py',
       'app/pkg/__init__.py',
       'app/UserService.java',
-      'app/service.go'
+      'app/service.go',
+      'pages/order/order.wxml',
+      'utils/format.wxs'
     ]) {
       expect(isGuaranteeLanguageFile(f), f).toBe(true)
     }
-    for (const f of ['a.rs', 'a.pyi', 'README']) {
+    for (const f of ['a.rs', 'a.pyi', 'README', 'pages/order/order.wxss', 'pages/order/order.json']) {
       expect(isGuaranteeLanguageFile(f), f).toBe(false)
     }
   })
@@ -3414,6 +3416,103 @@ describe('Vue SFC 担保', () => {
     ])
     expect(blocked.status).toBe('unverified')
     expect(blocked.reason).toContain('尚未接入')
+  })
+})
+
+/* ------------------------- 微信小程序担保 ------------------------- */
+
+const WXML_FILE = 'pages/order/order.wxml'
+const PAGE_FILE = 'pages/order/order.ts'
+const WXS_FILE = 'utils/format.wxs'
+const WXML_ENTRY = `${WXML_FILE}::-::[wxml]@wxmlwxmlwxml`
+const PAGE_ONSUBMIT = `${PAGE_FILE}::pages/order/order::onSubmit@onsubmitonsub`
+const INLINE_ADD = `${WXML_FILE}::[wxs:m]::add@addaddaddadd`
+const WXS_FORMAT = `${WXS_FILE}::-::format@formatformat`
+
+/** 与真实解析器产出一致的形状：页面方法 className=文件路径去扩展名、内联 wxs 为 `[wxs:模块]` */
+function miniProgramFiles(): FileDoc[] {
+  const entry = mkFn(WXML_ENTRY, '[wxml]', {
+    signature: '[wxml]()',
+    visibility: 'module-local',
+    exported: false,
+    calls: [
+      mkCall(WXML_ENTRY, PAGE_ONSUBMIT, 'onSubmit', 1),
+      mkCall(WXML_ENTRY, INLINE_ADD, 'add', 1)
+    ]
+  })
+  const inlineAdd = mkFn(INLINE_ADD, 'add', {
+    className: '[wxs:m]',
+    kind: 'method',
+    signature: 'add(x)',
+    params: ['x'],
+    visibility: 'module-local',
+    exported: false
+  })
+  const onSubmit = mkFn(PAGE_ONSUBMIT, 'onSubmit', {
+    className: 'pages/order/order',
+    kind: 'method',
+    visibility: 'public',
+    exported: false
+  })
+  const format = mkFn(WXS_FORMAT, 'format', {
+    signature: 'format(value)',
+    params: ['value'],
+    visibility: 'module-local',
+    exported: false
+  })
+  return [
+    { fileId: WXML_FILE, path: WXML_FILE, language: 'wxml', functions: [entry, inlineAdd] },
+    { fileId: PAGE_FILE, path: PAGE_FILE, language: 'typescript', functions: [onSubmit] },
+    { fileId: WXS_FILE, path: WXS_FILE, language: 'wxs', functions: [format] }
+  ]
+}
+
+const MINI_GRAPH = buildGraph(miniProgramFiles())
+const MINI_INSIGHT = baseInsightOf(MINI_GRAPH)
+
+describe('微信小程序担保', () => {
+  it('WXML 合成 [wxml] 的事件 / 内联 WXS 调用边可作 call claim 证据', () => {
+    const entry = MINI_GRAPH.nodes.get(WXML_ENTRY)!
+    expect(MINI_GRAPH.nodes.get(INLINE_ADD)!.className).toBe('[wxs:m]')
+    const submitEdge = entry.calls.find((c) => c.calleeId === PAGE_ONSUBMIT)!
+    const inlineEdge = entry.calls.find((c) => c.calleeId === INLINE_ADD)!
+    expect(submitEdge.stepId).toBe(`${WXML_ENTRY}>onSubmit`)
+    expect(inlineEdge.stepId).toBe(`${WXML_ENTRY}>add`)
+
+    const res = validateOn(MINI_INSIGHT, MINI_GRAPH, 'categories', WXML_ENTRY, [
+      claim('call', WXML_ENTRY, [{ stepId: submitEdge.stepId }], {
+        object: PAGE_ONSUBMIT,
+        text: 'bindtap 事件调用页面 onSubmit。'
+      }),
+      claim('call', WXML_ENTRY, [{ stepId: inlineEdge.stepId }], {
+        object: INLINE_ADD,
+        text: 'mustache 调用内联 WXS 函数。'
+      })
+    ])
+    expect(res.status).toBe('declared')
+    expect(res.claims.map((c) => c.staticStatus)).toEqual(['pass', 'pass'])
+  })
+
+  it('WXS 文件与内联 WXS 函数复用 JS 证据包（category / visibility 可 declared）', () => {
+    const wxs = validateOn(MINI_INSIGHT, MINI_GRAPH, 'categories', WXS_FORMAT, [
+      claim('category', WXS_FORMAT, [{ functionId: WXS_FORMAT }], { object: 'utility' }),
+      claim('visibility', WXS_FORMAT, [{ functionId: WXS_FORMAT }], { object: 'module-local' })
+    ])
+    expect(wxs.status).toBe('declared')
+    const inline = validateOn(MINI_INSIGHT, MINI_GRAPH, 'categories', INLINE_ADD, [
+      claim('category', INLINE_ADD, [{ functionId: INLINE_ADD }], { object: 'utility' })
+    ])
+    expect(inline.status).toBe('declared')
+  })
+
+  it('[wxml] 没有函数体：block claim 不适用（无注释块 → 未证实）；WXSS/JSON 不在担保范围', () => {
+    expect(MINI_GRAPH.nodes.get(WXML_ENTRY)!.codeBlocks).toEqual([])
+    const res = validateOn(MINI_INSIGHT, MINI_GRAPH, 'categories', WXML_ENTRY, [
+      claim('block', WXML_ENTRY, [{ functionId: WXML_ENTRY }], { object: '0' })
+    ])
+    expect(res.status).toBe('unverified')
+    expect(res.reason).toContain('没有注释块')
+    expect(isGuaranteeLanguageFile('pages/order/order.wxss')).toBe(false)
   })
 })
 

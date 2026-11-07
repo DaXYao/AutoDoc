@@ -65,7 +65,8 @@ async function parseSnapshot(
   projectRel: string,
   source: string
 ): Promise<FileSnapshot> {
-  const parsed = await parser.parse(source)
+  // filePath 必须与 generateDocs 同口径：小程序/经典脚本的 className 依赖路径，缺失会让稳定 ID 分叉
+  const parsed = await parser.parse(source, { filePath: projectRel })
   return {
     fileId: projectRel,
     functions: parsedFunctionEntries(projectRel, parsed.functions)

@@ -209,8 +209,8 @@ function isParsedFileShape(value: unknown): value is ParsedFile {
 /** C++ 模块扩展名（include 目标与稳定 ID 判定共用；只含 C++ 源/头） */
 const CPP_MODULE_EXTENSIONS = ['hpp', 'h', 'hh', 'hxx', 'cpp', 'cc', 'cxx', 'inl']
 
-/** 去除 JS/TS/Vue 模块说明符扩展名（C++ include 走独立的 resolveCppModule） */
-const MODULE_EXTENSION_PATTERN = /\.(ts|tsx|js|jsx|mjs|cjs|vue)$/
+/** 去除 JS/TS/Vue/WXS 模块说明符扩展名（C++ include 走独立的 resolveCppModule） */
+const MODULE_EXTENSION_PATTERN = /\.(ts|tsx|js|jsx|mjs|cjs|vue|wxs)$/
 
 /** 去除 C++ include 说明符扩展名（`.hpp` → 基名，便于补全候选） */
 const CPP_EXTENSION_PATTERN = /\.(hpp|h|hh|hxx|cpp|cc|cxx|inl)$/
@@ -280,10 +280,12 @@ function resolveModule(
     `${base}.js`,
     `${base}.jsx`,
     `${base}.vue`,
+    `${base}.wxs`,
     `${base}/index.ts`,
     `${base}/index.tsx`,
     `${base}/index.js`,
-    `${base}/index.vue`
+    `${base}/index.vue`,
+    `${base}/index.wxs`
   ]
   for (const candidate of candidates) {
     if (knownPaths.has(candidate)) return candidate
@@ -1020,6 +1022,67 @@ interface GoCallContext {
   index: GoIndex
 }
 
+/**
+ * 单文件 WXML 调用解析上下文（仅 `[wxml]` 合成入口使用）：
+ * 模板里的事件 handler / mustache 调用没有 import 语句，只能靠同目录兄弟脚本与内联 wxs 定位。
+ */
+interface WxmlCallContext {
+  /** 兄弟脚本的页面/组件方法：函数名 → 候选（只含 className=兄弟脚本路径去扩展名的成员，不收顶层工具函数） */
+  siblingByName: Map<string, FunctionDoc[]>
+  /** 内联 wxs：module → 函数名 → 候选 */
+  inlineModules: Map<string, Map<string, FunctionDoc[]>>
+}
+
+/** WXML 兄弟脚本的扩展名查找顺序（与 resolveModule 的模块候选口径一致，.wxs 不算脚本） */
+const WXML_SIBLING_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx'] as const
+
+function stripExtension(relPath: string): string {
+  const dot = relPath.lastIndexOf('.')
+  const slash = relPath.lastIndexOf('/')
+  return dot > slash ? relPath.slice(0, dot) : relPath
+}
+
+/** 阶段二前按 WXML 文件预建跨文件解析上下文（非 WXML 文件不产生条目） */
+function buildWxmlCallContexts(
+  units: ParsedUnit[],
+  knownPaths: Set<string>
+): Map<string, WxmlCallContext> {
+  const unitByPath = new Map<string, ParsedUnit>()
+  for (const unit of units) unitByPath.set(unit.relPath, unit)
+  const contexts = new Map<string, WxmlCallContext>()
+  for (const unit of units) {
+    if (unit.language !== 'wxml') continue
+    const base = stripExtension(unit.relPath)
+    const siblingByName = new Map<string, FunctionDoc[]>()
+    for (const extension of WXML_SIBLING_EXTENSIONS) {
+      const siblingPath = `${base}.${extension}`
+      // 只看第一个存在的兄弟脚本：更高优先级的扩展名解析失败时也不回退到低优先级，
+      // 否则连到的会是与构建/运行时不同的那份脚本
+      if (!knownPaths.has(siblingPath)) continue
+      const expectedClassName = stripExtension(siblingPath)
+      for (const fn of unitByPath.get(siblingPath)?.functions ?? []) {
+        if (fn.className !== expectedClassName) continue
+        const list = siblingByName.get(fn.name) ?? []
+        list.push(fn)
+        siblingByName.set(fn.name, list)
+      }
+      break
+    }
+    const inlineModules = new Map<string, Map<string, FunctionDoc[]>>()
+    for (const fn of unit.functions) {
+      const match = fn.className === null ? null : /^\[wxs:(.+)\]$/.exec(fn.className)
+      if (!match) continue
+      const functions = inlineModules.get(match[1]) ?? new Map<string, FunctionDoc[]>()
+      const list = functions.get(fn.name) ?? []
+      list.push(fn)
+      functions.set(fn.name, list)
+      inlineModules.set(match[1], functions)
+    }
+    contexts.set(unit.relPath, { siblingByName, inlineModules })
+  }
+  return contexts
+}
+
 /** 包条目键：目录 + 包名组合，避免不同目录的同名包互相混淆 */
 function goPackageKey(dir: string, name: string): string {
   return `${dir}\u0000${name}`
@@ -1319,7 +1382,9 @@ function resolveGoCallee(
  * C++ 走严格模式：include 可见候选 → 限定作用域/同名回退，多候选一律不猜；
  * Python 走严格模式：本文件同名优先 → named import → namespace 成员 → 仅 Python 的全局唯一回退；
  * Java 走严格模式：类索引 + import/同包/import 前缀嵌套 → 类成员/构造器，多候选一律不猜；
- * Go 走严格模式：包/类型索引 + import/同包 → 包级函数/类型方法，内置函数与多候选一律不猜。
+ * Go 走严格模式：包/类型索引 + import/同包 → 包级函数/类型方法，内置函数与多候选一律不猜；
+ * WXML 合成入口跳过文件内同名（事件名与 wxml 内函数无词法关系），再按 import/namespace
+ * → 内联 wxs 模块 / 同目录兄弟脚本的页面/组件方法，多候选一律不猜。
  * 解析不到一律归「外部/未解析」，禁止强行猜测。
  */
 function buildCallEdges(
@@ -1334,7 +1399,8 @@ function buildCallEdges(
   language: string,
   cppContext: CppCallContext,
   javaContext: JavaCallContext,
-  goContext: GoCallContext | null
+  goContext: GoCallContext | null,
+  wxmlContext?: WxmlCallContext
 ): CallEdge[] {
   const edges: CallEdge[] = []
   const isGo = language === 'go'
@@ -1403,11 +1469,19 @@ function buildCallEdges(
         ? resolveGoCallee(fn, calledName, site.receiver, relPath, goContext)
         : null
     } else {
-      const candidates = byName.get(calledName) ?? []
-      resolved =
-        candidates.find((c) => fn.className !== null && c.className === fn.className) ??
-        candidates[0] ??
-        null
+      // WXML 合成入口：模板里的名字与「本文件函数」无词法关系（`onSubmit` 是页面方法，
+      // 不是 wxml 文件内的函数），走文件内同名会把事件名误连到内联 wxs 的同名函数
+      const isWxmlEntry =
+        language === 'wxml' && fn.className === null && fn.name === '[wxml]'
+      if (isWxmlEntry) {
+        resolved = null
+      } else {
+        const candidates = byName.get(calledName) ?? []
+        resolved =
+          candidates.find((c) => fn.className !== null && c.className === fn.className) ??
+          candidates[0] ??
+          null
+      }
       if (!resolved) {
         const imp = importByName.get(calledName)
         if (imp) {
@@ -1428,6 +1502,17 @@ function buildCallEdges(
             resolved = exportedIndex.get(targetFile)?.get(calledName) ?? null
           }
         }
+      }
+      // WXML：内联 wxs 的 `m.fn()`（`[wxs:m]` 类名）。外部 wxs 的 namespace import 已在上一步命中
+      if (!resolved && site.receiver && isWxmlEntry) {
+        const inline = wxmlContext?.inlineModules.get(site.receiver)
+        const matches = inline?.get(calledName) ?? []
+        resolved = matches.length === 1 ? matches[0] : null
+      }
+      // WXML：事件的 `bindtap="onSubmit"` → 同目录兄弟脚本的页面/组件方法，同名多候选不猜
+      if (!resolved && site.receiver === undefined && isWxmlEntry) {
+        const matches = wxmlContext?.siblingByName.get(calledName) ?? []
+        resolved = matches.length === 1 ? matches[0] : null
       }
     }
     // Go 按解析结果去重：同名不同目标（a.Close / b.Close）保留多条；
@@ -1565,7 +1650,7 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
       stats.reused++
     } else {
       try {
-        parsed = await parser.parse(source)
+        parsed = await parser.parse(source, { filePath: relPath })
       } catch (error) {
         // 容错：单文件解析失败降级跳过，不中断整体流程；不入缓存，下次仍会重试
         warn(`解析失败，跳过 ${relPath}：${String(error)}`)
@@ -1615,6 +1700,10 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
       const fn = unit.functions[index]
       if (!fn) return
       if (fn.exported) table.set(fn.name, fn)
+      // CommonJS 别名导出（`module.exports = { bar: baz }`）：bar → baz，已登记不覆盖
+      for (const exportName of p.exportNames ?? []) {
+        if (!table.has(exportName)) table.set(exportName, fn)
+      }
       // 默认导出：额外登记 'default' 键，供 `import foo from './x'` 的默认导入解析命中
       if (p.isDefaultExport && !table.has('default')) table.set('default', fn)
     })
@@ -1671,6 +1760,7 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
 
   const files: FileDoc[] = []
   const allChanges: DetectedChange[] = []
+  const wxmlContexts = buildWxmlCallContexts(units, knownPaths)
 
   // 同一次 generateDocs 的全部快照变更记录共用同一时间戳：C1 的 workspace 变更集按
   // 「date = 最新批次时间」识别批次，共享时间戳让批次边界严格确定，不受写入耗时影响
@@ -1724,7 +1814,8 @@ export async function generateDocs(input: GenerateInput): Promise<GenerateOutput
         unit.language,
         cppContext,
         javaContext,
-        goContext
+        goContext,
+        wxmlContexts.get(relPath)
       )
     })
 

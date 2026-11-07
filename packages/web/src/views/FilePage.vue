@@ -168,6 +168,13 @@ const sourceHref = computed(() =>
         </div>
       </section>
 
+      <p
+        v-if="view.file.functions.length === 0"
+        class="mb-4 text-xs text-[color:var(--ad-ink-3)]"
+      >
+        该文件没有可解析的函数（样式/配置或模板资源），可在上方查看文件级批注。
+      </p>
+
       <!-- 从上到下：业务接口 → 实现接口 → 辅助函数 → 待确认 -->
       <CategorySection
         v-for="category in ['business', 'implementation', 'utility', 'pending'] as FunctionCategory[]"

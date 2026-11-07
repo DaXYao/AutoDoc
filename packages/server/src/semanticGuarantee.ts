@@ -22,7 +22,7 @@ import type { ProjectGraph } from './graph.js'
 
 /**
  * SG1：语义担保的静态证据校验
- * （已接入语言：TypeScript / JavaScript / TSX / JSX、C#、Vue SFC、C++、Python、Java、Go）。
+ * （已接入语言：TypeScript / JavaScript / TSX / JSX、C#、Vue SFC、C++、Python、Java、Go、WXML、WXS）。
  *
  * 本模块只依赖 shared-types 与 graph.js（禁止 import agentSupply / supplyCache）：
  * - agentSupply.ts 负责供给文件的结构/长度校验并挂载 guarantee；
@@ -31,9 +31,13 @@ import type { ProjectGraph } from './graph.js'
  * - 本模块不调用 LLM（KEY 第二遍复核见 semanticVerifier.ts），也不做前端展示。
  *
  * 已接入语言：.ts / .tsx / .js / .jsx / .mjs / .cjs / .cs / .vue /
- * .cpp / .cc / .cxx / .h / .hpp / .hh / .hxx / .inl / .py / .java / .go。
+ * .cpp / .cc / .cxx / .h / .hpp / .hh / .hxx / .inl / .py / .java / .go /
+ * .wxml / .wxs（微信小程序）。
  * Vue 的 script 函数复用 TS/JS 证据（签名/参数/返回类型/可见性/装饰器/调用/注释块）；
  * 合成 `[template]` 入口的调用边来自模板事件，`block` claim 不适用（模板节点没有函数体）。
+ * WXML 与 Vue 模板同口径：`.wxml` 的合成 `[wxml]` 入口用事件绑定（`bind*` / `catch*` /
+ * `capture-*`）与 mustache 中 WXS 调用产生的调用边作 `call` 证据，`block` claim 不适用
+ * （没有真实函数体）；内联 WXS 函数（className=`[wxs:模块名]`）与 `.wxs` 文件整体复用 JS 证据包。
  * C++ 复用通用证据包：attributes → decorators、命名空间/类编码在 className、quoted include
  * 只连项目内文件（未解析调用没有 externalModule）。参数类型按 C++ 声明语法提取，参数名不算类型。
  * Python 复用通用证据包：decorators（`@app.route(...)` / `@staticmethod`）、类/嵌套作用域编码在
@@ -63,7 +67,9 @@ const GUARANTEE_LANGUAGE_EXTENSIONS = new Set([
   'inl',
   'py',
   'java',
-  'go'
+  'go',
+  'wxml',
+  'wxs'
 ])
 const UNSUPPORTED_LANGUAGE_REASON = '该语言尚未接入语义担保'
 const MIXED_PROJECT_REASON = '项目级混合对象包含尚未接入语义担保的文件'
@@ -140,7 +146,7 @@ export function fileIdOfFunctionId(functionId: string): string | null {
   return at > 0 ? functionId.slice(0, at) : null
 }
 
-/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C# + Vue SFC + C++ + Python + Java + Go，按文件扩展名判定） */
+/** 已接入语义担保的语言（TypeScript/JavaScript 家族 + C# + Vue SFC + C++ + Python + Java + Go + WXML/WXS，按文件扩展名判定） */
 export function isGuaranteeLanguageFile(fileId: string): boolean {
   const lower = fileId.toLowerCase()
   const dot = lower.lastIndexOf('.')

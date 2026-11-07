@@ -1,4 +1,4 @@
-import { readdir } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { join, relative, sep } from 'node:path'
 import picomatch from 'picomatch'
 
@@ -18,7 +18,13 @@ export const DEFAULT_INCLUDE = [
   '**/*.inl',
   '**/*.py',
   '**/*.java',
-  '**/*.go'
+  '**/*.go',
+  '**/*.wxml',
+  '**/*.wxss',
+  '**/*.wxs',
+  '**/app.json',
+  '**/project.config.json',
+  '**/sitemap.json'
 ]
 
 export const DEFAULT_EXCLUDE = [
@@ -65,5 +71,32 @@ export async function collectFiles(
   }
 
   await walk(rootDir)
+  await includeCompanionJson(rootDir, result, excludeMatchers)
   return result.sort()
+}
+
+/**
+ * 同名 JSON 补收：小程序页面的 `.wxml` 通常配同名 `.json`（页面配置），
+ * 不在 DEFAULT_INCLUDE 的三个固定文件名里。只补「已收集 wxml 的同名 json」，
+ * 且仍走 exclude——用户显式排除的 JSON 不因补收规则回流。
+ */
+async function includeCompanionJson(
+  rootDir: string,
+  result: string[],
+  excludeMatchers: Array<(path: string) => boolean>
+): Promise<void> {
+  const collected = new Set(result)
+  const wxmlPaths = result.filter((rel) => rel.endsWith('.wxml'))
+  for (const rel of wxmlPaths) {
+    const jsonRel = `${rel.slice(0, -'.wxml'.length)}.json`
+    if (collected.has(jsonRel)) continue
+    if (excludeMatchers.some((m) => m(jsonRel))) continue
+    try {
+      if (!(await stat(join(rootDir, jsonRel))).isFile()) continue
+    } catch {
+      continue
+    }
+    collected.add(jsonRel)
+    result.push(jsonRel)
+  }
 }
