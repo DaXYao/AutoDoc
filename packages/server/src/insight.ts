@@ -1437,7 +1437,11 @@ export interface RefreshOptions {
 }
 
 /** P2a：洞察九段的进度定义（key 必须是 AiPassKey，顺序与执行顺序一致） */
-const INSIGHT_STAGE_INPUTS: (RunStageInput & { key: AiPassKey })[] = [
+/**
+ * 洞察生成的进度阶段：九段 AI pass + SG2 语义担保。
+ * SG2 是九段之后仍会阻塞整轮刷新的第二遍 LLM 复核，必须显式可见，否则界面会在九段跑完后误以为卡住。
+ */
+export const INSIGHT_STAGE_INPUTS: RunStageInput[] = [
   { key: 'partition', label: '模块划分', singleCall: true },
   { key: 'coreJudgment', label: '核心判定', unit: '批' },
   { key: 'categories', label: '三分类', unit: '块' },
@@ -1446,7 +1450,8 @@ const INSIGHT_STAGE_INPUTS: (RunStageInput & { key: AiPassKey })[] = [
   { key: 'keySteps', label: '主干识别', unit: '块' },
   { key: 'externals', label: '外部库补全', unit: '批' },
   { key: 'blocks', label: '内部步骤', unit: '块' },
-  { key: 'flows', label: '脉络树', unit: '轮' }
+  { key: 'flows', label: '脉络树', unit: '轮' },
+  { key: 'guarantee', label: '语义担保', unit: '个对象' }
 ]
 
 export interface LoadInsightOptions {
@@ -2506,11 +2511,15 @@ export async function refreshInsightAI(
   // 双管线分离后本管线不含任何 Agent 断言，不再为 Agent 对象做第二遍复核。
   // 单 pass 局部重跑跳过整份复核：否则会为未点名的 pass 也补发 LLM 请求，违背「只重跑点名项」。
   if (!partialPassRun && !cancelled) {
+    progress?.stageStart('guarantee')
     try {
       const sg2 = await attachKeyGuarantees(insight, graph, cache, {
         force: opts.force === true,
-        prune: true
+        prune: true,
+        signal,
+        onProgress: (completed) => progress?.tick('guarantee', { completed })
       })
+      progress?.stageEnd('guarantee', isAborted() ? 'cancelled' : 'done')
       if (sg2.objects > 0) {
         console.log(
           `[autodoc] SG2 语义担保：对象 ${sg2.objects}，verified ${sg2.verified}/unverified ${sg2.unverified}，` +
@@ -2518,10 +2527,13 @@ export async function refreshInsightAI(
         )
       }
     } catch (e) {
+      progress?.stageEnd('guarantee', isAborted() ? 'cancelled' : 'failed')
       console.warn(
         `[autodoc] SG2 语义担保失败（已忽略，不影响洞察生成）：${e instanceof Error ? e.message : String(e)}`
       )
     }
+  } else {
+    progress?.stageEnd('guarantee', cancelled ? 'cancelled' : 'skipped')
   }
   // I2：chunk 增量统计入日志与返回值；I3：同时记入 service，供 /api/insight 家族响应附带下发
   console.log(

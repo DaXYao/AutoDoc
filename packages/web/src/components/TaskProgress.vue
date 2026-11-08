@@ -15,7 +15,7 @@ import {
 
 /**
  * 长任务进度展示：inline=洞察页进度卡，compact=顶栏小指示。
- * nowMs 由父级秒表传入，组件内不起定时器；完成后默认收成一行摘要，点击展开九段明细。
+ * nowMs 由父级秒表传入，组件内不起定时器；完成后默认收成一行摘要，点击展开阶段明细。
  */
 const props = defineProps<{
   task: TaskProgress
@@ -143,7 +143,7 @@ function stageTextClass(stage: TaskStageProgress): string {
       ></span>
       <span class="min-w-0 flex-1 text-xs text-[color:var(--ad-ink-2)]">{{ summary }}</span>
       <span class="shrink-0 text-xs text-[color:var(--ad-ink-3)]">
-        {{ expanded ? '收起明细' : '查看九段明细' }}
+        {{ expanded ? '收起明细' : '查看阶段明细' }}
       </span>
     </button>
     <template v-else>

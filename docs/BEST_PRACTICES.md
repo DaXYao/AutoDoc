@@ -8,7 +8,7 @@
 - 记录标准：这个做法确实解决了问题、且以后可能再次用到。
 
 ## 经验索引（快速扫描）
-- [ ] **长任务实时进度（旁路 registry + 常驻轮询 + 取消）**：服务端内存 registry 维护 current/last，读接口不要求活动项目、写接口矩阵化错误码，409 必须读 body 区分 no-active 与 run-in-progress；埋点整体可选、取消贯通到实际 IO 并以 200+cancelled 收口；前端首拉后常驻轮询、按 runId 去重通知，纯函数吃快照 + nowMs，壳层与页面用带退订的订阅；新增配置项三处同步（shared-types → core configSchema → /api/meta）（见 2026-11-07 条）。
+- [ ] **长任务实时进度（旁路 registry + 常驻轮询 + 取消）**：服务端内存 registry 维护 current/last，读接口不要求活动项目、写接口矩阵化错误码，409 必须读 body 区分 no-active 与 run-in-progress；埋点整体可选、取消贯通到实际 IO 并以 200+cancelled 收口；前端首拉后常驻轮询、按 runId 去重通知，纯函数吃快照 + nowMs，壳层与页面用带退订的订阅；新增配置项三处同步（shared-types → core configSchema → /api/meta）。**阶段数必须按「所有会阻塞返回的步骤」建模**：主流程之后的后置复核（如 SG2）也要有独立阶段、按对象 tick、接取消与单次超时，否则阶段全绿后界面仍在「生成中」（见 2026-11-07 / 2026-11-08 条）。
 - [ ] **变更影响用链路视角而非上下游分区**：受影响链路=path 直接命中 ∪ path 函数沿 calleeIds 可达的变更函数；侧向子图先求「能到达变更」的相关集再建树，环守卫 + 共享节点 repeated 叶子；变更节点自身也要作为侧向起点（否则其下游的另一个变更函数会漏出链路）；UI 以链路树为主、未入链路变更函数进兜底区（见 2026-11-06 条）。
 - [ ] **双管线独立装配的测试写法**：夹具补 `pipeline` + 断言显式 `source`（`key` 默认 / `agent` 显式）+ 供给叠加用 `agentBaselineOnly` 底座再调 `applyAgentSemantics`；每条用例同时验「KEY 自有结果」与「Agent 自有结果」并互不覆盖、`aiSource` 无 mixed、`force` 不清 `supply:*`（见 2026-11-05 条）。
 - [ ] **一键 Agent 任务包**：本地任务目录（短提示 + 完整索引 + answers/）+ partition 先应用得到新 basis + 符号引用（模块名 / 链路 symbolicKey / 函数稳定 ID）归一 + 复用既有 scan/merge + repair.md + 完成标记；任务过期要同时看图谱与函数体指纹（见 2026-10-22 条）。

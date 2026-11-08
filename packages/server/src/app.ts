@@ -18,6 +18,7 @@ import {
 } from './progress.js'
 import {
   compatForCurrentPass,
+  INSIGHT_STAGE_INPUTS,
   loadInsight,
   refreshInsightAI,
   type InsightBundle,
@@ -138,19 +139,6 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   const { manager } = options
   const readOnly = options.readOnly ?? false
 
-  /** P2a：洞察九段进度定义（key 必须与 AiPassKey 一致，前端按段渲染） */
-  const INSIGHT_STAGES: (RunStageInput & { key: AiPassKey })[] = [
-    { key: 'partition', label: '模块划分', singleCall: true },
-    { key: 'coreJudgment', label: '核心判定', unit: '批' },
-    { key: 'categories', label: '三分类', unit: '块' },
-    { key: 'coreRoles', label: '核心角色', singleCall: true },
-    { key: 'narratives', label: '链路叙事', unit: '批' },
-    { key: 'keySteps', label: '主干识别', unit: '块' },
-    { key: 'externals', label: '外部库补全', unit: '批' },
-    { key: 'blocks', label: '内部步骤', unit: '块' },
-    { key: 'flows', label: '脉络树', unit: '轮' }
-  ]
-
   /**
    * P2a：洞察生成的统一入口——同项目同参数复用同一 promise（防重复点击），
    * 不同参数/其它任务在跑时返回 conflict 供路由转 409。
@@ -172,7 +160,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         const run = beginRun({
           kind: 'insight',
           projectId,
-          stages: INSIGHT_STAGES,
+          stages: INSIGHT_STAGE_INPUTS,
           cancelable: true
         })
         try {

@@ -252,7 +252,8 @@ const STAGE_KEYS = [
   'keySteps',
   'externals',
   'blocks',
-  'flows'
+  'flows',
+  'guarantee'
 ]
 
 describe('refreshInsightAI：九段进度埋点', () => {
@@ -283,11 +284,14 @@ describe('refreshInsightAI：九段进度埋点', () => {
     expect(stage('externals')).toMatchObject({ state: 'done', unit: '批' })
     expect(stage('blocks')).toMatchObject({ state: 'done', unit: '块' })
     expect(stage('flows')).toMatchObject({ state: 'done', unit: '轮' })
+    // 九段之后的 SG2 必须也在进度里（否则界面会误以为卡在已完成的九段上）
+    expect(stage('guarantee')).toMatchObject({ state: 'done', unit: '个对象' })
 
     expect(stage('categories').completed ?? 0).toBeGreaterThan(0)
     expect(stage('keySteps').completed ?? 0).toBeGreaterThan(0)
     expect(stage('blocks').completed ?? 0).toBeGreaterThan(0)
     expect(stage('flows').completed ?? 0).toBeGreaterThan(0)
+    expect(stage('guarantee').completed ?? 0).toBeGreaterThan(0)
     service.storage.close()
   })
 
@@ -331,6 +335,36 @@ describe('refreshInsightAI：九段进度埋点', () => {
     for (const key of ['coreRoles', 'narratives', 'keySteps', 'externals', 'blocks', 'flows']) {
       expect(stage(key).state).toBe('cancelled')
     }
+    // SG2 尚未开始即被取消，同样收口为 cancelled
+    expect(stage('guarantee').state).toBe('cancelled')
+    service.storage.close()
+  })
+
+  it('SG2 语义担保：按对象推进进度，期间取消可停止并发请求', async () => {
+    let guaranteeCalls = 0
+    vi.mocked(deepseekChat).mockImplementation(async (messages) => {
+      const user = messages[messages.length - 1].content
+      if (user.includes('【SG2 语义担保复核】')) {
+        guaranteeCalls++
+        // 首个对象复核时取消：之后不得再发担保请求（含同对象的重试）
+        if (guaranteeCalls === 1) requestCancel('p1')
+        return reply('{}')
+      }
+      return reply(routerFake(messages))
+    })
+    const service = await makeService(freshDir())
+    const run = beginRun({ kind: 'insight', projectId: 'p1', stages: [], cancelable: true })
+    const bundle = await refreshInsightAI(service, { force: true, progress: run })
+    run.finish({ cancelled: bundle.cancelled === true })
+
+    expect(bundle.cancelled).toBe(true)
+    expect(guaranteeCalls).toBe(1)
+    expect(service.storage.listInsightSnapshots()).toHaveLength(0)
+
+    const last = getProjectProgress('p1').last!
+    const stage = (key: string) => last.stages.find((s) => s.key === key)!
+    expect(stage('guarantee').state).toBe('cancelled')
+    expect(stage('guarantee').completed ?? 0).toBe(1)
     service.storage.close()
   })
 })

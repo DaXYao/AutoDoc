@@ -46,6 +46,10 @@ const KEY_GUARANTEE_PROMPT_VERSION = 3
 const KEY_GUARANTEE_MAX_TOKENS = 12000
 const KEY_GUARANTEE_TEMPERATURE = 0.1
 const KEY_GUARANTEE_PARSE_RETRIES = 2
+/** 单对象复核的 LLM 请求超时：挂死请求必须失败降级，不能无限拖住整轮刷新 */
+const KEY_GUARANTEE_CALL_TIMEOUT_MS = 120_000
+/** SG2 整段复核时间预算：超出后剩余对象按未证实处理，避免后置阶段无限拉长「生成中」（可随时取消） */
+const KEY_GUARANTEE_PHASE_BUDGET_MS = 10 * 60_000
 /** 低于该置信度视为不可靠（LLM 自报 confidence） */
 const MIN_INTENT_CONFIDENCE = 0.6
 /** SG1 校验器单对象 claim 上限；静态 + 意图总数超过即无法完整担保（不截断后放行） */
@@ -1713,6 +1717,37 @@ export interface VerifyIntentOptions {
   /** false = 只读缓存、绝不发网络请求（读取路径复用） */
   llm?: boolean
   prune?: boolean
+  /** 取消信号：每个对象前检查，并透传给 LLM 请求 */
+  signal?: AbortSignal
+  /** 复核进度：每处理完一个意图对象（缓存命中/复核/失败都算）回调 */
+  onProgress?: (completed: number, total: number) => void
+}
+
+/**
+ * 单次 LLM 调用的独立超时：外部 signal 取消与超时都 abort 请求，
+ * 用 timedOut 区分「网络挂死」与「用户取消」，前者不重试并继续下一个对象。
+ */
+function createCallDeadline(
+  external: AbortSignal | undefined,
+  ms: number
+): { signal: AbortSignal; timedOut: () => boolean; dispose: () => void } {
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, ms)
+  const onAbort = (): void => controller.abort()
+  if (external?.aborted) controller.abort()
+  else external?.addEventListener('abort', onAbort, { once: true })
+  return {
+    signal: controller.signal,
+    timedOut: () => timedOut,
+    dispose: () => {
+      clearTimeout(timer)
+      external?.removeEventListener('abort', onAbort)
+    }
+  }
 }
 
 function evidenceKeyOf(e: SemanticEvidence): string {
@@ -1983,62 +2018,92 @@ export async function verifyIntentObjects(
     ...passOrder.filter((p) => byPass.has(p)),
     ...[...byPass.keys()].filter((p) => !passOrder.includes(p)).sort(compareCodePoints)
   ]
+  const total = objects.length
+  let processed = 0
+  // 预算从进入复核阶段开始算：缓存命中也计入进度，但几乎不耗时间
+  const phaseDeadline = Date.now() + KEY_GUARANTEE_PHASE_BUDGET_MS
   for (const pass of passes) {
     const list = byPass.get(pass)
     if (!list) continue
     list.sort((a, b) => compareCodePoints(a.objectId, b.objectId))
     for (const obj of list) {
-      const key = intentCacheKey(obj)
-      const id = `${obj.pass}:${obj.objectId}`
-      if (!opts.force) {
-        const hit = cache.getGlobal<unknown>(key)
-        const cachedReview = hit === undefined ? null : readIntentReview(hit, obj)
-        if (cachedReview) {
-          out.set(id, { ok: true, review: cachedReview, cached: true })
+      if (opts.signal?.aborted) return out
+      if (Date.now() > phaseDeadline) {
+        console.warn(
+          `[autodoc] SG2 复核超出时间预算（${KEY_GUARANTEE_PHASE_BUDGET_MS / 1000}s），` +
+            `剩余 ${total - processed} 个对象按未证实处理`
+        )
+        return out
+      }
+      try {
+        const key = intentCacheKey(obj)
+        const id = `${obj.pass}:${obj.objectId}`
+        if (!opts.force) {
+          const hit = cache.getGlobal<unknown>(key)
+          const cachedReview = hit === undefined ? null : readIntentReview(hit, obj)
+          if (cachedReview) {
+            out.set(id, { ok: true, review: cachedReview, cached: true })
+            continue
+          }
+          // 写路径：形状损坏的旧缓存删除，避免每次刷新都按未命中重试同一坏值。
+          // 读取路径（llm=false）只当未命中，不删除（读写分离）。
+          if (hit !== undefined && opts.llm !== false) cache.deleteGlobal(key)
+        }
+        if (opts.llm === false) {
+          out.set(id, { ok: false, reason: '复核缓存未命中（读取路径不调用 LLM）' })
           continue
         }
-        // 写路径：形状损坏的旧缓存删除，避免每次刷新都按未命中重试同一坏值。
-        // 读取路径（llm=false）只当未命中，不删除（读写分离）。
-        if (hit !== undefined && opts.llm !== false) cache.deleteGlobal(key)
-      }
-      if (opts.llm === false) {
-        out.set(id, { ok: false, reason: '复核缓存未命中（读取路径不调用 LLM）' })
-        continue
-      }
-      let done = false
-      let lastReason = 'LLM 复核失败'
-      for (let attempt = 1; attempt <= KEY_GUARANTEE_PARSE_RETRIES && !done; attempt++) {
-        try {
-          const reply = asChatReply(
-            await deepseekChat([systemMessage(), { role: 'user', content: userMessage(obj) }], {
-              maxTokens: KEY_GUARANTEE_MAX_TOKENS,
-              temperature: KEY_GUARANTEE_TEMPERATURE
-            })
-          )
-          if (!reply || typeof reply.content !== 'string') {
-            lastReason = 'LLM 返回缺少 content'
-            continue
+        let done = false
+        let lastReason = 'LLM 复核失败'
+        for (let attempt = 1; attempt <= KEY_GUARANTEE_PARSE_RETRIES && !done; attempt++) {
+          // 取消后不重试：同一对象的剩余尝试也不得再发请求
+          if (opts.signal?.aborted) return out
+          const call = createCallDeadline(opts.signal, KEY_GUARANTEE_CALL_TIMEOUT_MS)
+          try {
+            const reply = asChatReply(
+              await deepseekChat([systemMessage(), { role: 'user', content: userMessage(obj) }], {
+                maxTokens: KEY_GUARANTEE_MAX_TOKENS,
+                temperature: KEY_GUARANTEE_TEMPERATURE,
+                signal: call.signal
+              })
+            )
+            if (!reply || typeof reply.content !== 'string') {
+              lastReason = 'LLM 返回缺少 content'
+              continue
+            }
+            if (reply.truncated || reply.finishReason === 'length') {
+              lastReason = 'LLM 输出被截断（finish_reason=length）'
+              continue
+            }
+            const parsed = extractJson<unknown>(reply.content)
+            const read = readIntentReviewDetailed(parsed, obj)
+            if (!read.ok) {
+              lastReason = read.reason
+              continue
+            }
+            cache.setGlobal(key, reviewForCache(read.review))
+            out.set(id, { ok: true, review: read.review, cached: false })
+            done = true
+          } catch (e) {
+            lastReason = e instanceof Error ? e.message : String(e)
+            // 用户取消：整段复核立即收口，剩余对象不再发请求
+            if (opts.signal?.aborted) return out
+            // 请求挂死：不重试，避免同一对象再拖 2 个超时周期
+            if (call.timedOut()) {
+              lastReason = 'LLM 复核超时'
+              break
+            }
+          } finally {
+            call.dispose()
           }
-          if (reply.truncated || reply.finishReason === 'length') {
-            lastReason = 'LLM 输出被截断（finish_reason=length）'
-            continue
-          }
-          const parsed = extractJson<unknown>(reply.content)
-          const read = readIntentReviewDetailed(parsed, obj)
-          if (!read.ok) {
-            lastReason = read.reason
-            continue
-          }
-          cache.setGlobal(key, reviewForCache(read.review))
-          out.set(id, { ok: true, review: read.review, cached: false })
-          done = true
-        } catch (e) {
-          lastReason = e instanceof Error ? e.message : String(e)
         }
-      }
-      if (!done) {
-        console.warn(`[autodoc] SG2 语义复核失败（${id}）：${lastReason}`)
-        out.set(id, { ok: false, reason: lastReason })
+        if (!done) {
+          console.warn(`[autodoc] SG2 语义复核失败（${id}）：${lastReason}`)
+          out.set(id, { ok: false, reason: lastReason })
+        }
+      } finally {
+        processed++
+        opts.onProgress?.(processed, total)
       }
     }
   }
